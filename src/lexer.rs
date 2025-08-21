@@ -1,15 +1,15 @@
 use std::{fs::File, str::Chars, iter::Peekable};
 use memmap2::Mmap;
 
-use crate::tokens::{Token, TokenType, KEYWORDS};
+use crate::tokens::{Token, TokenType, get_keyword};
 
 
 
 pub fn tokenize_file(path: &str) -> Result<Vec<Token>, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
-    // Memory-map the file. (unsafe because it could be modified by another process)
+    // memory-map the file. (unsafe because it could be modified by another process)
     let mmap = unsafe { Mmap::map(&file)? };
-    // Treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
+    // treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
     let source_code = std::str::from_utf8(&mmap)?;
 
     let tokens = tokenize_code(source_code);
@@ -159,8 +159,12 @@ impl<'a> Lexer<'a> {
                         if self.match_next('=') { TokenType::BitOrEqual } else { TokenType::BitOr }
                     } else if self.match_next('^') {
                         if self.match_next('=') { TokenType::BitXorEqual } else { TokenType::BitXor }
+                    } else if self.match_next('>') {
+                        if self.match_next('=') { TokenType::RightShiftEqual } else { TokenType::RightShift }
+                    } else if self.match_next('<') {
+                        if self.match_next('=') { TokenType::LeftShiftEqual } else { TokenType::LeftShift }
                     } else {
-                        self.add_error("Unexpected character '~'. Did you mean '~!', '~&', '~|', or '~^'?".to_string());
+                        self.add_error("Unexpected character '~'. Did you mean '~!' (Bitwise Not)?".to_string());
                         continue;
                     };
                     self.add_token(token);
@@ -189,10 +193,7 @@ impl<'a> Lexer<'a> {
                     self.add_token(token);
                 },
                 '>' => {
-                    let token = TokenType::Greater;
-                    // let token = if self.match_next('>') {
-                    //     if self.match_next('=') { TokenType::RightShiftEqual } else { TokenType::RightShift }
-                    // } else if self.match_next('=') { TokenType::GreaterEqual } else { TokenType::Greater };
+                    let token = if self.match_next('=') { TokenType::GreaterEqual } else { TokenType::Greater };
                     self.add_token(token);
                 },
 
@@ -296,7 +297,7 @@ impl<'a> Lexer<'a> {
         }
         
         // Check if the identifier is a reserved keyword
-        if let Some(token_type) = KEYWORDS.get(&text) {
+        if let Some(token_type) = get_keyword(&text) {
             self.add_token(token_type.clone());
         }
         else { self.add_token(TokenType::Identifier(text)); }

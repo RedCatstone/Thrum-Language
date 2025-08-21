@@ -7,6 +7,8 @@ mod ast_structure;
 mod parser;
 mod type_checker;
 
+mod pretty_printing;
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -45,10 +47,10 @@ fn main() {
         for error in type_checker.errors {
             println!("{}", error); // <-- Print errors nicely
         }
-        process::exit(1);
+        // process::exit(1);
     } else {
         println!("--- Type Check Passed ---");
         // You can now inspect the AST with types filled in
-        println!("--- Typed AST ---\n{:#?}", program);
     }
+    println!("--- Typed AST ---\n{:#?}", program);
 }

@@ -1,6 +1,6 @@
-use crate::{ast_structure::*, type_checker};
+use crate::ast_structure::*;
 use crate::tokens::{Token, TokenType};
-use crate::type_checker::Type;
+use crate::type_checker::TypeKind;
 
 // The precedence levels for our operators. This is crucial.
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -44,7 +44,7 @@ impl Parser {
 
     fn peek(&self) -> &Token {
         self.tokens.get(self.position).unwrap_or(&Token {
-            token_type: TokenType::Eof, line: usize::MAX,
+            token_type: TokenType::EndOfFile, line: usize::MAX,
         })
     }
 
@@ -64,7 +64,7 @@ impl Parser {
             self.advance();
             Ok(cloned_token)
         } else {
-            Err(format!("{} Found {:?} instead.", error_msg, self.peek()))
+            Err(format!("{} Found '{}' instead.", error_msg, self.peek()))
         }
     }
     fn expect_identifier(&mut self, error_msg: &str) -> Result<String, String> {
@@ -85,28 +85,28 @@ impl Parser {
     }
 
     fn at_end(&self) -> bool {
-        self.peek().token_type == TokenType::Eof
+        self.peek().token_type == TokenType::EndOfFile
     }
 
-    pub fn parse_program(&mut self) -> Vec<Expression> {
-        let block_expression = self.parse_block_expression(TokenType::Eof);
-        match block_expression {
-            Expression::Block { body, typ: _ } => body,
+    pub fn parse_program(&mut self) -> Vec<TypedExpression> {
+        let block_expression = self.parse_block_expression(TokenType::EndOfFile);
+        match block_expression.expression {
+            Expression::Block(body) => body,
             _ => unreachable!()
         }
     }
 
-    fn parse_block_expression(&mut self, end_token: TokenType) -> Expression {
+    fn parse_block_expression(&mut self, end_token: TokenType) -> TypedExpression {
         // '{' already consumed.
         let mut expression_body = Vec::new();
-        while self.peek().token_type != TokenType::Eof && self.peek().token_type != end_token {
+        while self.peek().token_type != TokenType::EndOfFile && self.peek().token_type != end_token {
             match self.parse_expression(Precedence::Lowest) {
                 Ok(expr) => {
                     expression_body.push(expr);
                     if !self.optional_token(TokenType::Semicolon) {
                         // no semicolon -> next expression can't be on the same line.
                         if self.peek_is_on_same_line() {
-                            self.errors.push(format!("2 seperate expressions can't be on the same line without a ';'. Found {:?}", self.peek()))
+                            self.errors.push(format!("2 seperate expressions can't be on the same line without a ';'. Found '{}'.", self.peek()))
                         }
                     }
                 }
@@ -116,13 +116,13 @@ impl Parser {
                 }
             }
         }
-        if let Err(msg) = self.expect_token(end_token.clone(), &format!("Expected {:?} to close the block.", end_token)) {
+        if let Err(msg) = self.expect_token(end_token.clone(), &format!("Expected '{}' to close the block.", end_token)) {
             self.errors.push(msg);
         }
-        Expression::Block { body: expression_body, typ: Type::unknown() }
+        Expression::Block(expression_body).into()
     }
 
-    fn parse_expression(&mut self, precedence: Precedence) -> Result<Expression, String> {
+    fn parse_expression(&mut self, precedence: Precedence) -> Result<TypedExpression, String> {
         // could be number, identifier, '-', 'let', ...
         let mut left_expr = self.parse_prefix()?;
 
@@ -154,7 +154,10 @@ impl Parser {
                     if operator == TokenType::StarStar { operator_precedence = Precedence::Product }  // 1 level lower for right associativity
 
                     let right_expr = self.parse_expression(operator_precedence)?;
-                    Expression::Infix { left: Box::new(left_expr), operator, right: Box::new(right_expr), typ: Type::unknown() }
+                    if operator_precedence == Precedence::Assign {
+                        Expression::Assign { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into()
+                    }
+                    else { Expression::Infix { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into() }
                 }
             }
             // loop again to see if there's another operator to the right
@@ -163,15 +166,14 @@ impl Parser {
     }
 
 
-    fn parse_prefix(&mut self) -> Result<Expression, String> {
+    fn parse_prefix(&mut self) -> Result<TypedExpression, String> {
         let token_type = self.peek().token_type.clone();
         self.advance();
         match token_type {
-            TokenType::Identifier(name) => Ok(Expression::Identifier(name)),
-            TokenType::Number(val) => Ok(Expression::Literal(LiteralValue::Number(val))),
-            TokenType::StringFrag(val) => Ok(Expression::Literal(LiteralValue::String(val))),
-            TokenType::Bool(val) => Ok(Expression::Literal(LiteralValue::Bool(val))),
-            TokenType::Null => Ok(Expression::Literal(LiteralValue::Null)),
+            TokenType::Identifier(name) => Ok(Expression::Identifier(name).into()),
+            TokenType::Number(val) => Ok(Expression::Literal(LiteralValue::Number(val)).into()),
+            TokenType::StringFrag(val) => Ok(Expression::Literal(LiteralValue::String(val)).into()),
+            TokenType::Bool(val) => Ok(Expression::Literal(LiteralValue::Bool(val)).into()),
 
             // Prefix operators
             TokenType::Minus | TokenType::Not | TokenType::BitNot | TokenType::DotDotDot => self.parse_prefix_operator(token_type),
@@ -185,19 +187,19 @@ impl Parser {
             TokenType::Match => self.parse_match_expression(),
             TokenType::Fn => self.parse_fn_definition(),
 
-            _ => Err(format!("Expected an expression. Found {:?} instead", token_type)),
+            _ => Err(format!("Expected an expression. Found '{}' instead", token_type)),
         }
     }
 
-    fn parse_prefix_operator(&mut self, operator: TokenType) -> Result<Expression, String> {
+    fn parse_prefix_operator(&mut self, operator: TokenType) -> Result<TypedExpression, String> {
         // ('-', '!', '~!', '...') already consumed.
         let right = self.parse_expression(Precedence::Prefix)?;
-        Ok(Expression::Prefix { operator, right: Box::new(right), typ: Type::unknown() })
+        Ok(Expression::Prefix { operator, right: Box::new(right) }.into())
     }
 
 
-    fn parse_caret_expression(&mut self) -> Result<Expression, String> {
-        Ok(Expression::Identifier(format!("_pipe_{}", self.pipe_operators_active)))
+    fn parse_caret_expression(&mut self) -> Result<TypedExpression, String> {
+        Ok(Expression::Identifier(format!("_pipe_{}", self.pipe_operators_active)).into())
     }
 
 
@@ -214,62 +216,59 @@ impl Parser {
     }
 
 
-    fn parse_function_operator(&mut self, params_expr: Expression) -> Result<Expression, String> {
+    fn parse_function_operator(&mut self, params_expr: TypedExpression) -> Result<TypedExpression, String> {
         // '->' already consumed.
         let params = self.validate_and_build_function_params(params_expr)?;
         let body = self.parse_expression(Precedence::Lowest)?;
-        Ok(Expression::Fn { params, body: Box::new(body), typ: Type::unknown() })
+        Ok(Expression::Fn { params, body: Box::new(body), return_value: None }.into())
     }
 
-    fn parse_function_call_operator(&mut self, left_expr: Expression) -> Result<Expression, String> {
+    fn parse_function_call_operator(&mut self, left_expr: TypedExpression) -> Result<TypedExpression, String> {
         // '(' already consumed.
         let params = self.parse_expression_list(TokenType::RightParen, "Expected ')' to close argument list.")?;
-        Ok(Expression::Call { function: Box::new(left_expr), params, typ: Type::unknown() })
+        Ok(Expression::FnCall { function: Box::new(left_expr), arguments: params }.into())
     }
 
-    fn parse_index_operator(&mut self, left_expr: Expression) -> Result<Expression, String> {
+    fn parse_index_operator(&mut self, left_expr: TypedExpression) -> Result<TypedExpression, String> {
         // '[' already consumed.
         let right_index_expr = self.parse_expression(Precedence::Lowest)?;
         self.expect_token(TokenType::RightBracket, "Expected ']' to close index expression.")?;
-        Ok(Expression::Index { left: Box::new(left_expr), index: Box::new(right_index_expr), typ: Type::unknown() })
+        Ok(Expression::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) }.into())
     }
 
-    fn parse_curly_new_operator(&mut self, left_expr: Expression) -> Result<Expression, String> {
+    fn parse_curly_new_operator(&mut self, left_expr: TypedExpression) -> Result<TypedExpression, String> {
         // '{' already consumed
-        let name = match left_expr {
+        let name = match left_expr.expression {
             Expression::Identifier(name) => name,
             _ => return Err(format!("Curly new is only allowed after an identifier"))
         };
         let right_params_expr = self.parse_expression_list(TokenType::RightBrace, "Expected '}' to close curly new expression.")?;
-        Ok(Expression::CurlyNew { name, params: right_params_expr, typ: Type::unknown() })
+        Ok(Expression::CurlyNew { name, params: right_params_expr }.into())
     }
 
-    fn parse_type_annotation_operator(&mut self, left_expr: Expression) -> Result<Expression, String> {
-        match left_expr {
+    fn parse_type_annotation_operator(&mut self, left_expr: TypedExpression) -> Result<TypedExpression, String> {
+        match left_expr.expression {
             Expression::Identifier(name) => {
                 let right_type_expr = self.parse_type_expression()?;
-                Ok(Expression::ParserTempPattern(ExpressionPattern::NameAndType { name, typ: right_type_expr }))
+                Ok(Expression::ParserTempPattern(ExpressionPattern::NameAndType { name, typ: right_type_expr }).into())
             }
             _ => return Err(format!("Type annotations are only allowed after identifiers. Found after: {:?}", left_expr)),
         }
     }
 
-    fn parse_pipe_greater_operator(&mut self, left_expr: Expression) -> Result<Expression, String> {
+    fn parse_pipe_greater_operator(&mut self, left_expr: TypedExpression) -> Result<TypedExpression, String> {
         self.pipe_operators_active += 1;
         let right_expr_result = self.parse_expression(Precedence::Lowest);
         let pipe_identifier_name = format!("_pipe_{}", self.pipe_operators_active);
         self.pipe_operators_active -= 1;
 
-        Ok(Expression::Block {
-            body: vec![
-                Expression::Let {
-                    pattern: ExpressionPattern::NameAndType { name: pipe_identifier_name, typ: Type::unknown() },
-                    value: Box::new(left_expr)
-                },
-                right_expr_result?
-            ],
-            typ: Type::unknown()
-        })
+        Ok(Expression::Block(vec![
+            Expression::Let {
+                pattern: ExpressionPattern::NameAndType { name: pipe_identifier_name, typ: TypeKind::ParserUnknown },
+                value: Box::new(left_expr)
+            }.into(),
+            right_expr_result?
+        ]).into())
     }
 
 
@@ -279,7 +278,7 @@ impl Parser {
 
 
 
-    fn parse_let_expression(&mut self) -> Result<Expression, String> {
+    fn parse_let_expression(&mut self) -> Result<TypedExpression, String> {
         // 'let' already consumed.
         let pattern = self.parse_pattern()?;
 
@@ -289,12 +288,12 @@ impl Parser {
         // expression
         let value = self.parse_expression(Precedence::Lowest)?;
 
-        Ok(Expression::Let { pattern: pattern, value: Box::new(value) })
+        Ok(Expression::Let { pattern: pattern, value: Box::new(value) }.into())
     }
 
 
 
-    fn parse_type_expression(&mut self) -> Result<Type, String> {
+    fn parse_type_expression(&mut self) -> Result<TypeKind, String> {
         // 'str' or 'arr<T>'.
         let str_type = if self.optional_token(TokenType::Null) { String::from("null") }
         else { self.expect_identifier("Expected a type name.")? };
@@ -303,15 +302,17 @@ impl Parser {
         let inner_types = if self.optional_token(TokenType::Less) { self.parse_type_list()? }
         else { Vec::new() };
 
-        let mut typ = type_checker::Type::from_str(&str_type, inner_types);
+        let mut typ = TypeKind::from_str(&str_type, inner_types);
 
-        // '?' nullable
-        if self.optional_token(TokenType::Quest) { typ = typ.to_nullable(); }
+        // '?' Optional wrapper
+        while self.optional_token(TokenType::Quest) {
+            typ = TypeKind::Struct { name: "Optional".to_string(), inner_types: vec![typ] }
+        }
 
         Ok(typ)
     }
 
-    fn parse_type_list(&mut self) -> Result<Vec<Type>, String> {
+    fn parse_type_list(&mut self) -> Result<Vec<TypeKind>, String> {
         let mut types = Vec::new();
         
         while self.peek().token_type != TokenType::Greater {
@@ -322,9 +323,9 @@ impl Parser {
         Ok(types)
     }
 
-    fn validate_and_build_function_params(&self, expr: Expression) -> Result<Vec<ExpressionPattern>, String> {
+    fn validate_and_build_function_params(&self, expr: TypedExpression) -> Result<Vec<ExpressionPattern>, String> {
         // this function takes what was to the left of `->` and validates it.
-        let params = match expr {
+        let params = match expr.expression {
             Expression::Tuple(body) => body,
             Expression::Identifier(_) | Expression::ParserTempPattern(_) | Expression::Array(_) => vec![expr],
             _ => return Err(format!("Invalid parameter list for function. Found {:?}.", expr)),
@@ -337,12 +338,12 @@ impl Parser {
             .collect()
     }
 
-    fn validate_single_param_pattern(&self, param_expr: Expression) -> Result<ExpressionPattern, String> {
-        match param_expr {
+    fn validate_single_param_pattern(&self, param_expr: TypedExpression) -> Result<ExpressionPattern, String> {
+        match param_expr.expression {
             // 'x: int'
             Expression::ParserTempPattern(pattern) => Ok(pattern),
             // 'x'
-            Expression::Identifier(name) => Ok(ExpressionPattern::NameAndType { name, typ: Type::unknown() }),
+            Expression::Identifier(name) => Ok(ExpressionPattern::NameAndType { name, typ: TypeKind::ParserUnknown }),
 
             // '[x, y]'
             Expression::Array(elements) => {
@@ -368,7 +369,7 @@ impl Parser {
 
 
     
-    fn parse_if_expression(&mut self) -> Result<Expression, String> {
+    fn parse_if_expression(&mut self) -> Result<TypedExpression, String> {
         // 'if' already consumed.
         self.expect_token( TokenType::LeftParen, "Expected '(' after 'if'.")?;
         let condition = self.parse_expression(Precedence::Lowest)?;
@@ -380,16 +381,11 @@ impl Parser {
         }
         else { None };
 
-        Ok(Expression::If {
-            condition: Box::new(condition),
-            consequence: Box::new(consequence),
-            alternative,
-            typ: Type::unknown()
-        })
+        Ok(Expression::If { condition: Box::new(condition), consequence: Box::new(consequence), alternative }.into())
     }
 
 
-    fn parse_match_expression(&mut self) -> Result<Expression, String> {
+    fn parse_match_expression(&mut self) -> Result<TypedExpression, String> {
         // 'match' already consumed.
         self.expect_token( TokenType::LeftParen, "Expected '(' after 'match'.")?;
         let matcher = self.parse_expression(Precedence::Lowest)?;
@@ -398,7 +394,7 @@ impl Parser {
         self.expect_token( TokenType::LeftBrace, "Expected '{' to open match block.")?;
         let mut cases = Vec::new();
 
-        while !matches!(self.peek().token_type, TokenType::RightBrace | TokenType::Eof) {
+        while !matches!(self.peek().token_type, TokenType::RightBrace | TokenType::EndOfFile) {
             let case = self.parse_expression(Precedence::Arrow)?;
             self.expect_token( TokenType::RightArrow, "Expected '->' after match block case.")?;            
             let case_consequence = self.parse_expression(Precedence::Lowest)?;
@@ -406,25 +402,25 @@ impl Parser {
         }
         self.expect_token( TokenType::RightBrace, "Expected '}' to close match block.")?;
 
-        Ok(Expression::Match { matcher: Box::new(matcher), cases, typ: Type::unknown() })                
+        Ok(Expression::Match { matcher: Box::new(matcher), cases }.into())                
     }
 
 
-    fn parse_fn_definition(&mut self) -> Result<Expression, String> {
+    fn parse_fn_definition(&mut self) -> Result<TypedExpression, String> {
         // 'fn' already consumed.
         let name = self.expect_identifier("Expected function name after 'fn'.")?;
 
         let function = self.parse_expression(Precedence::Lowest)?;
-        if !matches!(function, Expression::Fn{ .. }) { return Err(format!("Expected function expression after 'fn {}'. Found {:?} instead,", name, function)); }
+        if !matches!(function.expression, Expression::Fn{ .. }) { return Err(format!("Expected function expression after 'fn {}'. Found {:?} instead,", name, function)); }
 
-        Ok(Expression::FnDefinition { name, function: Box::new(function) })
+        Ok(Expression::FnDefinition { name, function: Box::new(function) }.into())
     }
 
-    fn parse_grouped_expression(&mut self) -> Result<Expression, String> {
+    fn parse_grouped_expression(&mut self) -> Result<TypedExpression, String> {
         // '(' already consumed.
 
         // empty tuple case '()'
-        if self.optional_token(TokenType::RightParen) { return Ok(Expression::Tuple(Vec::new())); }
+        if self.optional_token(TokenType::RightParen) { return Ok(Expression::Tuple(Vec::new()).into()); }
 
         let first_expr = self.parse_expression(Precedence::Lowest)?;
         if self.optional_token(TokenType::Comma) {
@@ -432,7 +428,7 @@ impl Parser {
             let other_tuple_expressions = self.parse_expression_list(TokenType::RightParen, "Expected ')' to close tuple.")?;
             let mut tuple_body = vec![first_expr];
             tuple_body.extend(other_tuple_expressions);
-            Ok(Expression::Tuple(tuple_body))
+            Ok(Expression::Tuple(tuple_body).into())
         }
         else {
             self.expect_token(TokenType::RightParen, "Expected ')' after expression in parentheses.")?;
@@ -440,12 +436,12 @@ impl Parser {
         }
     }
 
-    fn parse_array_expression(&mut self) -> Result<Expression, String> {
+    fn parse_array_expression(&mut self) -> Result<TypedExpression, String> {
         // '[' already consumed
-        Ok(Expression::Array(self.parse_expression_list(TokenType::RightBracket, "Expected ']' to close array.")?))
+        Ok(Expression::Array(self.parse_expression_list(TokenType::RightBracket, "Expected ']' to close array.")?).into())
     }
 
-    fn parse_expression_list(&mut self, end_token: TokenType, error_msg: &str) -> Result<Vec<Expression>, String> {
+    fn parse_expression_list(&mut self, end_token: TokenType, error_msg: &str) -> Result<Vec<TypedExpression>, String> {
         // '[1, 2, 3]',   '(1, 2)',   dict { 1, 2 }
         let mut list = Vec::new();
 
@@ -458,7 +454,7 @@ impl Parser {
     }
 
 
-    fn parse_template_string(&mut self) -> Result<Expression, String> {
+    fn parse_template_string(&mut self) -> Result<TypedExpression, String> {
         // 'StringStart' already consumed.
         let mut parts = Vec::new();
 
@@ -466,7 +462,7 @@ impl Parser {
             match self.peek().token_type.clone() {
                 TokenType::StringFrag(s) => {
                     self.advance();
-                    parts.push(Expression::Literal(LiteralValue::String(s)));
+                    parts.push(Expression::Literal(LiteralValue::String(s)).into());
                 }
                 TokenType::LeftBrace => {
                     self.advance();
@@ -476,9 +472,9 @@ impl Parser {
                 }
                 TokenType::StringEnd => {
                     self.advance();
-                    return Ok(Expression::TemplateString(parts))
+                    return Ok(Expression::TemplateString(parts).into())
                 }
-                _ => { return Err(format!("Unexpected token inside string: {:?}", self.peek())); }
+                _ => { return Err(format!("Unexpected token inside string: '{}'", self.peek())); }
             }
         }
     }
@@ -493,7 +489,7 @@ impl Parser {
                 self.advance();
                 let type_annotation = if self.optional_token(TokenType::Colon) {
                     self.parse_type_expression()?
-                } else { Type::unknown() };
+                } else { TypeKind::ParserUnknown };
                 Ok(ExpressionPattern::NameAndType { name, typ: type_annotation })
             }
             TokenType::LeftBracket => {
@@ -504,7 +500,7 @@ impl Parser {
                 self.advance();
                 Ok(ExpressionPattern::Tuple(self.parse_pattern_list(TokenType::RightParen, "Expected ')' to close tuple pattern.")?))
             }
-            _ => Err(format!("Expected pattern. Found {:?}", self.peek().token_type))
+            _ => Err(format!("Expected pattern. Found '{}'", self.peek()))
         }
     }
 
@@ -564,7 +560,7 @@ fn get_precedence(token_type: &TokenType) -> Precedence {
         TokenType::Plus | TokenType::Minus => Precedence::Sum,
         TokenType::Star | TokenType::Slash | TokenType::Percent => Precedence::Product,
         TokenType::StarStar => Precedence::Power,
-        TokenType::Minus | TokenType::Not | TokenType::BitNot | TokenType::DotDotDot => Precedence::Prefix,
+        /* TokenType::Minus |*/ TokenType::Not | TokenType::BitNot | TokenType::DotDotDot => Precedence::Prefix,
         TokenType::LeftParen | TokenType::LeftBracket | TokenType::LeftBrace | TokenType::Dot | TokenType::QuestDot => Precedence::CallIndex,
         _ => Precedence::Lowest,
     }

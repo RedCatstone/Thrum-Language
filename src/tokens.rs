@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use once_cell::sync::Lazy;
-
 #[derive(Clone, PartialEq, Debug)]
 pub enum TokenType {
     // Basic
@@ -25,8 +22,8 @@ pub enum TokenType {
     BitAnd, BitAndEqual,        // ~& ~&=
     BitOr, BitOrEqual,          // ~| ~|=
     BitXor, BitXorEqual,        // ~^ ~^=
-    LeftShift, LeftShiftEqual,  // << <<=
-    RightShift, RightShiftEqual,// >> >>=
+    LeftShift, LeftShiftEqual,  // ~< ~<=
+    RightShift, RightShiftEqual,// ~> ~>=
     
     // Logical
     And, Or,                    // & |
@@ -58,7 +55,7 @@ pub enum TokenType {
     Import, From, As,
     Match,
 
-    Eof
+    EndOfFile
 }
 
 #[derive(Clone, Debug)]
@@ -68,20 +65,20 @@ pub struct Token {
 }
 
 
-pub static KEYWORDS: Lazy<HashMap<String, TokenType>> = Lazy::new(|| {
-    let keywords_data: &[(&str, TokenType)] = &[
-        ("if", TokenType::If), ("else", TokenType::Else),
-        ("and", TokenType::And), ("or", TokenType::Or),
-        ("for", TokenType::For), ("in", TokenType::In), ("while", TokenType::While),
-        ("break", TokenType::Break), ("continue", TokenType::Continue),
-        ("fn", TokenType::Fn), ("return", TokenType::Return),
-        ("let", TokenType::Let), ("const", TokenType::Const),
-        ("struct", TokenType::Struct), ("enum", TokenType::Enum),
-        ("match", TokenType::Match),
-        ("import", TokenType::Import), ("from", TokenType::From), ("as", TokenType::As),
+pub fn get_keyword(identifier: &str) -> Option<TokenType> {
+    match identifier {
+        "if" => Some(TokenType::If), "else" => Some(TokenType::Else),
+        "and" => Some(TokenType::And), "or" => Some(TokenType::Or),
+        "for" => Some(TokenType::For), "in" => Some(TokenType::In), "while" => Some(TokenType::While),
+        "break" => Some(TokenType::Break), "continue" => Some(TokenType::Continue),
+        "fn" => Some(TokenType::Fn), "return" => Some(TokenType::Return),
+        "let" => Some(TokenType::Let), "const" => Some(TokenType::Const),
+        "struct" => Some(TokenType::Struct), "enum" => Some(TokenType::Enum),
+        "match" => Some(TokenType::Match),
+        "import" => Some(TokenType::Import), "from" => Some(TokenType::From), "as" => Some(TokenType::As),
 
-        ("true", TokenType::Bool(true)), ("false", TokenType::Bool(false)),
-        ("null", TokenType::Null),
-    ];
-    HashMap::from_iter(keywords_data.iter().map(|(k, t)| (k.to_string(), t.clone())))
-});
+        "true" => Some(TokenType::Bool(true)), "false" => Some(TokenType::Bool(false)),
+        "null" => Some(TokenType::Null),
+        _ => None
+    }
+}

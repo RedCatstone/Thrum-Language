@@ -1,4 +1,19 @@
-use crate::{tokens::TokenType, type_checker::Type};
+use crate::{tokens::TokenType, type_checker::TypeKind};
+
+
+pub struct TypedExpression {
+    pub typ: TypeKind,
+    pub expression: Expression,
+}
+impl From<Expression> for TypedExpression {
+    fn from(expression: Expression) -> Self {
+        TypedExpression {
+            typ: TypeKind::ParserUnknown,
+            expression,
+        }
+    }
+}
+
 
 
 // Everything is an expression.
@@ -10,75 +25,71 @@ pub enum Expression {
     
     Let {  // let x = 2
         pattern: ExpressionPattern,
-        value: Box<Expression>,
+        value: Box<TypedExpression>,
+    },
+
+    Assign {
+        left: Box<TypedExpression>,
+        operator: TokenType,
+        right: Box<TypedExpression>,
     },
 
     // { ... }
-    Block {
-        body: Vec<Expression>,
-        typ: Type,
-    },
+    Block(Vec<TypedExpression>),
 
     // Operator expressions
     Prefix {  // !a
         operator: TokenType,
-        right: Box<Expression>,
-        typ: Type,
+        right: Box<TypedExpression>,
     },
     Infix {  // a + b
-        left: Box<Expression>,
+        left: Box<TypedExpression>,
         operator: TokenType,
-        right: Box<Expression>,
-        typ: Type,
+        right: Box<TypedExpression>,
     },
 
     // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
-    TemplateString(Vec<Expression>),
+    TemplateString(Vec<TypedExpression>),
     
-    Call {  // x(1, 2)
-        function: Box<Expression>,
-        params: Vec<Expression>,
-        typ: Type,
+    FnCall {  // x(1, 2)
+        function: Box<TypedExpression>,
+        arguments: Vec<TypedExpression>,
     },
 
     Index {  // arr[1]
-        left: Box<Expression>,
-        index: Box<Expression>,
-        typ: Type,
+        left: Box<TypedExpression>,
+        index: Box<TypedExpression>,
     },
 
     CurlyNew {  // dict { 1, 2 }
         name: String,
-        params: Vec<Expression>,
-        typ: Type,
+        params: Vec<TypedExpression>,
     },
 
     If {  // if (true) ... else ...
-        condition: Box<Expression>,
-        consequence: Box<Expression>,
-        alternative: Option<Box<Expression>>,
-        typ: Type,
+        condition: Box<TypedExpression>,
+        consequence: Box<TypedExpression>,
+        alternative: Option<Box<TypedExpression>>,
     },
 
     Match {  // match response { 2 -> "success", _ -> "nope." }
-        matcher: Box<Expression>,
-        cases: Vec<(Expression, Expression)>,
-        typ: Type,
+        matcher: Box<TypedExpression>,
+        cases: Vec<(TypedExpression, TypedExpression)>,
     },
 
-    Fn {  // (x: num) -> x**2
+    Fn {  // x -> x**2
         params: Vec<ExpressionPattern>,
-        body: Box<Expression>,
-        typ: Type,
+        return_value: Option<ExpressionPattern>,
+        body: Box<TypedExpression>,
     },
 
     FnDefinition {  // fn square(x: num) -> x**2
         name: String,
-        function: Box<Expression>,
+        function: Box<TypedExpression>,
     },
 
-    Tuple(Vec<Expression>),  // (1, 2)
-    Array(Vec<Expression>),  // [1, 2]
+    Tuple(Vec<TypedExpression>),  // (1, 2)
+    Array(Vec<TypedExpression>),  // [1, 2]
 
 
     ParserTempPattern(ExpressionPattern),
@@ -89,16 +100,15 @@ pub enum LiteralValue {
     Number(f64),
     String(String),
     Bool(bool),
-    Null,
 }
 
 
 
-#[derive(Debug)]
 pub enum ExpressionPattern {
     NameAndType {  // x: num
         name: String,
-        typ: Type,
+        typ: TypeKind,
+        // default: Option<Box<TypedExpression>>,
     },
 
     Array(Vec<ExpressionPattern>),
