@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::{ast_structure::{Expression, TypedExpression, ExpressionPattern}, tokens::{Token, TokenType}, type_checker::{TypeKind}};
+use crate::{ast_structure::{BindingPattern, Expr, MatchPattern, TypedExpr}, tokens::{Token, TokenType}, ast_structure::TypeKind};
 
 
 
@@ -25,6 +25,7 @@ impl fmt::Display for TokenType {
             TokenType::Dot => write!(f, "."),
             TokenType::Semicolon => write!(f, ";"),
             TokenType::Colon => write!(f, ":"),
+            TokenType::ColonColon => write!(f, "::"),
 
             // Operators
             TokenType::Equal => write!(f, "="),
@@ -75,7 +76,7 @@ impl fmt::Display for TokenType {
             TokenType::PipeGreater => write!(f, "|>"),
             TokenType::Caret => write!(f, "^"),
             TokenType::DotDot => write!(f, ".."),
-            TokenType::DotDotEqual => write!(f, "..="),
+            TokenType::DotDotLess => write!(f, "..<"),
             TokenType::DotDotDot => write!(f, "..."),
 
             // String parts (descriptive)
@@ -138,12 +139,15 @@ impl fmt::Display for TypeKind {
                     write!(f, "struct({}<{}>)", name, inner_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "))
                 }
             }
+            TypeKind::Enum { name } => {
+                write!(f, "enum({})", name)
+            }
             TypeKind::Inference(id) => write!(f, "inference<{}>", id),
         }
     }
 }
 
-impl fmt::Debug for TypedExpression {
+impl fmt::Debug for TypedExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if f.alternate() {
             format_recursive(self, f, 0, "", true)
@@ -154,36 +158,36 @@ impl fmt::Debug for TypedExpression {
 }
 
 // The recursive workhorse for pretty-printing.
-fn format_recursive(eat: &TypedExpression, f: &mut fmt::Formatter, indent: usize, prefix: &str, is_last: bool) -> fmt::Result {
+fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, prefix: &str, is_last: bool) -> fmt::Result {
     let i = "  ".repeat(indent);
     let branch = if indent > 0 { if is_last { "└─ " } else { "├─ " } } else { "" };
     let type_info = format!("[{}]", eat.typ);
 
     match &eat.expression {
-        Expression::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
-        Expression::Identifier(name) => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
+        Expr::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
+        Expr::Identifier(name) => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
         
-        Expression::Let { pattern, value } => {
+        Expr::Let { pattern, value } => {
             writeln!(f, "{i}{branch}{prefix}Let (pattern: {pattern:?}) {type_info}")?;
             format_recursive(value, f, indent + 1, "value: ", true)?;
         }
-        Expression::Block(body) => {
+        Expr::Block(body) => {
             writeln!(f, "{i}{branch}{prefix}Block {type_info}")?;
             let len = body.len();
             for (idx, expr) in body.iter().enumerate() {
                 format_recursive(expr, f, indent + 1, "", idx == len - 1)?;
             }
         }
-        Expression::Infix { left, operator, right } => {
+        Expr::Infix { left, operator, right } => {
             writeln!(f, "{i}{branch}{prefix}Infix({operator}) {type_info}")?;
             format_recursive(left, f, indent + 1, "left: ", false)?;
             format_recursive(right, f, indent + 1, "right: ", true)?;
         }
-        Expression::Prefix { operator, right } => {
+        Expr::Prefix { operator, right } => {
             writeln!(f, "{i}{branch}{prefix}Prefix({operator}) {type_info}")?;
             format_recursive(right, f, indent + 1, "right: ", true)?;
         }
-        Expression::FnCall { function, arguments } => {
+        Expr::Call { callee: function, arguments } => {
             writeln!(f, "{i}{branch}{prefix}Call {type_info}")?;
             let len = arguments.len();
             format_recursive(function, f, indent + 1, "func: ", len == 0)?;
@@ -191,7 +195,7 @@ fn format_recursive(eat: &TypedExpression, f: &mut fmt::Formatter, indent: usize
                 format_recursive(arg, f, indent + 1, "arg: ", idx == len - 1)?;
             }
         }
-        Expression::If { condition, consequence, alternative } => {
+        Expr::If { condition, consequence, alternative } => {
             writeln!(f, "{i}{branch}{prefix}If {type_info}")?;
             let has_alt = alternative.is_some();
             format_recursive(condition, f, indent + 1, "cond: ", false)?;
@@ -200,17 +204,17 @@ fn format_recursive(eat: &TypedExpression, f: &mut fmt::Formatter, indent: usize
                 format_recursive(alt, f, indent + 1, "else: ", true)?;
             }
         }
-        Expression::Fn { params, body, .. } => {
+        Expr::Fn { params, body, .. } => {
             let params_str = params.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ");
             writeln!(f, "{i}{branch}{prefix}Fn (params: [{params_str}]) {type_info}")?;
             format_recursive(body, f, indent + 1, "body: ", true)?;
         }
-        Expression::FnDefinition { name, function } => {
+        Expr::FnDefinition { name, function } => {
             writeln!(f, "{i}{branch}{prefix}FnDefinition (name: \"{name}\") {type_info}")?;
             format_recursive(function, f, indent + 1, "func: ", true)?;
         }
-        Expression::Array(elements) | Expression::Tuple(elements) => {
-            let name = if matches!(eat.expression, Expression::Array(_)) { "Array" } else { "Tuple" };
+        Expr::Array(elements) | Expr::Tuple(elements) => {
+            let name = if matches!(eat.expression, Expr::Array(_)) { "Array" } else { "Tuple" };
             writeln!(f, "{i}{branch}{prefix}{name} {type_info}")?;
             let len = elements.len();
             for (idx, el) in elements.iter().enumerate() {
@@ -224,15 +228,30 @@ fn format_recursive(eat: &TypedExpression, f: &mut fmt::Formatter, indent: usize
 }
 
 // Custom Debug impl for patterns to make them print cleanly
-impl fmt::Debug for ExpressionPattern {
+impl fmt::Debug for BindingPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ExpressionPattern::NameAndType { name, typ } => {
+            BindingPattern::NameAndType { name, typ } => {
                 if *typ == TypeKind::ParserUnknown { write!(f, "{}", name) }
                 else { write!(f, "{}: {}", name, typ) }
             }
-            ExpressionPattern::Array(patterns) => write!(f, "[{:?}]", patterns),
-            ExpressionPattern::Tuple(patterns) => write!(f, "({:?})", patterns),
+            BindingPattern::Array(patterns) => write!(f, "[{:?}]", patterns),
+            BindingPattern::Tuple(patterns) => write!(f, "({:?})", patterns),
+        }
+    }
+}
+
+impl fmt::Debug for MatchPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchPattern::Literal(value) =>  write!(f, "{:?}", value),
+            MatchPattern::Wildcard => write!(f, "_"),
+            MatchPattern::Binding(pattern) => write!(f, "{:?}", pattern),
+            MatchPattern::Array(patterns) => write!(f, "[{:?}]", patterns),
+            MatchPattern::Tuple(patterns) => write!(f, "({:?})", patterns),
+            MatchPattern::EnumVariant { path, name, inner_patterns } => {
+                write!(f, "{:?}::{}({:?})", path, name, inner_patterns)
+            }
         }
     }
 }

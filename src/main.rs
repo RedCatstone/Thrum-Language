@@ -31,26 +31,25 @@ fn main() {
     let mut parser = parser::Parser::new(tokens);
     let mut program = parser.parse_program();
     
+    println!("--- AST ---\n{:#?}", program);
     if !parser.errors.is_empty() {
         println!("--- Parser Errors ---\n{:?}", parser.errors);
         process::exit(1);
     }
-    println!("--- AST ---\n{:#?}", program);
+    drop(parser);
 
 
     // Type checking!
     let mut type_checker = type_checker::TypeChecker::new();
-    type_checker.check_program(&mut program); // <-- Pass mutable reference
+    type_checker.check_program(&mut program);
 
+    println!("--- Typed AST ---\n{:#?}", program);
     if !type_checker.errors.is_empty() {
         println!("--- Type Errors ---");
         for error in type_checker.errors {
-            println!("{}", error); // <-- Print errors nicely
+            println!("{}", error);
         }
-        // process::exit(1);
-    } else {
-        println!("--- Type Check Passed ---");
-        // You can now inspect the AST with types filled in
+        process::exit(1);
     }
-    println!("--- Typed AST ---\n{:#?}", program);
+    else { println!("--- Type Check Passed ---"); }
 }

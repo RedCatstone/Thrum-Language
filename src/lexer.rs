@@ -91,7 +91,10 @@ impl<'a> Lexer<'a> {
                 ',' => self.add_token(TokenType::Comma),
                 '.' => self.process_dot_token(),
                 ';' => self.add_token(TokenType::Semicolon),
-                ':' => self.add_token(TokenType::Colon),
+                ':' => {
+                    let token = if self.match_next(':') { TokenType::ColonColon } else { TokenType::Colon };
+                    self.add_token(token);
+                }
                 
 
                 // Operators
@@ -281,7 +284,7 @@ impl<'a> Lexer<'a> {
     fn process_dot_token(&mut self) {
         let token = if self.match_next('.') {
             if self.match_next('.') { TokenType::DotDotDot }
-            else if self.match_next('=') { TokenType::DotDotEqual }
+            else if self.match_next('<') { TokenType::DotDotLess }
             else { TokenType::DotDot }
         } else { TokenType::Dot };
         self.add_token(token);

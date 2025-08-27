@@ -5,7 +5,7 @@ pub enum TokenType {
     LeftBrace, RightBrace,      // { }
     LeftBracket, RightBracket,  // [ ]
     Comma, Dot, Semicolon,      // , . ;
-    Colon,                      // :
+    Colon, ColonColon,          // : ::
 
     // Operators
     Equal,                      // =
@@ -35,7 +35,7 @@ pub enum TokenType {
     // Advanced
     RightArrow,                 // ->
     PipeGreater, Caret,         // |> ^
-    DotDot, DotDotEqual,        // .. ..=
+    DotDot, DotDotLess,         // .. ..<
     DotDotDot,                  // ...
 
     // Literals

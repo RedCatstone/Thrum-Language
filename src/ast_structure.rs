@@ -1,13 +1,15 @@
-use crate::{tokens::TokenType, type_checker::TypeKind};
+use std::collections::HashMap;
+
+use crate::{tokens::TokenType};
 
 
-pub struct TypedExpression {
+pub struct TypedExpr {
     pub typ: TypeKind,
-    pub expression: Expression,
+    pub expression: Expr,
 }
-impl From<Expression> for TypedExpression {
-    fn from(expression: Expression) -> Self {
-        TypedExpression {
+impl From<Expr> for TypedExpr {
+    fn from(expression: Expr) -> Self {
+        TypedExpr {
             typ: TypeKind::ParserUnknown,
             expression,
         }
@@ -18,81 +20,84 @@ impl From<Expression> for TypedExpression {
 
 // Everything is an expression.
 #[derive(Debug)]
-pub enum Expression {
+pub enum Expr {
     // Primary expressions
     Identifier(String),
     Literal(LiteralValue),
     
     Let {  // let x = 2
-        pattern: ExpressionPattern,
-        value: Box<TypedExpression>,
+        pattern: BindingPattern,
+        value: Box<TypedExpr>,
     },
 
     Assign {
-        left: Box<TypedExpression>,
+        left: Box<TypedExpr>,
         operator: TokenType,
-        right: Box<TypedExpression>,
+        right: Box<TypedExpr>,
     },
 
     // { ... }
-    Block(Vec<TypedExpression>),
+    Block(Vec<TypedExpr>),
 
     // Operator expressions
     Prefix {  // !a
         operator: TokenType,
-        right: Box<TypedExpression>,
+        right: Box<TypedExpr>,
     },
     Infix {  // a + b
-        left: Box<TypedExpression>,
+        left: Box<TypedExpr>,
         operator: TokenType,
-        right: Box<TypedExpression>,
+        right: Box<TypedExpr>,
     },
 
     // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
-    TemplateString(Vec<TypedExpression>),
+    TemplateString(Vec<TypedExpr>),
     
-    FnCall {  // x(1, 2)
-        function: Box<TypedExpression>,
-        arguments: Vec<TypedExpression>,
+    // Option::Some
+    TypePath(Vec<String>),
+
+    Call {  // x(1, 2)
+        callee: Box<TypedExpr>,
+        arguments: Vec<TypedExpr>,
     },
 
     Index {  // arr[1]
-        left: Box<TypedExpression>,
-        index: Box<TypedExpression>,
-    },
-
-    CurlyNew {  // dict { 1, 2 }
-        name: String,
-        params: Vec<TypedExpression>,
+        left: Box<TypedExpr>,
+        index: Box<TypedExpr>,
     },
 
     If {  // if (true) ... else ...
-        condition: Box<TypedExpression>,
-        consequence: Box<TypedExpression>,
-        alternative: Option<Box<TypedExpression>>,
+        condition: Box<TypedExpr>,
+        consequence: Box<TypedExpr>,
+        alternative: Option<Box<TypedExpr>>,
     },
 
     Match {  // match response { 2 -> "success", _ -> "nope." }
-        matcher: Box<TypedExpression>,
-        cases: Vec<(TypedExpression, TypedExpression)>,
+        match_value: Box<TypedExpr>,
+        cases: Vec<MatchArm>,
+    },
+
+    EnumDefinition {
+        name: String,
+        enums: Vec<EnumExpression>,
     },
 
     Fn {  // x -> x**2
-        params: Vec<ExpressionPattern>,
-        return_value: Option<ExpressionPattern>,
-        body: Box<TypedExpression>,
+        params: Vec<BindingPattern>,
+        return_value: Option<BindingPattern>,
+        body: Box<TypedExpr>,
     },
 
     FnDefinition {  // fn square(x: num) -> x**2
         name: String,
-        function: Box<TypedExpression>,
+        function: Box<TypedExpr>,
     },
 
-    Tuple(Vec<TypedExpression>),  // (1, 2)
-    Array(Vec<TypedExpression>),  // [1, 2]
+    Tuple(Vec<TypedExpr>),  // (1, 2)
+    Array(Vec<TypedExpr>),  // [1, 2]
 
 
-    ParserTempPattern(ExpressionPattern),
+    ParserTempPattern(BindingPattern),
 }
 
 #[derive(Debug)]
@@ -103,14 +108,86 @@ pub enum LiteralValue {
 }
 
 
-
-pub enum ExpressionPattern {
+#[derive(Clone, PartialEq)]
+pub enum BindingPattern {
     NameAndType {  // x: num
         name: String,
         typ: TypeKind,
         // default: Option<Box<TypedExpression>>,
     },
 
-    Array(Vec<ExpressionPattern>),
-    Tuple(Vec<ExpressionPattern>),
+    Array(Vec<BindingPattern>),
+    Tuple(Vec<BindingPattern>),
+}
+
+
+pub enum MatchPattern {
+    Literal(LiteralValue),
+    Wildcard,
+    Binding(BindingPattern),
+    Array(Vec<MatchPattern>),
+    Tuple(Vec<MatchPattern>),
+    EnumVariant {
+        path: Vec<String>, // std::Option
+        name: String,   // Some
+        inner_patterns: Vec<MatchPattern>,
+    },
+}
+
+#[derive(Debug)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub extra_condition: Option<TypedExpr>,
+    pub body: TypedExpr,
+}
+
+#[derive(Debug)]
+pub struct EnumExpression {
+    pub name: String,
+    pub inner_types: Vec<BindingPattern>,
+}
+
+
+
+
+
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeKind {
+    Num,
+    Str,
+    Bool,
+
+    Arr(Box<TypeKind>),
+    Tup(Vec<TypeKind>),
+    Fn {
+        param_types: Vec<TypeKind>,
+        return_type: Box<TypeKind>,
+    },
+    Struct {
+        name: String,
+        inner_types: Vec<TypeKind>,
+    },
+    Enum {
+        name: String,
+    },
+
+
+    Inference(usize),
+    
+    // 'let', 'FnDefinition', empty block, sometimes if statement
+    Void,
+
+    // parser puts this type everywhere at first.
+    ParserUnknown,
+
+    Error,
+}
+
+#[derive(Clone)]
+pub enum DefinedTypeKind {
+    Enum {
+        inner_types: HashMap<String, Vec<BindingPattern>>,
+    }
 }
