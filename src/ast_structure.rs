@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
-use crate::{tokens::TokenType};
+use crate::{nativelib::NativeFn, tokens::TokenType};
 
 
 pub struct TypedExpr {
@@ -23,16 +23,16 @@ impl From<Expr> for TypedExpr {
 pub enum Expr {
     // Primary expressions
     Identifier(String),
-    Literal(LiteralValue),
+    Literal(Value),
     
     Let {  // let x = 2
         pattern: BindingPattern,
         value: Box<TypedExpr>,
     },
 
-    Assign {
+    Assign {  // x = 2
         left: Box<TypedExpr>,
-        operator: TokenType,
+        extra_operator: TokenType,
         right: Box<TypedExpr>,
     },
 
@@ -54,7 +54,7 @@ pub enum Expr {
     TemplateString(Vec<TypedExpr>),
     
     // Option::Some
-    TypePath(Vec<String>),
+    PathedIdentifier(Vec<String>),
 
     Call {  // x(1, 2)
         callee: Box<TypedExpr>,
@@ -72,9 +72,14 @@ pub enum Expr {
         alternative: Option<Box<TypedExpr>>,
     },
 
+    While {
+        condition: Box<TypedExpr>,
+        body: Box<TypedExpr>,
+    },
+
     Match {  // match response { 2 -> "success", _ -> "nope." }
         match_value: Box<TypedExpr>,
-        cases: Vec<MatchArm>,
+        arms: Vec<MatchArm>,
     },
 
     EnumDefinition {
@@ -82,47 +87,72 @@ pub enum Expr {
         enums: Vec<EnumExpression>,
     },
 
-    Fn {  // x -> x**2
-        params: Vec<BindingPattern>,
-        return_value: Option<BindingPattern>,
-        body: Box<TypedExpr>,
-    },
-
     FnDefinition {  // fn square(x: num) -> x**2
         name: String,
-        function: Box<TypedExpr>,
+        params: Vec<BindingPattern>,
+        return_type: TypeKind,
+        body: Rc<TypedExpr>,
     },
+
+    Return(Box<TypedExpr>),
+    Break,
 
     Tuple(Vec<TypedExpr>),  // (1, 2)
     Array(Vec<TypedExpr>),  // [1, 2]
 
 
-    ParserTempPattern(BindingPattern),
+    ParserTempTypeAnnotation(BindingPattern),
 }
 
-#[derive(Debug)]
-pub enum LiteralValue {
-    Number(f64),
-    String(String),
+// type signature for a native Rust function that can be called by thrum.
+// for example `print()`
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Num(f64),
+    Str(String),
     Bool(bool),
+
+    // for evaluating the tree
+    Arr(Vec<Value>),
+    Tup(Vec<Value>),
+    Closure {  // x -> x**2
+        params: Vec<BindingPattern>,
+        return_type: TypeKind,
+        body: Rc<TypedExpr>,
+    },
+    NativeFn(NativeFn),
+    Void,
+}
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Num(l), Value::Num(r)) => l == r,
+            (Value::Str(l), Value::Str(r)) => l == r,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::Arr(l), Value::Arr(r)) => l == r,
+            (Value::Tup(l), Value::Tup(r)) => l == r,
+            _ => false
+        }
+    }
 }
 
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BindingPattern {
     NameAndType {  // x: num
         name: String,
         typ: TypeKind,
         // default: Option<Box<TypedExpression>>,
     },
-
+    Wildcard,
     Array(Vec<BindingPattern>),
     Tuple(Vec<BindingPattern>),
 }
 
-
+#[derive(Debug)]
 pub enum MatchPattern {
-    Literal(LiteralValue),
+    Literal(Value),
     Wildcard,
     Binding(BindingPattern),
     Array(Vec<MatchPattern>),
@@ -132,6 +162,7 @@ pub enum MatchPattern {
         name: String,   // Some
         inner_patterns: Vec<MatchPattern>,
     },
+    Or(Vec<MatchPattern>),
 }
 
 #[derive(Debug)]
@@ -173,16 +204,17 @@ pub enum TypeKind {
         name: String,
     },
 
-
     Inference(usize),
+    TypeError,
     
     // 'let', 'FnDefinition', empty block, sometimes if statement
     Void,
+    // return for example, type NEVER gets hit.
+    Never,
 
-    // parser puts this type everywhere at first.
+    // parser puts this type everywhere at first. should not exist anymore after typecheck.
     ParserUnknown,
 
-    Error,
 }
 
 #[derive(Clone)]

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::ast_structure::*;
 use crate::tokens::{Token, TokenType};
 
@@ -78,7 +80,7 @@ impl Parser {
                     expression_body.push(expr);
                     if !self.optional_token(TokenType::Semicolon) {
                         // no semicolon -> next expression can't be on the same line.
-                        if self.peek_is_on_same_line() {
+                        if self.peek_is_on_same_line() && self.peek().token_type != end_token {
                             self.errors.push(format!("2 seperate expressions can't be on the same line without a ';'. Found '{}'.", self.peek()))
                         }
                     }
@@ -114,8 +116,8 @@ impl Parser {
 
             // parse infix
             left_expr = match operator {
-                TokenType::LeftParen => self.parse_function_call_operator(left_expr)?,
-                TokenType::RightArrow => self.parse_function_operator(left_expr)?,
+                TokenType::LeftParen => self.parse_call_operator(left_expr)?,
+                TokenType::RightArrow => Expr::Literal(self.parse_closure_operator(left_expr)?).into(),
                 TokenType::LeftBracket => self.parse_index_operator(left_expr)?,
                 TokenType::Colon => self.parse_type_annotation_operator(left_expr)?,
                 TokenType::PipeGreater => self.parse_pipe_greater_operator(left_expr)?,
@@ -127,7 +129,8 @@ impl Parser {
 
                     let right_expr = self.parse_expression(operator_precedence)?;
                     if operator_precedence == Precedence::Assign {
-                        Expr::Assign { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into()
+                        let extra_operator = Precedence::convert_assign_operator_to_operator(&operator).unwrap();
+                        Expr::Assign { left: Box::new(left_expr), extra_operator, right: Box::new(right_expr) }.into()
                     }
                     else { Expr::Infix { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into() }
                 }
@@ -148,9 +151,9 @@ impl Parser {
                 // after advancing:
                 match token_type {
                     TokenType::Identifier(name) => self.parse_path_or_identifier(name),
-                    TokenType::Number(val) => Ok(Expr::Literal(LiteralValue::Number(val)).into()),
-                    TokenType::StringFrag(val) => Ok(Expr::Literal(LiteralValue::String(val)).into()),
-                    TokenType::Bool(val) => Ok(Expr::Literal(LiteralValue::Bool(val)).into()),
+                    TokenType::Number(val) => Ok(Expr::Literal(Value::Num(val)).into()),
+                    TokenType::StringFrag(val) => Ok(Expr::Literal(Value::Str(val)).into()),
+                    TokenType::Bool(val) => Ok(Expr::Literal(Value::Bool(val)).into()),
 
                     // Prefix operators
                     TokenType::Minus | TokenType::Not | TokenType::BitNot | TokenType::DotDotDot => self.parse_prefix_operator(token_type),
@@ -161,9 +164,12 @@ impl Parser {
                     TokenType::StringStart => self.parse_template_string(),
                     TokenType::Let => self.parse_let_expression(),
                     TokenType::If => self.parse_if_expression(),
+                    TokenType::While => self.parse_while_expression(),
                     TokenType::Match => self.parse_match_expression(),
                     TokenType::Enum => self.parse_enum_expression(),
                     TokenType::Fn => self.parse_fn_definition(),
+                    TokenType::Return => self.parse_return_epxression(),
+                    TokenType::Break => Ok(Expr::Break.into()),
 
                     _ => Err(format!("Expected an expression. Found '{}' instead", token_type)),
                 }
@@ -188,14 +194,14 @@ impl Parser {
         if self.optional_token(TokenType::LeftParen) {
             let arguments = self.parse_expression_list(TokenType::RightParen, "Expected ')' to close arguments.")?;
             Ok(Expr::Call {
-                callee: Box::new(Expr::TypePath(segments).into()),
+                callee: Box::new(Expr::PathedIdentifier(segments).into()),
                 arguments,
             }.into())
         }
         else {
             // It's just a path, like `std::io` or a simple variable `x`.
             if segments.len() == 1 { Ok(Expr::Identifier(segments.pop().unwrap()).into()) }
-            else { Ok(Expr::TypePath(segments).into()) }
+            else { Ok(Expr::PathedIdentifier(segments).into()) }
         }
     }
 
@@ -218,14 +224,14 @@ impl Parser {
     }
 
 
-    fn parse_function_operator(&mut self, params_expr: TypedExpr) -> Result<TypedExpr, String> {
+    fn parse_closure_operator(&mut self, params_expr: TypedExpr) -> Result<Value, String> {
         // '->' already consumed.
         let params = self.validate_and_build_function_params(params_expr)?;
-        let body = self.parse_expression(Precedence::Lowest)?;
-        Ok(Expr::Fn { params, body: Box::new(body), return_value: None }.into())
+        let body = self.parse_expression(Precedence::Lowest)?.into();
+        Ok(Value::Closure { params, return_type: TypeKind::ParserUnknown, body })
     }
 
-    fn parse_function_call_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, String> {
+    fn parse_call_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, String> {
         // '(' already consumed.
         let params = self.parse_expression_list(TokenType::RightParen, "Expected ')' to close argument list.")?;
         Ok(Expr::Call { callee: Box::new(left_expr), arguments: params }.into())
@@ -242,7 +248,7 @@ impl Parser {
         match left_expr.expression {
             Expr::Identifier(name) => {
                 let right_type_expr = self.parse_type_expression()?;
-                Ok(Expr::ParserTempPattern(BindingPattern::NameAndType { name, typ: right_type_expr }).into())
+                Ok(Expr::ParserTempTypeAnnotation(BindingPattern::NameAndType { name, typ: right_type_expr }).into())
             }
             _ => return Err(format!("Type annotations are only allowed after identifiers. Found after: {:?}", left_expr)),
         }
@@ -272,7 +278,7 @@ impl Parser {
 
     fn parse_let_expression(&mut self) -> Result<TypedExpr, String> {
         // 'let' already consumed.
-        let pattern = self.parse_binding_pattern()?;
+        let pattern = self.parse_binding_pattern(false)?;
 
         // `=`
         self.expect_token(TokenType::Equal, "Expected '=' after variable name.")?;
@@ -334,7 +340,7 @@ impl Parser {
         // this function takes what was to the left of `->` and validates it.
         let params = match expr.expression {
             Expr::Tuple(body) => body,
-            Expr::Identifier(_) | Expr::ParserTempPattern(_) | Expr::Array(_) => vec![expr],
+            Expr::Identifier(_) | Expr::ParserTempTypeAnnotation(_) | Expr::Array(_) => vec![expr],
             _ => return Err(format!("Invalid parameter list for function. Found {:?}.", expr)),
         };
 
@@ -348,7 +354,7 @@ impl Parser {
     fn validate_single_param_pattern(&self, param_expr: TypedExpr) -> Result<BindingPattern, String> {
         match param_expr.expression {
             // 'x: int'
-            Expr::ParserTempPattern(pattern) => Ok(pattern),
+            Expr::ParserTempTypeAnnotation(pattern) => Ok(pattern),
             // 'x'
             Expr::Identifier(name) => Ok(BindingPattern::NameAndType { name, typ: TypeKind::ParserUnknown }),
 
@@ -378,17 +384,26 @@ impl Parser {
     
     fn parse_if_expression(&mut self) -> Result<TypedExpr, String> {
         // 'if' already consumed.
-        self.expect_token( TokenType::LeftParen, "Expected '(' after 'if'.")?;
-        let condition = self.parse_expression(Precedence::Lowest)?;
-        self.expect_token( TokenType::RightParen, "Expected ')' after if condition.")?;
+        let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
+        self.expect_token( TokenType::LeftBrace, "Expected '{' after if condition.")?;
 
-        let consequence = self.parse_expression(Precedence::Lowest)?;
+        let consequence = Box::new(self.parse_block_expression(TokenType::RightBrace));
         let alternative = if self.optional_token(TokenType::Else) {
             Some(Box::new(self.parse_expression(Precedence::Lowest)?))
         }
         else { None };
 
-        Ok(Expr::If { condition: Box::new(condition), consequence: Box::new(consequence), alternative }.into())
+        Ok(Expr::If { condition, consequence, alternative }.into())
+    }
+
+    fn parse_while_expression(&mut self) -> Result<TypedExpr, String> {
+        // 'while' already consumed.
+        let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
+        
+        self.expect_token( TokenType::LeftBrace, "Expected '{' after while condition.")?;
+        let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
+
+        Ok(Expr::While { condition, body }.into())
     }
 
 
@@ -397,7 +412,7 @@ impl Parser {
         let matcher = self.parse_expression(Precedence::Lowest)?;
 
         self.expect_token( TokenType::LeftBrace, "Expected '{' to open match block.")?;
-        let mut cases = Vec::new();
+        let mut arms = Vec::new();
 
         while !matches!(self.peek().token_type, TokenType::RightBrace | TokenType::EndOfFile) {
             let arm_pattern = self.parse_match_pattern()?;
@@ -407,49 +422,65 @@ impl Parser {
             } else { None };
             self.expect_token( TokenType::RightArrow, "Expected '->' after match block case.")?;            
             let arm_body = self.parse_expression(Precedence::Lowest)?;
-            cases.push(MatchArm { pattern: arm_pattern, extra_condition: arm_if, body: arm_body });
+            self.optional_token(TokenType::Semicolon);
+            arms.push(MatchArm { pattern: arm_pattern, extra_condition: arm_if, body: arm_body });
         }
         self.expect_token( TokenType::RightBrace, "Expected '}' to close match block.")?;
 
-        Ok(Expr::Match { match_value: Box::new(matcher), cases }.into())                
+        Ok(Expr::Match { match_value: Box::new(matcher), arms }.into())                
     }
 
 
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, String> {
-        match self.peek().token_type.clone() {
-            TokenType::Number(num) => { self.advance(); Ok(MatchPattern::Literal(LiteralValue::Number(num))) }
-            TokenType::Bool(bool) => { self.advance(); Ok(MatchPattern::Literal(LiteralValue::Bool(bool))) }
-            TokenType::StringStart => {
-                self.advance();
-                if let TokenType::StringFrag(str) = self.peek().token_type.clone() {
+        let mut patterns = Vec::new();
+        loop {
+            let pattern = match self.peek().token_type.clone() {
+                TokenType::Number(num) => { self.advance(); Ok(MatchPattern::Literal(Value::Num(num))) }
+                TokenType::Bool(bool) => { self.advance(); Ok(MatchPattern::Literal(Value::Bool(bool))) }
+                TokenType::StringStart => {
                     self.advance();
-                    self.expect_token(TokenType::StringEnd, "String literals are not allowed in match patterns.")?;
-                    Ok(MatchPattern::Literal(LiteralValue::String(str)))
+                    if let TokenType::StringFrag(str) = self.peek().token_type.clone() {
+                        self.advance();
+                        self.expect_token(TokenType::StringEnd, "String literals are not allowed in match patterns.")?;
+                        Ok(MatchPattern::Literal(Value::Str(str)))
+                    }
+                    else { Err(format!("Complex string literals are not allowed in match patterns.")) }
                 }
-                else { Err(format!("Complex string literals are not allowed in match patterns.")) }
-            }
-            TokenType::Identifier(name) => {
-                self.advance();
-                if name == "_".to_string() { Ok(MatchPattern::Wildcard) }
-                else { self.parse_match_path(name) }
-            }
-            TokenType::ColonColon => self.parse_match_path("".to_string()),
-            TokenType::LeftBracket => {
-                self.advance();
-                Ok(MatchPattern::Array(self.parse_match_pattern_list(TokenType::RightBracket, "Expected ']' to close array pattern.")?))
-            }
-            TokenType::LeftParen => {
-                self.advance();
-                Ok(MatchPattern::Tuple(self.parse_match_pattern_list(TokenType::RightParen, "Expected ')' to close tuple pattern.")?))
-            }
-            _ => Err(format!("Expected pattern. Found '{}'", self.peek()))
+                TokenType::Identifier(name) => {
+                    self.advance();
+                    if name == "_".to_string() { Ok(MatchPattern::Wildcard) }
+                    else { self.parse_match_path(name) }
+                }
+                TokenType::ColonColon => self.parse_match_path("".to_string()),
+                TokenType::LeftBracket => {
+                    self.advance();
+                    Ok(MatchPattern::Array(self.parse_match_pattern_list(TokenType::RightBracket, "Expected ']' to close array pattern.")?))
+                }
+                TokenType::LeftParen => {
+                    self.advance();
+                    Ok(MatchPattern::Tuple(self.parse_match_pattern_list(TokenType::RightParen, "Expected ')' to close tuple pattern.")?))
+                }
+                _ => Err(format!("Expected pattern. Found '{}'", self.peek()))
+            };
+            patterns.push(pattern?);
+            if !self.optional_token(TokenType::Pipe) { break }
         }
+        if patterns.len() == 1 { Ok(patterns.pop().unwrap()) }
+        else { Ok(MatchPattern::Or(patterns)) }
     }
 
     fn parse_match_path(&mut self, path_start: String) -> Result<MatchPattern, String> {
         let mut segments = vec![path_start];
         while self.optional_token(TokenType::ColonColon) {
             segments.push(self.expect_identifier("Expected identifier after '::' in pattern.")?);
+        }
+
+        // Binding-pattern
+        if segments.len() == 1 {
+            let type_annotation = if self.optional_token(TokenType::Colon) {
+                self.parse_type_expression()?
+            } else { TypeKind::ParserUnknown };
+            return Ok(MatchPattern::Binding(BindingPattern::NameAndType { name: segments.pop().unwrap(), typ: type_annotation }))
         }
 
         let inner_patterns = if self.optional_token(TokenType::LeftParen) {
@@ -486,7 +517,7 @@ impl Parser {
 
             if self.optional_token(TokenType::LeftParen) {
                 while self.peek().token_type != TokenType::RightParen {
-                    inner_types.push(self.parse_binding_pattern()?);
+                    inner_types.push(self.parse_binding_pattern(true)?);
                     if !self.optional_token(TokenType::Comma) { break }
                 }
                 self.expect_token(TokenType::RightParen, "Expected ')' to close enum parameter list.")?;
@@ -507,12 +538,30 @@ impl Parser {
     fn parse_fn_definition(&mut self) -> Result<TypedExpr, String> {
         // 'fn' already consumed.
         let name = self.expect_identifier("Expected function name after 'fn'.")?;
+        self.expect_token(TokenType::LeftParen, &format!("Expected '(' after 'fn {}'", name))?;
+        let params = self.parse_binding_pattern_list(TokenType::RightParen, true, "Expected ')' to close fn parameter list.")?;
 
-        let function = self.parse_expression(Precedence::Lowest)?;
-        if !matches!(function.expression, Expr::Fn{ .. }) { return Err(format!("Expected function expression after 'fn {}'. Found {:?} instead,", name, function)); }
+        let return_type = if self.optional_token(TokenType::RightArrow) {
+            self.parse_type_expression()?
+        }
+        else { TypeKind::Void };
 
-        Ok(Expr::FnDefinition { name, function: Box::new(function) }.into())
+        self.expect_token(TokenType::LeftBrace, "Expected '{' after fn definition.")?;
+        let body = Rc::new(self.parse_block_expression(TokenType::RightBrace));
+        
+        Ok(Expr::FnDefinition { name, params, return_type, body }.into())
     }
+
+
+    fn parse_return_epxression(&mut self) -> Result<TypedExpr, String> {
+        // 'return' already consumed.
+        let return_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
+            Box::new(self.parse_expression(Precedence::Lowest)?)
+        }
+        else { Box::new(Expr::Literal(Value::Void).into()) };
+        Ok(Expr::Return(return_expression).into())
+    }
+
 
     fn parse_grouped_expression(&mut self) -> Result<TypedExpr, String> {
         // '(' already consumed.
@@ -560,7 +609,7 @@ impl Parser {
             match self.peek().token_type.clone() {
                 TokenType::StringFrag(s) => {
                     self.advance();
-                    parts.push(Expr::Literal(LiteralValue::String(s)).into());
+                    parts.push(Expr::Literal(Value::Str(s)).into());
                 }
                 TokenType::LeftBrace => {
                     self.advance();
@@ -579,33 +628,42 @@ impl Parser {
 
 
 
-
-
-    fn parse_binding_pattern(&mut self) -> Result<BindingPattern, String> {
+    fn parse_binding_pattern(&mut self, type_annotation_required: bool) -> Result<BindingPattern, String> {
         match self.peek().token_type.clone() {
             TokenType::Identifier(name) => {
                 self.advance();
-                let type_annotation = if self.optional_token(TokenType::Colon) {
-                    self.parse_type_expression()?
-                } else { TypeKind::ParserUnknown };
-                Ok(BindingPattern::NameAndType { name, typ: type_annotation })
+                if name.chars().nth(0).unwrap() == '_' {
+                    Ok(BindingPattern::Wildcard)
+                }
+                else {
+                    let type_annotation = if self.optional_token(TokenType::Colon) {
+                        self.parse_type_expression()?
+                    }
+                    else if type_annotation_required {
+                        return Err(format!("Type annotation required."));
+                    }
+                    else { TypeKind::ParserUnknown };
+                    Ok(BindingPattern::NameAndType { name, typ: type_annotation })
+                }
             }
             TokenType::LeftBracket => {
                 self.advance();
-                Ok(BindingPattern::Array(self.parse_binding_pattern_list(TokenType::RightBracket, "Expected ']' to close array pattern.")?))
+                Ok(BindingPattern::Array(self.parse_binding_pattern_list(TokenType::RightBracket, type_annotation_required,
+                    "Expected ']' to close array pattern.")?))
             }
             TokenType::LeftParen => {
                 self.advance();
-                Ok(BindingPattern::Tuple(self.parse_binding_pattern_list(TokenType::RightParen, "Expected ')' to close tuple pattern.")?))
+                Ok(BindingPattern::Tuple(self.parse_binding_pattern_list(TokenType::RightParen, type_annotation_required,
+                    "Expected ')' to close tuple pattern.")?))
             }
             _ => Err(format!("Expected pattern. Found '{}'", self.peek()))
         }
     }
 
-    fn parse_binding_pattern_list(&mut self, end_token: TokenType, error_msg: &str) -> Result<Vec<BindingPattern>, String> {
+    fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<BindingPattern>, String> {
         let mut list = Vec::new();
         loop {
-            list.push(self.parse_binding_pattern()?);
+            list.push(self.parse_binding_pattern(type_annotation_required)?);
             if !self.optional_token(TokenType::Comma) { break; }
         }
         self.expect_token(end_token, error_msg)?;
@@ -666,14 +724,12 @@ impl Precedence {
         match token_type {
             TokenType::Colon => Precedence::Colon,
             TokenType::RightArrow => Precedence::Arrow,
-            TokenType::Equal | TokenType::PlusEqual | TokenType::MinusEqual | TokenType::StarEqual | TokenType::SlashEqual
-            | TokenType::StarStarEqual | TokenType::PercentEqual | TokenType::QuestQuestEqual | TokenType::BitAndEqual
-            | TokenType::BitOrEqual | TokenType::BitXorEqual | TokenType::LeftShiftEqual | TokenType::RightShiftEqual => Precedence::Assign,
+            _ if Precedence::convert_assign_operator_to_operator(token_type).is_some() => Precedence::Assign,
             TokenType::DotDot | TokenType::DotDotLess => Precedence::Range,
             TokenType::QuestQuest => Precedence::Nullish,
             TokenType::PipeGreater => Precedence::Pipe,
-            TokenType::Or => Precedence::Or,
-            TokenType::And => Precedence::And,
+            TokenType::Pipe => Precedence::Or,
+            TokenType::Ampersand => Precedence::And,
             TokenType::BitOr => Precedence::BitwiseOr,
             TokenType::BitXor => Precedence::BitwiseXor,
             TokenType::BitAnd => Precedence::BitwiseAnd,
@@ -686,6 +742,25 @@ impl Precedence {
             TokenType::Not | TokenType::BitNot | TokenType::DotDotDot => Precedence::Prefix,
             TokenType::LeftParen | TokenType::LeftBracket | TokenType::Dot | TokenType::QuestDot => Precedence::CallIndex,
             _ => Precedence::Lowest,
+        }
+    }
+
+    fn convert_assign_operator_to_operator(assign_operator: &TokenType) -> Option<TokenType> {
+        match assign_operator {
+            TokenType::Equal => Some(TokenType::Equal),
+            TokenType::PlusEqual => Some(TokenType::Plus),
+            TokenType::MinusEqual => Some(TokenType::Minus),
+            TokenType::StarEqual => Some(TokenType::Star),
+            TokenType::SlashEqual => Some(TokenType::Slash),
+            TokenType::StarStarEqual => Some(TokenType::StarStar),
+            TokenType::PercentEqual => Some(TokenType::Percent),
+            TokenType::QuestQuestEqual => Some(TokenType::QuestQuest),
+            TokenType::BitAndEqual => Some(TokenType::BitAnd),
+            TokenType::BitOrEqual => Some(TokenType::BitOr),
+            TokenType::BitXorEqual => Some(TokenType::BitXor),
+            TokenType::LeftShiftEqual => Some(TokenType::LeftShift),
+            TokenType::RightShiftEqual => Some(TokenType::RightShift),
+            _ => None
         }
     }
 }

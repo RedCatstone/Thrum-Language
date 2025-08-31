@@ -6,8 +6,9 @@ mod lexer;
 mod ast_structure;
 mod parser;
 mod type_checker;
-
+mod evaluator;
 mod pretty_printing;
+mod nativelib;
 
 
 fn main() {
@@ -52,4 +53,24 @@ fn main() {
         process::exit(1);
     }
     else { println!("--- Type Check Passed ---"); }
+    drop(type_checker);
+
+
+
+    // evaluating!
+    println!("--- Executing Program ---");
+    let mut evaluator = evaluator::Executor::new();
+    match evaluator.execute_program(&program) {
+        Ok(result) => {
+            println!("--- Execution Successfull ---");
+            println!("{:?}", result);
+        }
+        Err(err) => {
+            println!("--- Runtime Errors ---");
+            println!("{}", err);
+        }
+    }
+
+
+
 }

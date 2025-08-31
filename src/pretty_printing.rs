@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::{ast_structure::{BindingPattern, Expr, MatchPattern, TypedExpr}, tokens::{Token, TokenType}, ast_structure::TypeKind};
+use crate::{ast_structure::{BindingPattern, Expr, MatchPattern, TypeKind, TypedExpr, Value}, tokens::{Token, TokenType}};
 
 
 
@@ -61,8 +61,8 @@ impl fmt::Display for TokenType {
             TokenType::RightShiftEqual => write!(f, "~>="),
             
             // Logical
-            TokenType::And => write!(f, "&"),
-            TokenType::Or => write!(f, "|"),
+            TokenType::Ampersand => write!(f, "&"),
+            TokenType::Pipe => write!(f, "|"),
             TokenType::EqualEqual => write!(f, "=="),
             TokenType::Not => write!(f, "!"),
             TokenType::NotEqual => write!(f, "!="),
@@ -126,23 +126,22 @@ impl fmt::Display for TypeKind {
             TypeKind::Bool => write!(f, "bool"),
             TypeKind::Void => write!(f, "void"),
             TypeKind::ParserUnknown => write!(f, "unknown"),
-            TypeKind::Error => write!(f, "error"),
+            TypeKind::TypeError => write!(f, "error"),
             TypeKind::Arr(typ) => write!(f, "arr<{}>", typ),
-            TypeKind::Tup(types) => write!(f, "({})", types.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")),
+            TypeKind::Tup(types) => write!(f, "({})", slice_to_string(types, ", ")),
             TypeKind::Fn { param_types, return_type } => {
-                write!(f, "fn<({}) -> {:?}>", param_types.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "), return_type)
+                write!(f, "fn<({}) -> {}>", slice_to_string(param_types, ", "), return_type)
             }
             TypeKind::Struct { name, inner_types } => {
                 if inner_types.is_empty() {
                     write!(f, "struct({})", name)
                 } else {
-                    write!(f, "struct({}<{}>)", name, inner_types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "))
+                    write!(f, "struct({}<{}>)", name, slice_to_string(inner_types, ", "))
                 }
             }
-            TypeKind::Enum { name } => {
-                write!(f, "enum({})", name)
-            }
-            TypeKind::Inference(id) => write!(f, "inference<{}>", id),
+            TypeKind::Enum { name } => write!(f, "enum({})", name),
+            TypeKind::Inference(id) => write!(f, "?{}", id),
+            TypeKind::Never => write!(f, "never"),
         }
     }
 }
@@ -168,7 +167,7 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
         Expr::Identifier(name) => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
         
         Expr::Let { pattern, value } => {
-            writeln!(f, "{i}{branch}{prefix}Let (pattern: {pattern:?}) {type_info}")?;
+            writeln!(f, "{i}{branch}{prefix}Let (pattern: {pattern}) {type_info}")?;
             format_recursive(value, f, indent + 1, "value: ", true)?;
         }
         Expr::Block(body) => {
@@ -204,15 +203,6 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
                 format_recursive(alt, f, indent + 1, "else: ", true)?;
             }
         }
-        Expr::Fn { params, body, .. } => {
-            let params_str = params.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ");
-            writeln!(f, "{i}{branch}{prefix}Fn (params: [{params_str}]) {type_info}")?;
-            format_recursive(body, f, indent + 1, "body: ", true)?;
-        }
-        Expr::FnDefinition { name, function } => {
-            writeln!(f, "{i}{branch}{prefix}FnDefinition (name: \"{name}\") {type_info}")?;
-            format_recursive(function, f, indent + 1, "func: ", true)?;
-        }
         Expr::Array(elements) | Expr::Tuple(elements) => {
             let name = if matches!(eat.expression, Expr::Array(_)) { "Array" } else { "Tuple" };
             writeln!(f, "{i}{branch}{prefix}{name} {type_info}")?;
@@ -228,30 +218,64 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
 }
 
 // Custom Debug impl for patterns to make them print cleanly
-impl fmt::Debug for BindingPattern {
+impl fmt::Display for BindingPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BindingPattern::NameAndType { name, typ } => {
                 if *typ == TypeKind::ParserUnknown { write!(f, "{}", name) }
                 else { write!(f, "{}: {}", name, typ) }
             }
-            BindingPattern::Array(patterns) => write!(f, "[{:?}]", patterns),
-            BindingPattern::Tuple(patterns) => write!(f, "({:?})", patterns),
+            BindingPattern::Array(patterns) => write!(f, "[{}]", slice_to_string(patterns, ", ")),
+            BindingPattern::Tuple(patterns) => write!(f, "({})", slice_to_string(patterns, ", ")),
+            BindingPattern::Wildcard => write!(f, "_"),
         }
     }
 }
 
-impl fmt::Debug for MatchPattern {
+impl fmt::Display for MatchPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MatchPattern::Literal(value) =>  write!(f, "{:?}", value),
+            MatchPattern::Literal(value) =>  write!(f, "{}", value),
             MatchPattern::Wildcard => write!(f, "_"),
-            MatchPattern::Binding(pattern) => write!(f, "{:?}", pattern),
-            MatchPattern::Array(patterns) => write!(f, "[{:?}]", patterns),
-            MatchPattern::Tuple(patterns) => write!(f, "({:?})", patterns),
+            MatchPattern::Binding(pattern) => write!(f, "{}", pattern),
+            MatchPattern::Array(patterns) => write!(f, "[{}]", slice_to_string(patterns, ", ")),
+            MatchPattern::Tuple(patterns) => write!(f, "({})", slice_to_string(patterns, ", ")),
             MatchPattern::EnumVariant { path, name, inner_patterns } => {
-                write!(f, "{:?}::{}({:?})", path, name, inner_patterns)
+                write!(f, "{}::{}({})",
+                    path.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+                    name,
+                    inner_patterns.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+                )
             }
+            MatchPattern::Or(patterns) => write!(f, "{}", slice_to_string(patterns, " | ")),
         }
     }
+}
+
+
+
+
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Num(x) => write!(f, "{}", x),
+            Value::Str(x) => write!(f, "{}", x),
+            Value::Bool(x) => write!(f, "{}", x),
+            Value::Arr(x) => write!(f, "{}", slice_to_string(x, ", ")),
+            Value::Tup(x) => write!(f, "{}", slice_to_string(x, ", ")),
+            Value::Closure { params, return_type, .. } => {
+                write!(f, "{}{}", slice_to_string(params, ", "), return_type)
+            }
+            Value::NativeFn(x) => write!(f, "{:?}", x),
+            Value::Void => unreachable!("trying to print void"),
+        }
+    }
+}
+
+
+
+
+pub fn slice_to_string<T: ToString>(vec: &[T], join: &str) -> String {
+    vec.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(join)
 }

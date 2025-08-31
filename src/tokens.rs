@@ -26,7 +26,7 @@ pub enum TokenType {
     RightShift, RightShiftEqual,// ~> ~>=
     
     // Logical
-    And, Or,                    // & |
+    Ampersand, Pipe,            // & |
     EqualEqual,                 // ==
     Not, NotEqual,              // ! !=
     Less, LessEqual,            // < <=
@@ -68,7 +68,7 @@ pub struct Token {
 pub fn get_keyword(identifier: &str) -> Option<TokenType> {
     match identifier {
         "if" => Some(TokenType::If), "else" => Some(TokenType::Else),
-        "and" => Some(TokenType::And), "or" => Some(TokenType::Or),
+        "and" => Some(TokenType::Ampersand), "or" => Some(TokenType::Pipe),
         "for" => Some(TokenType::For), "in" => Some(TokenType::In), "while" => Some(TokenType::While),
         "break" => Some(TokenType::Break), "continue" => Some(TokenType::Continue),
         "fn" => Some(TokenType::Fn), "return" => Some(TokenType::Return),

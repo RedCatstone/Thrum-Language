@@ -175,9 +175,9 @@ impl<'a> Lexer<'a> {
 
 
                 // Logical
-                '&' => self.add_token(TokenType::And),
+                '&' => self.add_token(TokenType::Ampersand),
                 '|' => {
-                    let token = if self.match_next('>') { TokenType::PipeGreater } else { TokenType::Or };
+                    let token = if self.match_next('>') { TokenType::PipeGreater } else { TokenType::Pipe };
                     self.add_token(token);
                 }
                 '^' => self.add_token(TokenType::Caret),
@@ -211,13 +211,11 @@ impl<'a> Lexer<'a> {
                 '\'' => self.lex_string('\''),
 
                 _ => {
-                    // Handle numbers
+                    // numbers
                     if c.is_ascii_digit() { self.lex_number(c); }
 
-                    // Handle identifiers and keywords
+                    // identifiers and keywords
                     else if c.is_alphabetic() || c == '_' { self.lex_identifier(c); }
-
-                    // Or report an error
                     else { self.add_error(format!("Unexpected character '{}'.", c)); }
                 }
             }
@@ -259,11 +257,12 @@ impl<'a> Lexer<'a> {
             else if c == '.' {
                 if already_has_dot { break; }
                 already_has_dot = true;
+                self.source_iter.next();
                 // '.' is only part of the number if the next character is a digit
-                if let Some(after_dot) = self.source_iter.next() {
+                if let Some(after_dot) = self.source_iter.peek() {
                     if after_dot.is_ascii_digit() {
                         text.push('.');
-                        text.push(after_dot);
+                        text.push(*after_dot);
                         self.source_iter.next();
                     }
                     else {
@@ -282,6 +281,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn process_dot_token(&mut self) {
+        // '.' already consumed.
         let token = if self.match_next('.') {
             if self.match_next('.') { TokenType::DotDotDot }
             else if self.match_next('<') { TokenType::DotDotLess }
