@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb", 
+            "request": "launch",
+            "name": "Debug Thrum Engine", // This name appears in the debug dropdown
+
+            "console": "integratedTerminal",
+
+            // This block tells the debugger how to build your program using Cargo.
+            "cargo": {
+                "args": [
+                    "build",
+                    "--manifest-path",
+                    "${workspaceFolder}/thrum-engine/Cargo.toml"
+                ],
+                "filter": {
+                    "name": "thrum-engine",
+                    "kind": "bin"
+                }
+            },
+            
+            "args": ["Code.thrum"],
+            "cwd": "${workspaceFolder}"
+        }
+
+    ]
+}
