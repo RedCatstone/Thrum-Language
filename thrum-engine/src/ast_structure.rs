@@ -26,12 +26,12 @@ pub enum Expr {
     Literal(Value),
     
     Let {  // let x = 2
-        pattern: BindingPattern,
+        pattern: AssignablePattern,
         value: Box<TypedExpr>,
     },
 
     Assign {  // x = 2
-        left: Box<TypedExpr>,
+        left: Box<AssignablePattern>,
         extra_operator: TokenType,
         right: Box<TypedExpr>,
     },
@@ -89,7 +89,7 @@ pub enum Expr {
 
     FnDefinition {  // fn square(x: num) -> x**2
         name: String,
-        params: Vec<BindingPattern>,
+        params: Vec<AssignablePattern>,
         return_type: TypeKind,
         body: Rc<TypedExpr>,
     },
@@ -100,8 +100,11 @@ pub enum Expr {
     Tuple(Vec<TypedExpr>),  // (1, 2)
     Array(Vec<TypedExpr>),  // [1, 2]
 
+    // Semicolons are void expressions.
+    Void,
 
-    ParserTempTypeAnnotation(BindingPattern),
+
+    ParserTempTypeAnnotation(AssignablePattern),
 }
 
 // type signature for a native Rust function that can be called by thrum.
@@ -117,57 +120,61 @@ pub enum Value {
     Arr(Vec<Value>),
     Tup(Vec<Value>),
     Closure {  // x -> x**2
-        params: Vec<BindingPattern>,
+        params: Vec<AssignablePattern>,
         return_type: TypeKind,
         body: Rc<TypedExpr>,
     },
     NativeFn(NativeFn),
     Void,
 }
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Value::Num(l), Value::Num(r)) => l == r,
-            (Value::Str(l), Value::Str(r)) => l == r,
-            (Value::Bool(l), Value::Bool(r)) => l == r,
-            (Value::Arr(l), Value::Arr(r)) => l == r,
-            (Value::Tup(l), Value::Tup(r)) => l == r,
-            _ => false
+            (Value::Num(l), Value::Num(r)) => l.partial_cmp(r),
+            (Value::Str(l), Value::Str(r)) => l.partial_cmp(r),
+            (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
+            (Value::Arr(l), Value::Arr(r)) => l.partial_cmp(r),
+            (Value::Tup(l), Value::Tup(r)) => l.partial_cmp(r),
+            (l, r) => panic!("Cannot compare {l} with {r}"),
         }
     }
 }
-
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BindingPattern {
-    NameAndType {  // x: num
-        name: String,
-        typ: TypeKind,
-        // default: Option<Box<TypedExpression>>,
-    },
-    Wildcard,
-    Array(Vec<BindingPattern>),
-    Tuple(Vec<BindingPattern>),
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool { self.partial_cmp(other) == Some(std::cmp::Ordering::Equal) }
 }
 
-#[derive(Debug)]
-pub enum MatchPattern {
-    Literal(Value),
-    Wildcard,
-    Binding(BindingPattern),
-    Array(Vec<MatchPattern>),
-    Tuple(Vec<MatchPattern>),
+
+#[derive(Debug, Clone)]
+pub enum AssignablePattern {
+    Binding {  // x: num
+        name: String,
+        typ: TypeKind,
+    },
+    Wildcard,  // _
+    Array(Vec<AssignablePattern>),  // [...]
+    Tuple(Vec<AssignablePattern>),  // (...)
     EnumVariant {
         path: Vec<String>, // std::Option
         name: String,   // Some
-        inner_patterns: Vec<MatchPattern>,
+        inner_patterns: Vec<AssignablePattern>,
     },
-    Or(Vec<MatchPattern>),
+    Literal(Value),
+    Or(Vec<AssignablePattern>),
+
+    Place(PlaceExpr),
 }
+
+#[derive(Debug, Clone)]
+pub enum PlaceExpr {
+    Identifier(String),
+    Index { left: Rc<TypedExpr>, index: Rc<TypedExpr> },
+}
+
+
 
 #[derive(Debug)]
 pub struct MatchArm {
-    pub pattern: MatchPattern,
+    pub pattern: AssignablePattern,
     pub extra_condition: Option<TypedExpr>,
     pub body: TypedExpr,
 }
@@ -175,7 +182,7 @@ pub struct MatchArm {
 #[derive(Debug)]
 pub struct EnumExpression {
     pub name: String,
-    pub inner_types: Vec<BindingPattern>,
+    pub inner_types: Vec<AssignablePattern>,
 }
 
 
@@ -204,6 +211,8 @@ pub enum TypeKind {
         name: String,
     },
 
+    Pointer(Box<TypeKind>),
+
     Inference(usize),
     TypeError,
     
@@ -220,6 +229,6 @@ pub enum TypeKind {
 #[derive(Clone)]
 pub enum DefinedTypeKind {
     Enum {
-        inner_types: HashMap<String, Vec<BindingPattern>>,
+        inner_types: HashMap<String, Vec<AssignablePattern>>,
     }
 }

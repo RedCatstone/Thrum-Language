@@ -20,16 +20,15 @@ pub fn tokenize_file(path: &str) -> Result<Vec<Token>, Box<dyn std::error::Error
 fn tokenize_code(source_code: &str) -> Vec<Token> {
     let mut lexer = Lexer::new(source_code);
     lexer.tokenize(None);
-    if !lexer.errors.is_empty() { println!("--- Lexer Errors ---\n{:?}", lexer.errors); }
     lexer.tokens
 }
 
 
 pub struct Lexer<'a> {
     source_iter: Peekable<Chars<'a>>,
-    tokens: Vec<Token>,
+    pub tokens: Vec<Token>,
     line: usize,
-    errors: Vec<LexerError>
+    pub errors: Vec<LexerError>
 }
 
 #[derive(Debug)]
@@ -226,19 +225,35 @@ impl<'a> Lexer<'a> {
         self.add_token(TokenType::StringStart);
         let mut string = String::new();
         while let Some(c) = self.source_iter.next() {
-            if c == quote {
-                if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
-                self.add_token(TokenType::StringEnd);
-                return;
+            match c {
+                c if c == quote => {
+                    if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
+                    self.add_token(TokenType::StringEnd);
+                    return;
+                }
+                '{' => {
+                    if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
+                    string = String::new();
+                    self.add_token(TokenType::LeftBrace);
+                    self.tokenize(Some(1));
+                    continue;
+                }
+                '\n' => self.line += 1,
+                '\\' => {
+                    if let Some(backslash_c) = self.source_iter.next() {
+                        match backslash_c {
+                            'n' => string.push('\n'),
+                            '\n' => {
+                                string.push('\n');
+                                while let Some(' ') = self.source_iter.peek() { self.source_iter.next(); }
+                            }
+                            any => string.push(any),
+                        }
+                    }
+                    continue;
+                }
+                _ => { }
             }
-            if c == '{' {
-                if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
-                string = String::new();
-                self.add_token(TokenType::LeftBrace);
-                self.tokenize(Some(1));
-                continue;
-            }
-            else if c == '\n' { self.line += 1; }
             string.push(c);
         }
         self.add_error(format!("Unterminated string."));
@@ -270,6 +285,9 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
+            }
+            else if c == '_' {
+                self.source_iter.next();
             }
             else { break; }
         }

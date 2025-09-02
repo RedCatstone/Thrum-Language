@@ -1,10 +1,1 @@
-fn factorial(n: num) -> num {
-  let result = if n <= 1 { 1 } 
-  else n * factorial(n - 1)
-
-  return result;
-}
-
-let num = 160;
-print("The factorial of {num} is {factorial(num)}");
-// Expected output: 5040
+let [x, y] = [69, 420]

@@ -1,7 +1,7 @@
 use core::fmt;
-use std::{collections::HashMap, rc::Rc};
+use std::collections::HashMap;
 
-use crate::{ast_structure::{BindingPattern, Expr, MatchArm, MatchPattern, TypeKind, TypedExpr, Value}, nativelib::get_native_lib, tokens::TokenType};
+use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, TypedExpr, Value}, nativelib::get_native_lib, tokens::TokenType, vm::RuntimeError};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeEnvironment {
@@ -39,16 +39,6 @@ impl RuntimeEnvironment {
 
 
 
-
-pub struct RuntimeError {
-    pub message: String
-}
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
 pub enum PropagateValue {
     Error(RuntimeError),
     Return(Value),
@@ -62,7 +52,9 @@ pub struct Executor {
 
 impl Executor {
     pub fn new() -> Self {
-        let mut exe = Executor { env: RuntimeEnvironment::new() };
+        let mut exe = Executor {
+            env: RuntimeEnvironment::new(),
+        };
 
         let native_lib = get_native_lib();
         for (name, _typ, val) in native_lib {

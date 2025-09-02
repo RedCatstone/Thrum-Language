@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::{ast_structure::{BindingPattern, Expr, MatchPattern, TypeKind, TypedExpr, Value}, tokens::{Token, TokenType}};
+use crate::{ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value}, to_bytecode::{Bytecode, OpCode}, tokens::{Token, TokenType}, vm::VM};
 
 
 
@@ -128,18 +128,19 @@ impl fmt::Display for TypeKind {
             TypeKind::ParserUnknown => write!(f, "unknown"),
             TypeKind::TypeError => write!(f, "error"),
             TypeKind::Arr(typ) => write!(f, "arr<{}>", typ),
-            TypeKind::Tup(types) => write!(f, "({})", slice_to_string(types, ", ")),
+            TypeKind::Tup(types) => write!(f, "({})", join_slice_to_string(types, ", ")),
             TypeKind::Fn { param_types, return_type } => {
-                write!(f, "fn<({}) -> {}>", slice_to_string(param_types, ", "), return_type)
+                write!(f, "fn<({}) -> {}>", join_slice_to_string(param_types, ", "), return_type)
             }
             TypeKind::Struct { name, inner_types } => {
                 if inner_types.is_empty() {
                     write!(f, "struct({})", name)
                 } else {
-                    write!(f, "struct({}<{}>)", name, slice_to_string(inner_types, ", "))
+                    write!(f, "struct({}<{}>)", name, join_slice_to_string(inner_types, ", "))
                 }
             }
             TypeKind::Enum { name } => write!(f, "enum({})", name),
+            TypeKind::Pointer(x) => write!(f, "*({})", x),
             TypeKind::Inference(id) => write!(f, "?{}", id),
             TypeKind::Never => write!(f, "never"),
         }
@@ -218,36 +219,31 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
 }
 
 // Custom Debug impl for patterns to make them print cleanly
-impl fmt::Display for BindingPattern {
+impl fmt::Display for AssignablePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BindingPattern::NameAndType { name, typ } => {
-                if *typ == TypeKind::ParserUnknown { write!(f, "{}", name) }
-                else { write!(f, "{}: {}", name, typ) }
-            }
-            BindingPattern::Array(patterns) => write!(f, "[{}]", slice_to_string(patterns, ", ")),
-            BindingPattern::Tuple(patterns) => write!(f, "({})", slice_to_string(patterns, ", ")),
-            BindingPattern::Wildcard => write!(f, "_"),
-        }
-    }
-}
-
-impl fmt::Display for MatchPattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MatchPattern::Literal(value) =>  write!(f, "{}", value),
-            MatchPattern::Wildcard => write!(f, "_"),
-            MatchPattern::Binding(pattern) => write!(f, "{}", pattern),
-            MatchPattern::Array(patterns) => write!(f, "[{}]", slice_to_string(patterns, ", ")),
-            MatchPattern::Tuple(patterns) => write!(f, "({})", slice_to_string(patterns, ", ")),
-            MatchPattern::EnumVariant { path, name, inner_patterns } => {
+            AssignablePattern::Literal(value) =>  write!(f, "{}", value),
+            AssignablePattern::Binding { name, typ } => write!(f, "{}: {}", name, typ),
+            AssignablePattern::Array(patterns) => write!(f, "[{}]", join_slice_to_string(patterns, ", ")),
+            AssignablePattern::Tuple(patterns) => write!(f, "({})", join_slice_to_string(patterns, ", ")),
+            AssignablePattern::Or(patterns) => write!(f, "{}", join_slice_to_string(patterns, " | ")),
+            AssignablePattern::EnumVariant { path, name, inner_patterns } => {
                 write!(f, "{}::{}({})",
                     path.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     name,
                     inner_patterns.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
                 )
             }
-            MatchPattern::Or(patterns) => write!(f, "{}", slice_to_string(patterns, " | ")),
+            AssignablePattern::Wildcard => write!(f, "_"),
+            AssignablePattern::Place(place_expr) => write!(f, "*({})", place_expr),
+        }
+    }
+}
+impl fmt::Display for PlaceExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlaceExpr::Identifier(name) => write!(f, "{}", name),
+            PlaceExpr::Index { left, index } => write!(f, "{:?}[{:?}]", left, index)
         }
     }
 }
@@ -260,12 +256,12 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Num(x) => write!(f, "{}", x),
-            Value::Str(x) => write!(f, "{}", x),
+            Value::Str(x) => write!(f, "\"{}\"", x),
             Value::Bool(x) => write!(f, "{}", x),
-            Value::Arr(x) => write!(f, "{}", slice_to_string(x, ", ")),
-            Value::Tup(x) => write!(f, "{}", slice_to_string(x, ", ")),
+            Value::Arr(x) => write!(f, "[{}]", join_slice_to_string(x, ", ")),
+            Value::Tup(x) => write!(f, "({})", join_slice_to_string(x, ", ")),
             Value::Closure { params, return_type, .. } => {
-                write!(f, "{}{}", slice_to_string(params, ", "), return_type)
+                write!(f, "({}) -> {}", join_slice_to_string(params, ", "), return_type)
             }
             Value::NativeFn(x) => write!(f, "{:?}", x),
             Value::Void => unreachable!("trying to print void"),
@@ -276,6 +272,49 @@ impl fmt::Display for Value {
 
 
 
-pub fn slice_to_string<T: ToString>(vec: &[T], join: &str) -> String {
+
+
+impl fmt::Display for Bytecode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn how_many_operands_for_op_code(op: &OpCode) -> usize {
+            match op {
+                OpCode::GetConstant | OpCode::GetLocal | OpCode::SetLocal | OpCode::TemplateString | OpCode::CreateArray
+                | OpCode::CreateTuple | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack => 1,
+                OpCode::GetArrIndex | OpCode::GetTupIndex => 2,
+                _ => 0,
+            }
+        }
+        let mut strings = Vec::new();
+
+        let mut vm = VM::new();
+        vm.load_bytecode(self.clone());
+        loop {
+            let op_code = vm.read_next_instruction();
+            let mut operands = Vec::new();
+            let operands_required = how_many_operands_for_op_code(&op_code);
+            for _ in 0..operands_required {
+                operands.push(vm.read_next_operand())
+            }
+            if operands.is_empty() { strings.push(format!("{:?}", op_code)); }
+            else { strings.push(format!("{:?}({})", op_code, join_slice_to_string(&operands, ", "))); }
+
+            match op_code {
+                OpCode::Return => break,
+                _ => {}
+            }
+        }
+        write!(f, "OpCodes - [{}],\nConstants - [{}]", strings.join(", "), join_slice_to_string(&self.constants, ", "))
+    }
+}
+
+
+
+
+
+
+
+
+
+pub fn join_slice_to_string<T: ToString>(vec: &[T], join: &str) -> String {
     vec.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(join)
 }
