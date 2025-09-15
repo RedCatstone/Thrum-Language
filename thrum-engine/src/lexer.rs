@@ -145,9 +145,8 @@ impl<'a> Lexer<'a> {
                     self.add_token(token);
                 }
                 '?' => {
-                    let token = if self.match_next('?') {
-                        if self.match_next('=') { TokenType::QuestQuestEqual } else { TokenType::QuestQuest }
-                    } else if self.match_next('.') { TokenType::QuestDot } else { TokenType::Quest };
+                    let token = if self.match_next('=') { TokenType::QuestEqual }
+                    else if self.match_next('.') { TokenType::QuestDot } else { TokenType::Quest };
                     self.add_token(token);
                 }
 
@@ -185,7 +184,7 @@ impl<'a> Lexer<'a> {
                     self.add_token(token);
                 }
                 '!' => {
-                    let token = if self.match_next('=') { TokenType::NotEqual } else { TokenType::Not };
+                    let token = if self.match_next('=') { TokenType::NotEqual } else { TokenType::Exclamation };
                     self.add_token(token);
                 }
                 '<' => {
@@ -319,7 +318,7 @@ impl<'a> Lexer<'a> {
         
         // Check if the identifier is a reserved keyword
         if let Some(token_type) = get_keyword(&text) {
-            self.add_token(token_type.clone());
+            self.add_token(token_type);
         }
         else { self.add_token(TokenType::Identifier(text)); }
     }

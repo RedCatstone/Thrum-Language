@@ -15,8 +15,8 @@ pub enum TokenType {
     StarStar, StarStarEqual,    // ** **=
     Slash, SlashEqual,          // / /=
     Percent, PercentEqual,      // % %=
-    Quest, QuestDot,            // ?
-    QuestQuest, QuestQuestEqual,// ?? ??=
+    Quest, QuestDot, QuestEqual,// ? ?. ?=
+
     // Bitwise
     BitNot, BitNotEqual,        // ~ ~=
     BitAnd, BitAndEqual,        // ~& ~&=
@@ -28,7 +28,7 @@ pub enum TokenType {
     // Logical
     Ampersand, Pipe,            // & |
     EqualEqual,                 // ==
-    Not, NotEqual,              // ! !=
+    Exclamation, NotEqual,              // ! !=
     Less, LessEqual,            // < <=
     Greater, GreaterEqual,      // > >=
     
@@ -51,6 +51,7 @@ pub enum TokenType {
     Break, Continue,
     Fn, Return,
     Let, Const,
+    Mut,
     Struct, Enum,
     Import, From, As,
     Match,
@@ -73,6 +74,7 @@ pub fn get_keyword(identifier: &str) -> Option<TokenType> {
         "break" => Some(TokenType::Break), "continue" => Some(TokenType::Continue),
         "fn" => Some(TokenType::Fn), "return" => Some(TokenType::Return),
         "let" => Some(TokenType::Let), "const" => Some(TokenType::Const),
+        "mut" => Some(TokenType::Mut),
         "struct" => Some(TokenType::Struct), "enum" => Some(TokenType::Enum),
         "match" => Some(TokenType::Match),
         "import" => Some(TokenType::Import), "from" => Some(TokenType::From), "as" => Some(TokenType::As),

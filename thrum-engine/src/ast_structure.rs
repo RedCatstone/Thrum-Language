@@ -22,18 +22,29 @@ impl From<Expr> for TypedExpr {
 #[derive(Debug)]
 pub enum Expr {
     // Primary expressions
-    Identifier(String),
+    Identifier {
+        name: String,
+    },
     Literal(Value),
     
     Let {  // let x = 2
         pattern: AssignablePattern,
         value: Box<TypedExpr>,
+        alternative: Option<Box<TypedExpr>>,
     },
 
     Assign {  // x = 2
         left: Box<AssignablePattern>,
         extra_operator: TokenType,
         right: Box<TypedExpr>,
+    },
+
+    // x^
+    MutRef {
+        expr: Box<TypedExpr>,
+    },
+    Deref {
+        expr: Box<TypedExpr>,
     },
 
     // { ... }
@@ -54,7 +65,7 @@ pub enum Expr {
     TemplateString(Vec<TypedExpr>),
     
     // Option::Some
-    PathedIdentifier(Vec<String>),
+    Path(Vec<String>),
 
     Call {  // x(1, 2)
         callee: Box<TypedExpr>,
@@ -75,6 +86,13 @@ pub enum Expr {
     While {
         condition: Box<TypedExpr>,
         body: Box<TypedExpr>,
+    },
+
+    IfLet {  // if let [x, 2] = [1, 2] { ... }
+        pattern: AssignablePattern,
+        value: Box<TypedExpr>,
+        consequence: Box<TypedExpr>,
+        alternative: Option<Box<TypedExpr>>,        
     },
 
     Match {  // match response { 2 -> "success", _ -> "nope." }
@@ -117,15 +135,21 @@ pub enum Value {
     Bool(bool),
 
     // for evaluating the tree
-    Arr(Vec<Value>),
-    Tup(Vec<Value>),
+    Arr(Rc<Vec<Value>>),
+    Tup(Rc<Vec<Value>>),
+    ValueStackPointer(usize),
     Closure {  // x -> x**2
         params: Vec<AssignablePattern>,
         return_type: TypeKind,
         body: Rc<TypedExpr>,
     },
     NativeFn(NativeFn),
+
+    // for functions that return nothing
     Void,
+
+    // for empty local slots in the vm
+    Empty,
 }
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -160,6 +184,10 @@ pub enum AssignablePattern {
     },
     Literal(Value),
     Or(Vec<AssignablePattern>),
+    Conditional {
+        pattern: Box<AssignablePattern>,
+        body: Rc<TypedExpr>,
+    },
 
     Place(PlaceExpr),
 }
@@ -167,6 +195,7 @@ pub enum AssignablePattern {
 #[derive(Debug, Clone)]
 pub enum PlaceExpr {
     Identifier(String),
+    Deref(String),
     Index { left: Rc<TypedExpr>, index: Rc<TypedExpr> },
 }
 
@@ -175,7 +204,6 @@ pub enum PlaceExpr {
 #[derive(Debug)]
 pub struct MatchArm {
     pub pattern: AssignablePattern,
-    pub extra_condition: Option<TypedExpr>,
     pub body: TypedExpr,
 }
 
@@ -211,7 +239,7 @@ pub enum TypeKind {
         name: String,
     },
 
-    Pointer(Box<TypeKind>),
+    MutPointer(Box<TypeKind>),
 
     Inference(usize),
     TypeError,

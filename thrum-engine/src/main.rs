@@ -2,7 +2,7 @@ use std::env;
 use std::process;
 
 use crate::pretty_printing::join_slice_to_string;
-use crate::to_bytecode::CompileBytecode;
+use crate::to_bytecode::CompileFunction;
 use crate::vm::VM;
 
 mod tokens;
@@ -45,6 +45,7 @@ fn main() {
     }
     else {
         println!("\n--- Parsed Program ---");
+        println!("{:#?}", program);
     }
     drop(parser);
 
@@ -84,26 +85,22 @@ fn main() {
 
 
     // to bytecode
-    let bytecode = {
-        let mut compile_bytecode = CompileBytecode::new();
-        compile_bytecode.compile_program(&program);
-        compile_bytecode.bytecode
-    };
+    let bytecodes = CompileFunction::compile_function(&program, "<script>".to_string());
     println!("\n--- Compiled to Bytecode ---");
-    println!("{:?}", bytecode);
-    println!("{}", bytecode);
+    println!("{:?}", bytecodes);
+    println!("{}", join_slice_to_string(&bytecodes, "\n"));
 
     // execute bytecode!
     println!("\n--- Execution ---");
     let mut vm = VM::new();
-    vm.load_bytecode(bytecode);
+    vm.load_bytecodes(bytecodes);
     match vm.run() {
         Ok(()) => {
             println!("\n--- Execution Successfull ---");
             println!("{}", join_slice_to_string(&vm.value_stack, ", "));
         }
         Err(err) => {
-            println!("--- Runtime Errors ---");
+            println!("\n--- Runtime Error ---");
             println!("{}", err);
         }
     }

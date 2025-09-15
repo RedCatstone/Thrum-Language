@@ -1,5 +1,10 @@
 use std::fmt;
-use crate::{ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value}, to_bytecode::{Bytecode, OpCode}, tokens::{Token, TokenType}, vm::VM};
+use crate::{
+    ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
+    to_bytecode::{BytecodeChunk, OpCode},
+    tokens::{Token, TokenType},
+    vm::{CallFrame, VM}
+};
 
 
 
@@ -43,8 +48,7 @@ impl fmt::Display for TokenType {
             TokenType::PercentEqual => write!(f, "%="),
             TokenType::Quest => write!(f, "?"),
             TokenType::QuestDot => write!(f, "?."),
-            TokenType::QuestQuest => write!(f, "??"),
-            TokenType::QuestQuestEqual => write!(f, "??="),
+            TokenType::QuestEqual => write!(f, "?="),
             
             // Bitwise
             TokenType::BitNot => write!(f, "~!"),
@@ -64,7 +68,7 @@ impl fmt::Display for TokenType {
             TokenType::Ampersand => write!(f, "&"),
             TokenType::Pipe => write!(f, "|"),
             TokenType::EqualEqual => write!(f, "=="),
-            TokenType::Not => write!(f, "!"),
+            TokenType::Exclamation => write!(f, "!"),
             TokenType::NotEqual => write!(f, "!="),
             TokenType::Less => write!(f, "<"),
             TokenType::LessEqual => write!(f, "<="),
@@ -95,6 +99,7 @@ impl fmt::Display for TokenType {
             TokenType::Return => write!(f, "return"),
             TokenType::Let => write!(f, "let"),
             TokenType::Const => write!(f, "const"),
+            TokenType::Mut => write!(f, "mut"),
             TokenType::Struct => write!(f, "struct"),
             TokenType::Enum => write!(f, "enum"),
             TokenType::Import => write!(f, "import"),
@@ -140,7 +145,7 @@ impl fmt::Display for TypeKind {
                 }
             }
             TypeKind::Enum { name } => write!(f, "enum({})", name),
-            TypeKind::Pointer(x) => write!(f, "*({})", x),
+            TypeKind::MutPointer(x) => write!(f, "*({})", x),
             TypeKind::Inference(id) => write!(f, "?{}", id),
             TypeKind::Never => write!(f, "never"),
         }
@@ -165,11 +170,14 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
 
     match &eat.expression {
         Expr::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
-        Expr::Identifier(name) => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
+        Expr::Identifier { name } => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
         
-        Expr::Let { pattern, value } => {
+        Expr::Let { pattern, value, alternative } => {
             writeln!(f, "{i}{branch}{prefix}Let (pattern: {pattern}) {type_info}")?;
             format_recursive(value, f, indent + 1, "value: ", true)?;
+            if let Some(alt) = alternative {
+                format_recursive(alt, f, indent + 1, "alternative: ", true)?;
+            }
         }
         Expr::Block(body) => {
             writeln!(f, "{i}{branch}{prefix}Block {type_info}")?;
@@ -204,6 +212,13 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
                 format_recursive(alt, f, indent + 1, "else: ", true)?;
             }
         }
+        Expr::Match { match_value, arms } => {
+            writeln!(f, "{i}{branch}{prefix}Match {type_info}")?;
+            format_recursive(match_value, f, indent + 1, "match value: ", false)?;
+            for MatchArm { pattern, body } in arms {
+                format_recursive(body, f, indent + 1, &format!("pattern: {pattern:?} arm: "), false)?;
+            }
+        }
         Expr::Array(elements) | Expr::Tuple(elements) => {
             let name = if matches!(eat.expression, Expr::Array(_)) { "Array" } else { "Tuple" };
             writeln!(f, "{i}{branch}{prefix}{name} {type_info}")?;
@@ -236,6 +251,9 @@ impl fmt::Display for AssignablePattern {
             }
             AssignablePattern::Wildcard => write!(f, "_"),
             AssignablePattern::Place(place_expr) => write!(f, "*({})", place_expr),
+            AssignablePattern::Conditional { pattern, body } => {
+                write!(f, "{} if ({:?})", pattern, body)
+            }
         }
     }
 }
@@ -243,6 +261,7 @@ impl fmt::Display for PlaceExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PlaceExpr::Identifier(name) => write!(f, "{}", name),
+            PlaceExpr::Deref(name) => write!(f, "({})^", name),
             PlaceExpr::Index { left, index } => write!(f, "{:?}[{:?}]", left, index)
         }
     }
@@ -260,11 +279,13 @@ impl fmt::Display for Value {
             Value::Bool(x) => write!(f, "{}", x),
             Value::Arr(x) => write!(f, "[{}]", join_slice_to_string(x, ", ")),
             Value::Tup(x) => write!(f, "({})", join_slice_to_string(x, ", ")),
+            Value::ValueStackPointer(i) => write!(f, "*({})", i),
             Value::Closure { params, return_type, .. } => {
                 write!(f, "({}) -> {}", join_slice_to_string(params, ", "), return_type)
             }
             Value::NativeFn(x) => write!(f, "{:?}", x),
-            Value::Void => unreachable!("trying to print void"),
+            Value::Void => write!(f, "<void>"),
+            Value::Empty => write!(f, "<empty>"),
         }
     }
 }
@@ -274,32 +295,31 @@ impl fmt::Display for Value {
 
 
 
-impl fmt::Display for Bytecode {
+impl fmt::Display for BytecodeChunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn how_many_operands_for_op_code(op: &OpCode) -> usize {
             match op {
-                OpCode::GetConstant | OpCode::GetLocal | OpCode::SetLocal | OpCode::TemplateString | OpCode::CreateArray
-                | OpCode::CreateTuple | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack => 1,
-                OpCode::GetArrIndex | OpCode::GetTupIndex => 2,
+                OpCode::ArrUnpackCheckJump | OpCode::LocalsFree => 2,
+                OpCode::ConstGet | OpCode::LocalGet | OpCode::LocalSet | OpCode::StrTemplate | OpCode::ArrCreate
+                | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack => 1,
                 _ => 0,
             }
         }
         let mut strings = Vec::new();
 
-        let mut vm = VM::new();
-        vm.load_bytecode(self.clone());
+        let mut frame = CallFrame::default();
         loop {
-            let op_code = vm.read_next_instruction();
+            let op_code = VM::read_next_instruction(&mut frame, &self);
             let mut operands = Vec::new();
             let operands_required = how_many_operands_for_op_code(&op_code);
             for _ in 0..operands_required {
-                operands.push(vm.read_next_operand())
+                operands.push(VM::read_next_opnum(&mut frame, &self))
             }
             if operands.is_empty() { strings.push(format!("{:?}", op_code)); }
             else { strings.push(format!("{:?}({})", op_code, join_slice_to_string(&operands, ", "))); }
 
             match op_code {
-                OpCode::Return => break,
+                OpCode::Return | OpCode::ReturnVoid => break,
                 _ => {}
             }
         }
