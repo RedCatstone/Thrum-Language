@@ -58,7 +58,8 @@ pub struct CallFrame {
     // instruction pointer
     ip: usize,
 
-    // the current location in the stack where temp values are being calculated with    v points here
+    // the current location in the stack where temp values are being calculated with
+    //                                                          v points here
     // [... values from functions lower on the callstack ..., LOCAL1, LOCAL2, LOCAL3, TEMP1, TEMP2 TEMP3]
     base_pointer: usize,
 }
@@ -79,23 +80,23 @@ impl VM {
     
     pub fn load_bytecodes(&mut self, bytecode_chunks: Vec<BytecodeChunk>) {
         self.bytecode_chunks = bytecode_chunks;
-        self.load_frame_for_index(0);
+        self.load_frame_from_index(0);
     }
 
 
-    fn load_frame_for_index(&mut self, chunk_index: usize) {
+    fn load_frame_from_index(&mut self, chunk_index: usize) {
         let chunk = &self.bytecode_chunks[chunk_index];
         let frame = CallFrame {
             chunk_index: chunk_index,
             ip: 0,
-            base_pointer: self.value_stack.len() + chunk.local_slots_needed,
+            base_pointer: self.value_stack.len(),
         };
-        self.value_stack.resize_with(frame.base_pointer, || Value::Empty);
+        self.value_stack.resize_with(frame.base_pointer + chunk.local_slots_needed, || Value::Empty);
         self.frames.push(frame);
     }
 
 
-    pub fn run(&mut self) -> Result<(), RuntimeError> {
+    pub fn run(&mut self, print_debug_execution: bool) -> Result<(), RuntimeError> {
         loop {
             let frame = match self.frames.last_mut() {
                 Some(x) => x,
@@ -191,18 +192,19 @@ impl VM {
 
                 OpCode::LocalGet => {
                     let slot = VM::read_next_opnum(frame, chunk);
-                    let value = self.value_stack[slot].clone();
+                    let value = self.value_stack[frame.base_pointer + slot].clone();
                     self.value_stack.push(value);
                 }
                 OpCode::LocalSet => {
                     let slot = VM::read_next_opnum(frame, chunk);
                     let value = self.value_stack.pop().unwrap();
-                    self.value_stack[slot] = value;
+                    self.value_stack[frame.base_pointer + slot] = value;
                 }
                 OpCode::LocalsFree => {
                     let slot = VM::read_next_opnum(frame, chunk);
                     let amount = VM::read_next_opnum(frame, chunk);
-                    for i in slot..slot+amount {
+                    let start = frame.base_pointer + slot;
+                    for i in start..(start + amount) {
                         self.value_stack[i] = Value::Empty;
                     }
                 }
@@ -225,7 +227,7 @@ impl VM {
                     let Value::ValueStackPointer(pointer) = self.value_stack.pop().unwrap()
                     else { unreachable!() };
 
-                    let val = self.value_stack[pointer].clone();
+                    let val = self.value_stack[frame.base_pointer + pointer].clone();
                     self.value_stack.push(val);
                 }
 
@@ -234,7 +236,7 @@ impl VM {
                     else { unreachable!("Value was not a pointer") };
                     let value = self.value_stack.pop().unwrap();
                     
-                    self.value_stack[pointer] = value;
+                    self.value_stack[frame.base_pointer + pointer] = value;
                 }
 
 
@@ -258,20 +260,19 @@ impl VM {
                 OpCode::ArrGet => {
                     let index = self.value_stack.pop().unwrap();
                     let arr = self.value_stack.pop().unwrap();
-                    match (arr, index) {
-                        (Value::Arr(a), Value::Num(i)) => {
-                            if i.fract() > 0.0 {
-                                return Err(RuntimeError::error(format!("Cannot index arr with a non-integer number: {}", i)))
-                            }
-                            let corrected_index = i as usize;
-                            let arr_element = match a.get(corrected_index) {
-                                Some(x) => x.clone(),
-                                None => return Err(RuntimeError::error(format!("Index {corrected_index} is out of bounds for arr of length {}.", a.len())))
-                            };
-                            self.value_stack.push(arr_element);
-                        }
-                        (a, i) => unreachable!("not an array, index pair: {}, {}", a, i)
+
+                    let (Value::Arr(a), Value::Num(i)) = (arr, index)
+                    else { unreachable!() };
+
+                    if i.fract() > 0.0 {
+                        return Err(RuntimeError::error(format!("Cannot index arr with a non-integer number: {}", i)))
                     }
+                    let corrected_index = i as usize;
+                    let arr_element = match a.get(corrected_index) {
+                        Some(x) => x.clone(),
+                        None => return Err(RuntimeError::error(format!("Index {corrected_index} is out of bounds for arr of length {}.", a.len())))
+                    };
+                    self.value_stack.push(arr_element);
                 }
 
                 OpCode::ArrRefSet => {
@@ -279,20 +280,17 @@ impl VM {
                     let index = self.value_stack.pop().unwrap();
                     let val = self.value_stack.pop().unwrap();
 
-                    let Value::ValueStackPointer(pointer_loc) = arr_pointer
-                    else { unreachable!("Value was not a pointer") };
-                    
-                    let Value::Num(i) = index
-                    else { unreachable!("Value was not a number") };
+                    let (Value::ValueStackPointer(pointer_loc), Value::Num(i)) = (arr_pointer, index)
+                    else { unreachable!() };
 
-                    let Value::Arr(a) = self.value_stack.get_mut(pointer_loc).unwrap()
+                    let Value::Arr(a) = self.value_stack.get_mut(frame.base_pointer + pointer_loc).unwrap()
                     else { unreachable!("Value was not an array") };
 
                     if i.fract() > 0.0 {
                         return Err(RuntimeError::error(format!("Cannot index arr with a non-integer number: {}", i)))
                     }
                     let i_usize = i as usize;
-                    if i_usize > a.len() {
+                    if i_usize >= a.len() {
                         return Err(RuntimeError::error(format!("Index {i_usize} is out of bounds for arr of length {}.", a.len())));
                     }
 
@@ -341,14 +339,44 @@ impl VM {
                 }
 
 
+                OpCode::CallFn => {
+                    let arg_count = VM::read_next_opnum(frame, chunk);
+                    let callee = self.value_stack.pop().unwrap();
+
+                    let first_arg_index = self.value_stack.len() - arg_count;
+                    let mut args: Vec<Value> = self.value_stack.drain(first_arg_index..).collect();
+
+                    match callee {
+                        Value::NativeFn(native_fn) => {
+                            let result = native_fn(&mut args)?;
+                            match result {
+                                Value::Void => { /* do nothing */}
+                                _ => self.value_stack.push(result),
+                            }
+                        }
+
+                        Value::Closure { chunk_index } => {
+                            self.load_frame_from_index(chunk_index);
+                            self.value_stack.extend(args);
+                        }
+
+                        _ => unreachable!("tried to call {callee}...")
+                    }
+                }
+
+
+
+
                 OpCode::Panic => {
                     let Value::Str(message) = self.value_stack.pop().unwrap()
                     else { unreachable!("last value was not a str") };
                     return Err(RuntimeError { message })
                 }
             }
-            let instruction_name = format!("{:?}", instruction);
-            println!("{:<12}-> {}", instruction_name, join_slice_to_string(&self.value_stack, ", "));
+            if print_debug_execution {
+                let instruction_name = format!("{:?}", instruction);
+                println!("{:<12}-> {}", instruction_name, join_slice_to_string(&self.value_stack, ", "));
+            }
         }
     }
 

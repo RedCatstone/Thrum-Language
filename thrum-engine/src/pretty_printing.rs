@@ -280,9 +280,7 @@ impl fmt::Display for Value {
             Value::Arr(x) => write!(f, "[{}]", join_slice_to_string(x, ", ")),
             Value::Tup(x) => write!(f, "({})", join_slice_to_string(x, ", ")),
             Value::ValueStackPointer(i) => write!(f, "*({})", i),
-            Value::Closure { params, return_type, .. } => {
-                write!(f, "({}) -> {}", join_slice_to_string(params, ", "), return_type)
-            }
+            Value::Closure { chunk_index } => write!(f, "<closure({})>", chunk_index),
             Value::NativeFn(x) => write!(f, "{:?}", x),
             Value::Void => write!(f, "<void>"),
             Value::Empty => write!(f, "<empty>"),
@@ -301,7 +299,7 @@ impl fmt::Display for BytecodeChunk {
             match op {
                 OpCode::ArrUnpackCheckJump | OpCode::LocalsFree => 2,
                 OpCode::ConstGet | OpCode::LocalGet | OpCode::LocalSet | OpCode::StrTemplate | OpCode::ArrCreate
-                | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack => 1,
+                | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack | OpCode::CallFn => 1,
                 _ => 0,
             }
         }

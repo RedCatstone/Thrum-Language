@@ -1,6 +1,6 @@
 use crate::{
     ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
-    nativelib::get_native_lib, tokens::TokenType, vm::RuntimeError
+    nativelib::get_native_lib, tokens::TokenType
 };
 use core::slice;
 use std::{collections::{HashMap, HashSet}, fmt, rc::Rc};
@@ -178,6 +178,16 @@ impl TypeChecker {
                 }
                 else { self.type_mismatch(&type_a, &type_b); }
             }
+            (TypeKind::Fn { param_types: params_a, return_type: return_a },
+            TypeKind::Fn { param_types: params_b, return_type: return_b }) => {
+                if params_a.len() == params_b.len() {
+                    for (ia, ib) in params_a.iter().zip(params_b.iter()) {
+                        self.unify_types(ia, ib);
+                    }
+                }
+                else { self.type_mismatch(&type_a, &type_b); }
+                self.unify_types(&return_a, &return_b);
+            }
 
             _ if type_a != type_b => { self.type_mismatch(&type_a, &type_b); }
 
@@ -253,6 +263,9 @@ impl TypeChecker {
                 self.check_fn_expression(params, return_type, body);
                 TypeKind::Void
             }
+            Expr::Closure { params, return_type: return_value, body } => {
+                self.check_fn_expression(params, return_value, body)
+            }
             Expr::Return(ret) => self.check_return(ret),
             Expr::Break => self.check_break(),
             Expr::Call { callee, arguments } => self.check_fn_call(callee, arguments),
@@ -274,11 +287,7 @@ impl TypeChecker {
             Value::Num(_) => TypeKind::Num,
             Value::Str(_) => TypeKind::Str,
             Value::Bool(_) => TypeKind::Bool,
-            
-            Value::Closure { params, return_type: return_value, body } => {
-                self.check_fn_expression(params, return_value, body)
-            }
-            _ => unreachable!() // other values are not used yet in the parser
+            _ => unreachable!() // other values are not used in the parser
         }
     }
 
@@ -716,6 +725,13 @@ impl TypeChecker {
                 }
                 *return_type.clone()
             }
+            TypeKind::Inference(id) => {
+                // not the best code, but works for now
+                let return_type = self.new_inference_type();
+                let fn_type = TypeKind::Fn { param_types: arg_types, return_type: Box::new(return_type.clone()) };
+                self.unify_types(&fn_type, &TypeKind::Inference(*id));
+                return_type
+            }
             _ => self.add_error(format!("Cannot call a non-function type '{}'", callee.typ))
         }
     }
@@ -877,7 +893,7 @@ impl TypeChecker {
                         worklist.push(body);
                     }
                 }
-                Expr::Literal(Value::Closure { params, return_type, body }) => {
+                Expr::Closure { params, return_type, body } => {
                     for param in params { self.finalize_pattern_type(param); }
                     self.finalize_type(return_type);
                     worklist.push(Rc::get_mut(body).unwrap());

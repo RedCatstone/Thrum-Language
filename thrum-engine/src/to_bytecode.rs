@@ -1,8 +1,8 @@
-use std::{u8, usize};
+use std::{collections::HashMap, u8, usize};
 
 use num_enum::TryFromPrimitive;
 
-use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, tokens::TokenType};
+use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, nativelib::get_native_lib, tokens::TokenType};
 
 
 #[repr(u8)]
@@ -34,6 +34,8 @@ pub enum OpCode {
     // control flow
     Jump, JumpBack, JumpIfFalse,
 
+    CallFn, // arg count
+
 
     // end of function / program
     ReturnVoid, Return,
@@ -50,32 +52,86 @@ pub struct BytecodeChunk {
 }
 
 
-#[derive(Default)]
-pub struct CompileFunction {
-    // bytecodes[0] is what this CompileFunction writes to.
-    // the others are extra functions compiled by other CompileFunction's.
-    pub bytecodes: Vec<BytecodeChunk>,
+
+
+
+pub struct Compiler {
+    globals: HashMap<String, Value>,
+}
+
+impl Compiler {
+    pub fn new() -> Self {
+        Compiler {
+            globals: get_native_lib().into_iter().map(|(name, _typ, val)| (name, val)).collect(),
+        }
+    }
+
+    pub fn compile_program(&mut self, program: &[TypedExpr]) -> Vec<BytecodeChunk> {
+        let mut bytecode_chunks = Vec::new();
+        CompileFunction::compile_function(
+            "<main>".to_string(),
+            program,
+            &[],
+            &mut bytecode_chunks,
+            self.globals.clone()
+        );
+        bytecode_chunks
+    }
+}
+
+
+
+
+
+
+
+struct CompileFunction<'a> {
+    // bytecodes[curr_bytecode_index] is what this CompileFunction writes to.
+    // the others are from other functions being compiled by other CompileFunction's.
+    bytecode_chunks: &'a mut Vec<BytecodeChunk>,
+    curr_bytecode_index: usize,
+
     curr_scope_depth: usize,
     locals: Vec<Local>,
+    globals: HashMap<String, Value>,
 }
-pub struct Local {
+struct Local {
     name: String,
     scope_depth: usize,
 }
 
-impl CompileFunction {
-    pub fn compile_function(program: &[TypedExpr], name: String) -> Vec<BytecodeChunk> {
-        let mut compile_function = CompileFunction::default();
-        compile_function.bytecodes.push(BytecodeChunk { name, ..Default::default() });
+impl<'a> CompileFunction<'a> {
+    fn compile_function(
+        name: String,
+        program: &[TypedExpr],
+        params: &[AssignablePattern],
+        bytecode_chunks: &mut Vec<BytecodeChunk>,
+        globals: HashMap<String, Value>
+    ) -> usize
+        {
+        let mut compile_function = CompileFunction {
+            curr_bytecode_index: bytecode_chunks.len(),
+            bytecode_chunks,
+            curr_scope_depth: 0,
+            locals: Vec::new(),
+            globals
+        };
+        // push the new bytecode chunk for this function
+        compile_function.bytecode_chunks.push(BytecodeChunk { name, ..Default::default() });
 
+        // compile the params first
+        for param in params.iter().rev() {
+            compile_function.compile_binding_pattern(param, &mut Vec::new());
+        }
+
+        // then compile the body!!
         compile_function.compile_block_expression(program);
         if program.last().expect("empty program").typ == TypeKind::Void {
             compile_function.push_op(OpCode::ReturnVoid);
         }
         else { compile_function.push_op(OpCode::Return); }
-        
-        
-        compile_function.bytecodes
+
+        compile_function.curr_bytecode_index
     }
 
     fn compile_expression(&mut self, expr: &TypedExpr) {
@@ -133,7 +189,7 @@ impl CompileFunction {
                 }
             }
             Expr::Identifier { name } => {
-                self.push_get_local(name);
+                self.push_get_identifier(name);
             }
 
             Expr::Assign { left, extra_operator, right } => {
@@ -159,6 +215,16 @@ impl CompileFunction {
                 match &expr.expression {
                     Expr::Identifier { name } => {
                         self.push_get_local_mut(&name);
+                    }
+                    _ => todo!()
+                }
+            }
+
+            Expr::Deref { expr } => {
+                match &expr.expression {
+                    Expr::Identifier { name } => {
+                        self.push_get_identifier(name);
+                        self.push_op(OpCode::FollowPointer);
                     }
                     _ => todo!()
                 }
@@ -197,7 +263,7 @@ impl CompileFunction {
                 //     while-loop
                 // Jump -4
                 // ...
-                let loop_jump_location = self.bytecodes[0].codes.len();
+                let loop_jump_location = self.bytecode_chunks[self.curr_bytecode_index].codes.len();
                 self.compile_expression(condition);
                 self.push_op(OpCode::JumpIfFalse);
                 let exit_jump_to_patch = self.push_opnum_for_patching();
@@ -288,22 +354,51 @@ impl CompileFunction {
                 }
             }
 
+            Expr::Call { callee, arguments } => {
+                for argument in arguments {
+                    self.compile_expression(argument);
+                }
+                self.compile_expression(&callee);
+                self.push_op_with_opnum(OpCode::CallFn, arguments.len());
+            }
+
+            Expr::FnDefinition { name, params, body, .. } => {
+                self.compile_fn_expression(name.to_string(), params, body);
+                self.push_define_local(name.to_string());
+            }
+
+            Expr::Closure { params, body, .. } => {
+                self.compile_fn_expression("<closure>".to_string(), params, body);
+            }
+
+            Expr::Return(expr) => {
+                self.compile_expression(expr);
+
+                if expr.typ == TypeKind::Void { self.push_op(OpCode::ReturnVoid); }
+                else { self.push_op(OpCode::Return); }
+            }
+
             _ => { panic!("{expr:?} not yet implemented") }
         }
     }
 
-    fn push_op(&mut self, op: OpCode) { self.bytecodes[0].codes.push(op as u8); }
+
+
+
+
+
+    fn push_op(&mut self, op: OpCode) { self.bytecode_chunks[self.curr_bytecode_index].codes.push(op as u8); }
     fn push_ops<I>(&mut self, ops: I) where I: IntoIterator<Item = OpCode> {
-        self.bytecodes[0].codes.extend(ops.into_iter().map(|op| op as u8));
+        self.bytecode_chunks[self.curr_bytecode_index].codes.extend(ops.into_iter().map(|op| op as u8));
     }
-    fn push_codes(&mut self, codes: &[u8]) { self.bytecodes[0].codes.extend(codes); }
+    fn push_codes(&mut self, codes: &[u8]) { self.bytecode_chunks[self.curr_bytecode_index].codes.extend(codes); }
     fn push_opnum(&mut self, opnum: usize) {
         if opnum < u8::MAX as usize {
-            self.bytecodes[0].codes.push(opnum as u8);
+            self.bytecode_chunks[self.curr_bytecode_index].codes.push(opnum as u8);
         }
         else {
-            self.bytecodes[0].codes.push(u8::MAX);
-            self.bytecodes[0].codes.extend(opnum.to_ne_bytes());
+            self.bytecode_chunks[self.curr_bytecode_index].codes.push(u8::MAX);
+            self.bytecode_chunks[self.curr_bytecode_index].codes.extend(opnum.to_ne_bytes());
         }
     }
     fn push_op_with_opnum(&mut self, op: OpCode, opnum: usize) {
@@ -317,7 +412,7 @@ impl CompileFunction {
 
     fn push_opnum_for_patching(&mut self) -> usize {
         // e.g. Jump, but we dont know where to jump to yet
-        let patch_location = self.bytecodes[0].codes.len() + 1;
+        let patch_location = self.bytecode_chunks[self.curr_bytecode_index].codes.len() + 1;
         self.push_opnum(usize::MAX);
         patch_location
     }
@@ -325,17 +420,17 @@ impl CompileFunction {
     fn patch_jump_op(&mut self, to_patch_location: usize) {
         // The jump should be relative to the instruction after the jump itself.
         let jump_instruction_end = to_patch_location + std::mem::size_of::<usize>();
-        let jump_target = self.bytecodes[0].codes.len();
+        let jump_target = self.bytecode_chunks[self.curr_bytecode_index].codes.len();
         
         let offset = jump_target - jump_instruction_end;
         let offset_bytes = offset.to_ne_bytes();
         
-        let placeholder_slice = &mut self.bytecodes[0].codes[to_patch_location..(to_patch_location + std::mem::size_of::<usize>())];
+        let placeholder_slice = &mut self.bytecode_chunks[self.curr_bytecode_index].codes[to_patch_location..(to_patch_location + std::mem::size_of::<usize>())];
         placeholder_slice.copy_from_slice(&offset_bytes);
     }
 
     fn push_backwards_jump_op(&mut self, jump_location: usize) {
-        self.push_op_with_opnum(OpCode::JumpBack, self.bytecodes[0].codes.len() - (jump_location - 2));
+        self.push_op_with_opnum(OpCode::JumpBack, self.bytecode_chunks[self.curr_bytecode_index].codes.len() - (jump_location - 2));
     }
 
 
@@ -347,8 +442,8 @@ impl CompileFunction {
         //         self.bytecode.constants.len() - 1
         //     }
         // };
-        let index = self.bytecodes[0].constants.len();
-        self.bytecodes[0].constants.push(val);
+        let index = self.bytecode_chunks[self.curr_bytecode_index].constants.len();
+        self.bytecode_chunks[self.curr_bytecode_index].constants.push(val);
         self.push_op_with_opnum(OpCode::ConstGet, index);
     }
 
@@ -358,7 +453,9 @@ impl CompileFunction {
 
         // update the max locals needed variable
         let before_cleanup = self.locals.len();
-        if before_cleanup > self.bytecodes[0].local_slots_needed { self.bytecodes[0].local_slots_needed = before_cleanup }
+        if before_cleanup > self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed {
+            self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = before_cleanup
+        }
 
         // trash locals that are now out of scope
         while !self.locals.is_empty() && self.locals.last().unwrap().scope_depth > self.curr_scope_depth {
@@ -376,26 +473,36 @@ impl CompileFunction {
         self.push_op_with_opnum(OpCode::LocalSet, self.locals.len());
         self.locals.push(Local { name, scope_depth: self.curr_scope_depth });
     }
-    fn get_local_index(&mut self, name: &str) -> usize {
+    fn get_local_index(&mut self, name: &str) -> Option<usize> {
         for (i, local) in self.locals.iter().enumerate().rev() {
             if local.name == name {
-                return i;
+                return Some(i);
             }
         }
-        unreachable!("could not find {name} in the locals vec...")
+        None
     }
-    fn push_get_local(&mut self, name: &str) {
-        let i = self.get_local_index(name);
-        self.push_op_with_opnum(OpCode::LocalGet, i);
+    fn push_get_identifier(&mut self, name: &str) {
+        let opt_i = self.get_local_index(name);
+        match opt_i {
+            Some(i) => self.push_op_with_opnum(OpCode::LocalGet, i),
+            None => {
+                match self.globals.get(name) {
+                    Some(val) => self.push_get_constant_op(val.clone()),
+                    None => unreachable!("could not find {name} in locals vec or globals...")
+                }
+            }
+        }
     }
     fn push_set_local(&mut self, name: &str) {
-        let i = self.get_local_index(name);
+        let i = self.get_local_index(name).unwrap_or_else(|| panic!("could not find {name} in the locals vec..."));
         self.push_op_with_opnum(OpCode::LocalSet, i);
     }
     fn push_get_local_mut(&mut self, name: &str) {
-        let i = self.get_local_index(name);
+        let i = self.get_local_index(name).unwrap_or_else(|| panic!("could not find {name} in the locals vec..."));
         self.push_get_constant_op(Value::ValueStackPointer(i));
     }
+
+
 
 
 
@@ -416,6 +523,19 @@ impl CompileFunction {
             self.exit_scope();
         }
     }
+
+    fn compile_fn_expression(&mut self, name: String, params: &[AssignablePattern], body: &TypedExpr) {
+        let fn_index = CompileFunction::compile_function(
+            name,
+            std::slice::from_ref(body),
+            &params,
+            self.bytecode_chunks,
+            self.globals.clone()
+        );
+        self.push_get_constant_op(Value::Closure { chunk_index: fn_index });
+    }
+
+
 
 
 
@@ -471,7 +591,7 @@ impl CompileFunction {
             }
 
             AssignablePattern::Place(PlaceExpr::Deref(name)) => {
-                self.push_get_local(name);
+                self.push_get_identifier(name);
                 self.push_op(OpCode::ValueRefSet);
             }
             _ => panic!("not implemented")
@@ -483,14 +603,14 @@ impl CompileFunction {
 
     fn push_place_expr_value(&mut self, place_expr: PlaceExpr) {
         match place_expr {
-            PlaceExpr::Identifier(name) => self.push_get_local(&name),
+            PlaceExpr::Identifier(name) => self.push_get_identifier(&name),
             PlaceExpr::Index { left, index } => {
                 self.compile_expression(&left);
                 self.compile_expression(&index);
                 self.push_op(OpCode::ArrGet);
             }
             PlaceExpr::Deref(name) => {
-                self.push_get_local(&name);
+                self.push_get_identifier(&name);
                 self.push_op(OpCode::FollowPointer);
             }
         }

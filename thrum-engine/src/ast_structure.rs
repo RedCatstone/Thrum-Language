@@ -112,6 +112,12 @@ pub enum Expr {
         body: Rc<TypedExpr>,
     },
 
+    Closure {  // x -> x**2
+        params: Vec<AssignablePattern>,
+        return_type: TypeKind,
+        body: Rc<TypedExpr>,
+    },
+
     Return(Box<TypedExpr>),
     Break,
 
@@ -138,12 +144,10 @@ pub enum Value {
     Arr(Rc<Vec<Value>>),
     Tup(Rc<Vec<Value>>),
     ValueStackPointer(usize),
-    Closure {  // x -> x**2
-        params: Vec<AssignablePattern>,
-        return_type: TypeKind,
-        body: Rc<TypedExpr>,
-    },
     NativeFn(NativeFn),
+    Closure {
+        chunk_index: usize,
+    },
 
     // for functions that return nothing
     Void,

@@ -124,7 +124,7 @@ impl Parser {
             // parse infix/postfix
             left_expr = match operator {
                 TokenType::LeftParen => self.parse_call_operator(left_expr)?,
-                TokenType::RightArrow => Expr::Literal(self.parse_closure_operator(left_expr)?).into(),
+                TokenType::RightArrow => self.parse_closure_operator(left_expr)?,
                 TokenType::LeftBracket => self.parse_index_operator(left_expr)?,
                 TokenType::Colon => self.parse_type_annotation_operator(left_expr)?,
                 TokenType::ColonColon => self.parse_path_operator(left_expr)?,
@@ -213,11 +213,11 @@ impl Parser {
     }
 
 
-    fn parse_closure_operator(&mut self, params_expr: TypedExpr) -> Result<Value, String> {
+    fn parse_closure_operator(&mut self, params_expr: TypedExpr) -> Result<TypedExpr, String> {
         // '->' already consumed.
         let params = self.convert_param_exprs_into_patterns(params_expr)?;
         let body = self.parse_expression(Precedence::Lowest)?.into();
-        Ok(Value::Closure { params, return_type: TypeKind::ParserUnknown, body })
+        Ok(Expr::Closure { params, return_type: TypeKind::ParserUnknown, body }.into())
     }
 
     fn parse_call_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, String> {
@@ -680,7 +680,7 @@ impl Parser {
 
     fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<AssignablePattern>, String> {
         let mut list = Vec::new();
-        loop {
+        while self.peek().token_type != end_token {
             list.push(self.parse_binding_pattern(type_annotation_required)?);
             if !self.optional_token(TokenType::Comma) { break; }
         }
