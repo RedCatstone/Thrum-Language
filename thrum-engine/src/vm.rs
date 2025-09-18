@@ -56,7 +56,7 @@ pub struct CallFrame {
     chunk_index: usize,
 
     // instruction pointer
-    ip: usize,
+    pub ip: usize,
 
     // the current location in the stack where temp values are being calculated with
     //                                                          v points here
@@ -106,17 +106,12 @@ impl VM {
 
             let instruction = VM::read_next_instruction(frame, chunk);
             match instruction {
-                OpCode::ReturnVoid => {
-                    let new_len = self.value_stack.len() - chunk.local_slots_needed;
-                    self.value_stack.truncate(new_len);
-                    self.frames.pop();
-                }
                 OpCode::Return => {
                     let return_value = self.value_stack.pop().unwrap();
                     let new_len = self.value_stack.len() - chunk.local_slots_needed;
                     self.value_stack.truncate(new_len);
-                    self.frames.pop();
                     self.value_stack.push(return_value);
+                    self.frames.pop();
                 }
 
 
@@ -125,6 +120,9 @@ impl VM {
                     let slot = VM::read_next_opnum(frame, chunk);
                     let constant = chunk.constants[slot].clone();
                     self.value_stack.push(constant);
+                }
+                OpCode::PushVoid => {
+                    self.value_stack.push(Value::Void);
                 }
 
                 // Numbers
@@ -203,9 +201,8 @@ impl VM {
                 OpCode::LocalsFree => {
                     let slot = VM::read_next_opnum(frame, chunk);
                     let amount = VM::read_next_opnum(frame, chunk);
-                    let start = frame.base_pointer + slot;
-                    for i in start..(start + amount) {
-                        self.value_stack[i] = Value::Empty;
+                    for i in slot..(slot + amount) {
+                        self.value_stack[frame.base_pointer + i] = Value::Empty;
                     }
                 }
 
@@ -223,11 +220,17 @@ impl VM {
                     self.value_stack.push(value);
                 }
 
+                OpCode::MakePointer => {
+                    let slot = VM::read_next_opnum(frame, chunk);
+                    let pointer = Value::ValueStackPointer(frame.base_pointer + slot);
+                    self.value_stack.push(pointer);
+                }
+
                 OpCode::FollowPointer => {
                     let Value::ValueStackPointer(pointer) = self.value_stack.pop().unwrap()
                     else { unreachable!() };
 
-                    let val = self.value_stack[frame.base_pointer + pointer].clone();
+                    let val = self.value_stack[pointer].clone();
                     self.value_stack.push(val);
                 }
 
@@ -236,7 +239,7 @@ impl VM {
                     else { unreachable!("Value was not a pointer") };
                     let value = self.value_stack.pop().unwrap();
                     
-                    self.value_stack[frame.base_pointer + pointer] = value;
+                    self.value_stack[pointer] = value;
                 }
 
 
@@ -283,7 +286,7 @@ impl VM {
                     let (Value::ValueStackPointer(pointer_loc), Value::Num(i)) = (arr_pointer, index)
                     else { unreachable!() };
 
-                    let Value::Arr(a) = self.value_stack.get_mut(frame.base_pointer + pointer_loc).unwrap()
+                    let Value::Arr(a) = self.value_stack.get_mut(pointer_loc).unwrap()
                     else { unreachable!("Value was not an array") };
 
                     if i.fract() > 0.0 {
@@ -311,7 +314,7 @@ impl VM {
                     let length_required = VM::read_next_opnum(frame, chunk);
                     let jump_offset = VM::read_next_opnum(frame, chunk);
                     let Value::Arr(arr) = self.value_stack.pop().unwrap()
-                        else { unreachable!("last value was not an array") };
+                    else { unreachable!("last value was not an array") };
 
                     // do the length jump, wrong -> jump, correct -> unpack
                     if arr.len() < length_required {
@@ -319,9 +322,9 @@ impl VM {
                     }
                     else {
                         match Rc::try_unwrap(arr) {
-                            Ok(vec) => { self.value_stack.extend(vec); }
+                            Ok(vec) => { self.value_stack.extend(vec.into_iter().take(length_required)); }
                             // other references exist -> clone each Value
-                            Err(vec_rc) => { self.value_stack.extend(vec_rc.iter().cloned()); }
+                            Err(vec_rc) => { self.value_stack.extend(vec_rc.iter().take(length_required).cloned()); }
                         }
                     }
                 }
@@ -425,6 +428,8 @@ impl VM {
                 let str_results: Vec<String> = tup.iter().map(|x| VM::val_to_string(x)).collect();
                 String::from("(") + &str_results.join(", ") + ")"
             }
+
+            Value::Void => "void".to_string(),
             _ => panic!("Literal {:?} cannot be converted into a string.", val)
         }
     }

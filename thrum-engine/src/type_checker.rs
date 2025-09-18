@@ -1,9 +1,7 @@
 use crate::{
-    ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
-    nativelib::get_native_lib, tokens::TokenType
+    ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, desugar, nativelib::get_native_lib, tokens::TokenType
 };
-use core::slice;
-use std::{collections::{HashMap, HashSet}, fmt, rc::Rc};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
 
 
@@ -107,7 +105,7 @@ pub struct TypeChecker {
     next_inference_id: usize,
 
     current_function_return_type: Option<TypeKind>,
-    can_break: bool,
+    current_break_types: Vec<(String, TypeKind)>,
 }
 
 impl TypeChecker {
@@ -118,7 +116,7 @@ impl TypeChecker {
             inference_id_lookup: HashMap::new(),
             next_inference_id: 0,
             current_function_return_type: None,
-            can_break: false,
+            current_break_types: Vec::new(),
         };
 
         let native_lib = get_native_lib();
@@ -159,12 +157,14 @@ impl TypeChecker {
         let type_b = self.prune(b);
         
         match (&type_a, &type_b) {
-            (TypeKind::Never, _) => { /* Do nothing */ }
-            (_, TypeKind::Never) => { /* Do nothing */ }
+            _ if type_a == type_b => { /* Do nothing */ }
 
             // if one is an inference variable, bind it to the other type.
             (TypeKind::Inference(id), _) => { self.inference_id_lookup.insert(*id, type_b.clone()); }
             (_, TypeKind::Inference(id)) => { self.inference_id_lookup.insert(*id, type_a.clone()); }
+            
+            (TypeKind::Never, _) => { /* Do nothing */ }
+            (_, TypeKind::Never) => { /* Do nothing */ }
 
             (TypeKind::MutPointer(inner_a), TypeKind::MutPointer(inner_b))
             | (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
@@ -189,17 +189,14 @@ impl TypeChecker {
                 self.unify_types(&return_a, &return_b);
             }
 
-            _ if type_a != type_b => { self.type_mismatch(&type_a, &type_b); }
-
-            // types match, do nothing
-            _ => {}
+            _ => { self.type_mismatch(&type_a, &type_b); }
         }
     }
 
     fn unify_type_vec(&mut self, vec: &[TypeKind]) -> TypeKind {
         if let Some((first, others)) = vec.split_first() {
-            for typ in others {
-                self.unify_types(first, typ);
+            for other in others {
+                self.unify_types(first, other);
             }
             first.clone()
         }
@@ -240,6 +237,7 @@ impl TypeChecker {
             }
             Expr::Match { match_value, arms: cases } => self.check_match(match_value, cases),
             Expr::While { condition, body } => self.check_while(condition, body),
+            Expr::Loop { body } => self.check_loop(body),
             
             Expr::Assign { left, extra_operator: operator, right } => self.check_assign(left, operator, right),
             Expr::MutRef { expr } => {
@@ -267,7 +265,7 @@ impl TypeChecker {
                 self.check_fn_expression(params, return_value, body)
             }
             Expr::Return(ret) => self.check_return(ret),
-            Expr::Break => self.check_break(),
+            Expr::Break { expr } => self.check_break(expr),
             Expr::Call { callee, arguments } => self.check_fn_call(callee, arguments),
             Expr::Path(segments) => self.check_path_expression(segments),
             Expr::EnumDefinition { name, enums } => self.check_enum_expression(name, enums),
@@ -334,67 +332,64 @@ impl TypeChecker {
             }
             AssignablePattern::Array(elements) => {
                 let mut arr_types = Vec::new();
-                let mut has_place_pattern = false;
-                let mut vars_defined = Vec::new();
-
+                let mut has_place = false;
+                let mut vars = Vec::new();
+                
                 for element in elements {
-                    let AssignablePatternType { typ, has_place, can_fail: _, vars }
-                     = self.check_binding_pattern(element, define_pattern_vars);
-                    arr_types.push(typ);
-                    vars_defined.extend(vars);
-                    if has_place { has_place_pattern = true; }
+                    let pattern_type = self.check_binding_pattern(element, define_pattern_vars);
+                    arr_types.push(pattern_type.typ);
+                    vars.extend(pattern_type.vars);
+                    if pattern_type.has_place { has_place = true; }
                 }
                 let arr_type = self.unify_type_vec(&arr_types);
-                AssignablePatternType { typ: TypeKind::Arr(Box::new(arr_type)), has_place: has_place_pattern, can_fail: true, vars: vars_defined }
+                AssignablePatternType { typ: TypeKind::Arr(Box::new(arr_type)), has_place, can_fail: true, vars }
             }
             AssignablePattern::Tuple(elements) => {
                 let mut tuple_types = Vec::new();
-                let mut has_place_pattern = false;
-                let mut can_fail_pattern = false;
-                let mut vars_defined = Vec::new();
+                let mut has_place = false;
+                let mut can_fail = false;
+                let mut vars = Vec::new();
 
                 for element in elements {
-                    let AssignablePatternType { typ, has_place, can_fail, vars }
-                     = self.check_binding_pattern(element, define_pattern_vars);
-                    tuple_types.push(typ);
-                    vars_defined.extend(vars);
-                    if has_place { has_place_pattern = true; }
-                    if can_fail { can_fail_pattern = true; }
+                    let pattern_type = self.check_binding_pattern(element, define_pattern_vars);
+                    tuple_types.push(pattern_type.typ);
+                    vars.extend(pattern_type.vars);
+                    if pattern_type.has_place { has_place = true; }
+                    if pattern_type.can_fail { can_fail = true; }
                 }
-                AssignablePatternType { typ: TypeKind::Tup(tuple_types), has_place: has_place_pattern, can_fail: can_fail_pattern, vars: vars_defined }
+                AssignablePatternType { typ: TypeKind::Tup(tuple_types), has_place, can_fail, vars }
             }
             AssignablePattern::Wildcard => {
                 AssignablePatternType { typ: self.new_inference_type(), has_place: false, can_fail: false, vars: Vec::new() }
             }
             AssignablePattern::Or(patterns) => {
                 let mut or_types = Vec::new();
-                let mut has_place_pattern = false;
-                let mut can_fail_pattern = false;
-                let mut vars_defined = HashMap::new();
+                let mut has_place = false;
+                let mut can_fail = false;
+                let mut vars = HashMap::new();
 
                 for (i, pattern) in patterns.iter_mut().enumerate() {
-                    let AssignablePatternType { typ, has_place, can_fail, vars }
-                     = self.check_binding_pattern(pattern, define_pattern_vars);
+                    let pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
 
                     // make sure that all or patterns define the same variables.
-                    if i == 0 { vars_defined = vars.into_iter().collect(); }
+                    if i == 0 { vars = pattern_type.vars.into_iter().collect(); }
                     else {
-                        if vars.len() != vars_defined.len() {
-                            self.add_error(format!("Pattern expects {} variables defined, found {}.", vars_defined.len(), vars.len()));
+                        if pattern_type.vars.len() != vars.len() {
+                            self.add_error(format!("Pattern expects {} variables defined, found {}.", vars.len(), pattern_type.vars.len()));
                         }
-                        for (var_str, var_type) in vars {
-                            match vars_defined.get(&var_str) {
-                                Some(x) => { self.unify_types(x, &var_type); }
-                                None => { self.add_error(format!("All or-assign-patterns must define the same variables. Found {}", var_str)); }
+                        for (pattern_var_str, pattern_var_type) in pattern_type.vars {
+                            match vars.get(&pattern_var_str) {
+                                Some(x) => { self.unify_types(x, &pattern_var_type); }
+                                None => { self.add_error(format!("All or-assign-patterns must define the same variables. Found {}", pattern_var_str)); }
                             }
                         }
                     }
-                    or_types.push(typ);
-                    if has_place { has_place_pattern = true; }
-                    if can_fail { can_fail_pattern = true; }
+                    or_types.push(pattern_type.typ);
+                    if pattern_type.has_place { has_place = true; }
+                    if pattern_type.can_fail { can_fail = true; }
                 }
                 let typ = self.unify_type_vec(&or_types);
-                AssignablePatternType { typ, has_place: has_place_pattern, can_fail: can_fail_pattern, vars: vars_defined.into_iter().collect() }
+                AssignablePatternType { typ, has_place, can_fail, vars: vars.into_iter().collect() }
             }
             AssignablePattern::Conditional { pattern, body } => {
                 let mut typ = self.check_binding_pattern(pattern, define_pattern_vars);
@@ -494,7 +489,7 @@ impl TypeChecker {
     fn check_block(&mut self, body: &mut Vec<TypedExpr>) -> TypeKind {
         self.env.enter_scope();
 
-        // pass 1: FnDefinitions
+        // 1. define FnDefinitions
         for expr in body.iter_mut() {
             if let Expr::FnDefinition { name, params, return_type, .. } = &mut expr.expression {
                 let fn_typ = self.get_fn_type(params, return_type, false);
@@ -502,11 +497,13 @@ impl TypeChecker {
             }
         }
 
-        // pass 2: everything else
+        // normal pass
         let mut last_type = TypeKind::Void;
         for expr in body {
             self.check_expression(expr);
-            last_type = expr.typ.clone();
+            if last_type != TypeKind::Never {
+                last_type = expr.typ.clone();
+            }
         }
         self.env.exit_scope();
         last_type
@@ -571,24 +568,18 @@ impl TypeChecker {
         }
     }
 
-    fn check_if(&mut self, condition: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Option<Box<TypedExpr>>) -> TypeKind {
+    fn check_if(&mut self, condition: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Box<TypedExpr>) -> TypeKind {
         self.check_expression(condition);
         self.unify_types(&TypeKind::Bool, &condition.typ);
         
         self.check_expression(consequence);
-        let alternative_typ = {
-            if let Some(alt) = alternative {
-                self.check_expression(alt);
-                &alt.typ
-            }
-            else { &TypeKind::Void }
-        };
+        self.check_expression(alternative);
         
-        self.unify_types(&consequence.typ, alternative_typ);
+        self.unify_types(&consequence.typ, &alternative.typ);
         consequence.typ.clone()
     }
 
-    fn check_if_let(&mut self, pattern: &mut AssignablePattern, value: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Option<Box<TypedExpr>>) -> TypeKind {
+    fn check_if_let(&mut self, pattern: &mut AssignablePattern, value: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Box<TypedExpr>) -> TypeKind {
         self.env.enter_scope();
         let pattern_type = self.check_binding_pattern(pattern, true);
         self.check_expression(value);
@@ -598,14 +589,8 @@ impl TypeChecker {
         self.check_expression(consequence);
         self.env.exit_scope();
 
-        let alternative_typ = {
-            if let Some(alt) = alternative {
-                self.check_expression(alt);
-                &alt.typ
-            }
-            else { &TypeKind::Void }
-        };
-        self.unify_types(&consequence.typ, alternative_typ);
+        self.check_expression(alternative);
+        self.unify_types(&consequence.typ, &alternative.typ);
         consequence.typ.clone()
     }
 
@@ -613,11 +598,19 @@ impl TypeChecker {
         self.check_expression(condition);
         self.unify_types(&TypeKind::Bool, &condition.typ);
 
-        let previous_can_break = self.can_break;
-        self.can_break = true;
+        self.current_break_types.push(("while".to_string(), TypeKind::Void));
         self.check_expression(body);
-        self.can_break = previous_can_break;
+        self.current_break_types.pop().unwrap();
         TypeKind::Void
+    }
+
+    fn check_loop(&mut self, body: &mut TypedExpr) -> TypeKind {
+        let loop_break_type = self.new_inference_type();
+        self.current_break_types.push(("loop".to_string(), loop_break_type.clone()));
+        self.check_expression(body);
+        self.unify_types(&TypeKind::Void, &body.typ);
+        self.current_break_types.pop().unwrap();
+        loop_break_type
     }
 
     fn check_template_string(&mut self, parts: &mut Vec<TypedExpr>) -> TypeKind {
@@ -747,8 +740,13 @@ impl TypeChecker {
         TypeKind::Never
     }
 
-    fn check_break(&mut self) -> TypeKind {
-        if !self.can_break { self.add_error(format!("'break' is only allowed inside loops.")); }
+    fn check_break(&mut self, expr: &mut TypedExpr) -> TypeKind {
+        self.check_expression(expr);
+
+        if let Some((label, typ)) = self.current_break_types.last().cloned() {
+            self.unify_types(&typ, &expr.typ);
+        }
+        else { self.add_error(format!("'break' is only allowed inside loops.")); }
         TypeKind::Never
     }
 
@@ -836,75 +834,37 @@ impl TypeChecker {
 
 
     fn finalize_expressions(&mut self, expressions: &mut [TypedExpr]) {
-        let mut worklist: Vec<&mut TypedExpr> = expressions.iter_mut().collect();
-        while let Some(expr) = worklist.pop() {
-            self.finalize_type(&mut expr.typ);
-            match &mut expr.expression {
-                Expr::Let { value, pattern, alternative, .. } => {
-                    self.finalize_pattern_type(pattern); // Also finalize patterns!
-                    worklist.push(value);
-                    if let Some(alt) = alternative { worklist.push(alt); }
-                }
-                Expr::Block(x) | Expr::Array(x) | Expr::Tuple(x) | Expr::TemplateString(x) => {
-                    worklist.extend(x);
-                }
-                Expr::Prefix { right: x, .. } | Expr::Deref { expr: x } | Expr::MutRef { expr: x } => {
-                    worklist.push(x);
-                }
-                Expr::Infix { left, right, .. } | Expr::Index { left, index: right } => {
-                    worklist.push(left);
-                    worklist.push(right);
-                }
-                Expr::Assign { left, right, .. } => {
-                    self.finalize_pattern_type(left);
-                    worklist.push(right);
-                }
-                Expr::If { condition, consequence, alternative } => {
-                    worklist.push(condition);
-                    worklist.push(consequence);
-                    if let Some(alt) = alternative { worklist.push(alt); }
-                }
-                Expr::IfLet { pattern, value, consequence, alternative } => {
-                    self.finalize_pattern_type(pattern);
-                    worklist.push(value);
-                    worklist.push(consequence);
-                    if let Some(alt) = alternative { worklist.push(alt); }
-                }
-                Expr::While { condition, body } => {
-                    worklist.push(condition);
-                    worklist.push(body);
-                }
-                Expr::Call { callee: function, arguments } => {
-                    worklist.push(function);
-                    worklist.extend(arguments);
-                }
-                Expr::FnDefinition { params, return_type, body, .. } => {
-                    for param in params { self.finalize_pattern_type(param); }
-                    self.finalize_type(return_type);
-                    worklist.push(Rc::get_mut(body).unwrap());
-                }
-                Expr::Return(return_expression) => {
-                    worklist.push(return_expression)
-                }
-                Expr::Match { match_value, arms } => {
-                    worklist.push(match_value);
-                    for MatchArm { pattern, body } in arms {
-                        self.finalize_pattern_type(pattern);
-                        worklist.push(body);
-                    }
-                }
-                Expr::Closure { params, return_type, body } => {
-                    for param in params { self.finalize_pattern_type(param); }
-                    self.finalize_type(return_type);
-                    worklist.push(Rc::get_mut(body).unwrap());
-                }
+        // wrap self in a RefCell to allow multiple "borrows" that are checked at runtime.
+        let self_cell = RefCell::new(self);
 
-                // types should already be finalized
-                Expr::Literal(_) | Expr::Identifier { .. } | Expr::Path(_) | Expr::EnumDefinition{..}
-                | Expr::Break | Expr::Void => { /* already finalized */ }
-                Expr::ParserTempTypeAnnotation(_) => { /* already errored in check_expression() */ }
+        desugar::loop_over_every_ast_node(
+            expressions,
+
+            |mut expr| {
+                let mut self_borrow = self_cell.borrow_mut();
+                self_borrow.finalize_type(&mut expr.typ);
+                match &mut expr.expression {
+                    Expr::FnDefinition { return_type, .. }
+                    | Expr::Closure { return_type, .. } => {
+                        self_borrow.finalize_type(return_type);
+                    }
+
+                    /* Do nothing to other nodes */
+                    _ => { }
+                }
+                expr
+            },
+
+            |mut pattern| {
+                match &mut pattern {
+                    AssignablePattern::Binding { typ, .. } => {
+                        self_cell.borrow_mut().finalize_type(typ);
+                    }
+                    _ => {}
+                }
+                pattern
             }
-        }
+        );
     }
 
     fn finalize_type(&mut self, typ: &mut TypeKind) -> TypeKind {
@@ -924,30 +884,5 @@ impl TypeChecker {
         };
         *typ = final_typ;
         typ.clone()
-    }
-
-    fn finalize_pattern_type(&mut self, pattern: &mut AssignablePattern) {
-         match pattern {
-            AssignablePattern::Binding { typ, .. } => {
-                *typ = self.finalize_type(typ);
-            }
-            AssignablePattern::Array(elements) | AssignablePattern::Tuple(elements)
-            | AssignablePattern::Or(elements) | AssignablePattern::EnumVariant { inner_patterns: elements, .. } => {
-                for element in elements {
-                    self.finalize_pattern_type(element);
-                }
-            }
-            AssignablePattern::Wildcard | AssignablePattern::Literal(_)
-            | AssignablePattern::Place(PlaceExpr::Identifier(_) | PlaceExpr::Deref(_)) => { /* already finalized */ }
-
-            AssignablePattern::Place(PlaceExpr::Index { left, index }) => {
-                self.finalize_expressions(slice::from_mut(Rc::get_mut(left).unwrap()));
-                self.finalize_expressions(slice::from_mut(Rc::get_mut(index).unwrap()));
-            }
-            AssignablePattern::Conditional { pattern, body } => {
-                self.finalize_pattern_type(pattern);
-                self.finalize_expressions(slice::from_mut(Rc::get_mut(body).unwrap()));
-            }
-        }
     }
 }

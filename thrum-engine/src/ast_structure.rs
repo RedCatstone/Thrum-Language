@@ -15,6 +15,11 @@ impl From<Expr> for TypedExpr {
         }
     }
 }
+impl From<Expr> for Box<TypedExpr> {
+    fn from(expr: Expr) -> Self {
+        Box::new(expr.into())
+    }
+}
 
 
 
@@ -22,10 +27,10 @@ impl From<Expr> for TypedExpr {
 #[derive(Debug)]
 pub enum Expr {
     // Primary expressions
+    Literal(Value),
     Identifier {
         name: String,
     },
-    Literal(Value),
     
     Let {  // let x = 2
         pattern: AssignablePattern,
@@ -37,14 +42,6 @@ pub enum Expr {
         left: Box<AssignablePattern>,
         extra_operator: TokenType,
         right: Box<TypedExpr>,
-    },
-
-    // x^
-    MutRef {
-        expr: Box<TypedExpr>,
-    },
-    Deref {
-        expr: Box<TypedExpr>,
     },
 
     // { ... }
@@ -63,6 +60,16 @@ pub enum Expr {
 
     // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
     TemplateString(Vec<TypedExpr>),
+    Tuple(Vec<TypedExpr>),  // (1, 2)
+    Array(Vec<TypedExpr>),  // [1, 2]
+
+    // x^
+    MutRef {
+        expr: Box<TypedExpr>,
+    },
+    Deref {
+        expr: Box<TypedExpr>,
+    },
     
     // Option::Some
     Path(Vec<String>),
@@ -80,24 +87,30 @@ pub enum Expr {
     If {  // if (true) ... else ...
         condition: Box<TypedExpr>,
         consequence: Box<TypedExpr>,
-        alternative: Option<Box<TypedExpr>>,
+        alternative: Box<TypedExpr>,  // void if not present
+    },
+    
+    // sugar
+    IfLet {  // if let [x, 2] = [1, 2] { ... }
+        pattern: AssignablePattern,
+        value: Box<TypedExpr>,
+        consequence: Box<TypedExpr>,
+        alternative: Box<TypedExpr>,  // void if not present
+    },
+    
+    Match {  // match response { 2 -> "success", _ -> "nope." }
+        match_value: Box<TypedExpr>,
+        arms: Vec<MatchArm>,
     },
 
+    // sugar
     While {
         condition: Box<TypedExpr>,
         body: Box<TypedExpr>,
     },
 
-    IfLet {  // if let [x, 2] = [1, 2] { ... }
-        pattern: AssignablePattern,
-        value: Box<TypedExpr>,
-        consequence: Box<TypedExpr>,
-        alternative: Option<Box<TypedExpr>>,        
-    },
-
-    Match {  // match response { 2 -> "success", _ -> "nope." }
-        match_value: Box<TypedExpr>,
-        arms: Vec<MatchArm>,
+    Loop {
+        body: Box<TypedExpr>,
     },
 
     EnumDefinition {
@@ -119,20 +132,15 @@ pub enum Expr {
     },
 
     Return(Box<TypedExpr>),
-    Break,
-
-    Tuple(Vec<TypedExpr>),  // (1, 2)
-    Array(Vec<TypedExpr>),  // [1, 2]
+    Break {
+        expr: Box<TypedExpr>,
+    },
 
     // Semicolons are void expressions.
     Void,
 
-
     ParserTempTypeAnnotation(AssignablePattern),
 }
-
-// type signature for a native Rust function that can be called by thrum.
-// for example `print()`
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -153,6 +161,7 @@ pub enum Value {
     Void,
 
     // for empty local slots in the vm
+    // i could also use <void> here, but i wonna be more clear
     Empty,
 }
 impl PartialOrd for Value {

@@ -93,6 +93,7 @@ impl fmt::Display for TokenType {
             TokenType::For => write!(f, "for"),
             TokenType::In => write!(f, "in"),
             TokenType::While => write!(f, "while"),
+            TokenType::Loop => write!(f, "loop"),
             TokenType::Break => write!(f, "break"),
             TokenType::Continue => write!(f, "continue"),
             TokenType::Fn => write!(f, "fn"),
@@ -145,7 +146,7 @@ impl fmt::Display for TypeKind {
                 }
             }
             TypeKind::Enum { name } => write!(f, "enum({})", name),
-            TypeKind::MutPointer(x) => write!(f, "*({})", x),
+            TypeKind::MutPointer(x) => write!(f, "mut {}", x),
             TypeKind::Inference(id) => write!(f, "?{}", id),
             TypeKind::Never => write!(f, "never"),
         }
@@ -197,26 +198,22 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
         }
         Expr::Call { callee: function, arguments } => {
             writeln!(f, "{i}{branch}{prefix}Call {type_info}")?;
-            let len = arguments.len();
-            format_recursive(function, f, indent + 1, "func: ", len == 0)?;
-            for (idx, arg) in arguments.iter().enumerate() {
-                format_recursive(arg, f, indent + 1, "arg: ", idx == len - 1)?;
+            format_recursive(function, f, indent + 1, "func: ", arguments.len() == 0)?;
+            for (i, arg) in arguments.iter().enumerate() {
+                format_recursive(arg, f, indent + 1, "arg: ", i == arguments.len() - 1)?;
             }
         }
         Expr::If { condition, consequence, alternative } => {
             writeln!(f, "{i}{branch}{prefix}If {type_info}")?;
-            let has_alt = alternative.is_some();
             format_recursive(condition, f, indent + 1, "cond: ", false)?;
-            format_recursive(consequence, f, indent + 1, "then: ", !has_alt)?;
-            if let Some(alt) = alternative {
-                format_recursive(alt, f, indent + 1, "else: ", true)?;
-            }
+            format_recursive(consequence, f, indent + 1, "then: ", false)?;
+            format_recursive(alternative, f, indent + 1, "else: ", true)?;
         }
         Expr::Match { match_value, arms } => {
             writeln!(f, "{i}{branch}{prefix}Match {type_info}")?;
             format_recursive(match_value, f, indent + 1, "match value: ", false)?;
-            for MatchArm { pattern, body } in arms {
-                format_recursive(body, f, indent + 1, &format!("pattern: {pattern:?} arm: "), false)?;
+            for (i, arm) in arms.iter().enumerate() {
+                format_recursive(&arm.body, f, indent + 1, &format!("pattern: {:?} arm: ", arm.pattern), i == arms.len() - 1)?;
             }
         }
         Expr::Array(elements) | Expr::Tuple(elements) => {
@@ -226,6 +223,10 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
             for (idx, el) in elements.iter().enumerate() {
                 format_recursive(el, f, indent + 1, "", idx == len - 1)?;
             }
+        }
+        Expr::Loop { body } => {
+            writeln!(f, "{i}{branch}{prefix}Loop {type_info}")?;
+            format_recursive(body, f, indent + 1, "body: ", true)?;
         }
         // Fallback for any other expression types
         _ => writeln!(f, "{i}{branch}{prefix}{:?} {type_info}", eat.expression)?,
@@ -279,8 +280,8 @@ impl fmt::Display for Value {
             Value::Bool(x) => write!(f, "{}", x),
             Value::Arr(x) => write!(f, "[{}]", join_slice_to_string(x, ", ")),
             Value::Tup(x) => write!(f, "({})", join_slice_to_string(x, ", ")),
-            Value::ValueStackPointer(i) => write!(f, "*({})", i),
-            Value::Closure { chunk_index } => write!(f, "<closure({})>", chunk_index),
+            Value::ValueStackPointer(i) => write!(f, "mut<{}>", i),
+            Value::Closure { chunk_index } => write!(f, "closure<{}>", chunk_index),
             Value::NativeFn(x) => write!(f, "{:?}", x),
             Value::Void => write!(f, "<void>"),
             Value::Empty => write!(f, "<empty>"),
@@ -299,7 +300,8 @@ impl fmt::Display for BytecodeChunk {
             match op {
                 OpCode::ArrUnpackCheckJump | OpCode::LocalsFree => 2,
                 OpCode::ConstGet | OpCode::LocalGet | OpCode::LocalSet | OpCode::StrTemplate | OpCode::ArrCreate
-                | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack | OpCode::CallFn => 1,
+                | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack | OpCode::CallFn
+                | OpCode::MakePointer => 1,
                 _ => 0,
             }
         }
@@ -308,16 +310,22 @@ impl fmt::Display for BytecodeChunk {
         let mut frame = CallFrame::default();
         loop {
             let op_code = VM::read_next_instruction(&mut frame, &self);
-            let mut operands = Vec::new();
-            let operands_required = how_many_operands_for_op_code(&op_code);
-            for _ in 0..operands_required {
-                operands.push(VM::read_next_opnum(&mut frame, &self))
+            let mut opnums = Vec::new();
+
+            for _ in 0..how_many_operands_for_op_code(&op_code) {
+                if frame.ip >= self.codes.len() - 1 {
+                    panic!("Incorrect printing? {op_code:?}, {opnums:?} \nOpCodes - [{}],\nConstants - [{}]\n",
+                        strings.join(", "), join_slice_to_string(&self.constants, ", ")
+                    )
+                }
+                opnums.push(VM::read_next_opnum(&mut frame, &self))
             }
-            if operands.is_empty() { strings.push(format!("{:?}", op_code)); }
-            else { strings.push(format!("{:?}({})", op_code, join_slice_to_string(&operands, ", "))); }
+
+            if opnums.is_empty() { strings.push(format!("{:?}", op_code)); }
+            else { strings.push(format!("{:?}({})", op_code, join_slice_to_string(&opnums, ", "))); }
 
             match op_code {
-                OpCode::Return | OpCode::ReturnVoid => break,
+                OpCode::Return => break,
                 _ => {}
             }
         }

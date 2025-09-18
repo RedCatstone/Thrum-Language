@@ -9,6 +9,7 @@ mod tokens;
 mod lexer;
 mod ast_structure;
 mod parser;
+mod desugar;
 mod type_checker;
 // mod ast_walker;
 mod pretty_printing;
@@ -48,6 +49,10 @@ fn main() {
         println!("{:#?}", program);
     }
     drop(parser);
+
+
+    desugar::desugar(&mut program);
+    println!("\n--- Desugared ---\n");
 
 
     // Type checking!

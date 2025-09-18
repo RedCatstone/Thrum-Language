@@ -171,11 +171,12 @@ impl Parser {
                     TokenType::Let => self.parse_let_expression(),
                     TokenType::If => self.parse_if_expression(),
                     TokenType::While => self.parse_while_expression(),
+                    TokenType::Loop => self.parse_loop_expression(),
                     TokenType::Match => self.parse_match_expression(),
                     TokenType::Enum => self.parse_enum_expression(),
                     TokenType::Fn => self.parse_fn_definition(),
-                    TokenType::Return => self.parse_return_epxression(),
-                    TokenType::Break => Ok(Expr::Break.into()),
+                    TokenType::Return => self.parse_return_expression(),
+                    TokenType::Break => self.parse_break_expression(),
                     TokenType::Mut => {
                         let name = self.expect_identifier("Expected identifier after mut.")?;
                         Ok(Expr::MutRef { expr: Box::new(Expr::Identifier { name }.into()) }.into())
@@ -303,6 +304,11 @@ impl Parser {
 
 
     fn parse_type_expression(&mut self) -> Result<TypeKind, String> {
+        // mut
+        if self.optional_token(TokenType::Mut) {
+            return Ok(TypeKind::MutPointer(Box::new(self.parse_type_expression()?)))
+        }
+
         // '?' Option wrapper
         if self.optional_token(TokenType::Quest) {
             return Ok(TypeKind::Struct { name: "Option".to_string(), inner_types: vec![self.parse_type_expression()?] })
@@ -456,14 +462,14 @@ impl Parser {
             Ok(Expr::If { condition, consequence, alternative }.into())
         }
     }
-    fn parse_if_and_else(&mut self) -> Result<(Box<TypedExpr>, Option<Box<TypedExpr>>), String> {
+    fn parse_if_and_else(&mut self) -> Result<(Box<TypedExpr>, Box<TypedExpr>), String> {
         self.expect_token( TokenType::LeftBrace, "Expected '{' after if condition.")?;
 
         let consequence = Box::new(self.parse_block_expression(TokenType::RightBrace));
         let alternative = if self.optional_token(TokenType::Else) {
-            Some(Box::new(self.parse_expression(Precedence::Lowest)?))
+            Box::new(self.parse_expression(Precedence::Lowest)?)
         }
-        else { None };
+        else { Expr::Void.into() };
 
         Ok((consequence, alternative))
     }
@@ -477,6 +483,14 @@ impl Parser {
         let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
 
         Ok(Expr::While { condition, body }.into())
+    }
+
+    fn parse_loop_expression(&mut self) -> Result<TypedExpr, String> {
+        // 'loop' already consumed.        
+        self.expect_token( TokenType::LeftBrace, "Expected '{' after loop.")?;
+        let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
+
+        Ok(Expr::Loop { body }.into())
     }
 
 
@@ -551,13 +565,22 @@ impl Parser {
     }
 
 
-    fn parse_return_epxression(&mut self) -> Result<TypedExpr, String> {
+    fn parse_return_expression(&mut self) -> Result<TypedExpr, String> {
         // 'return' already consumed.
         let return_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
             Box::new(self.parse_expression(Precedence::Lowest)?)
         }
         else { Box::new(Expr::Void.into()) };
         Ok(Expr::Return(return_expression).into())
+    }
+
+    fn parse_break_expression(&mut self) -> Result<TypedExpr, String> {
+        // 'break' already consumed.
+        let break_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
+            Box::new(self.parse_expression(Precedence::Lowest)?)
+        }
+        else { Box::new(Expr::Void.into()) };
+        Ok(Expr::Break { expr: break_expression }.into())
     }
 
 

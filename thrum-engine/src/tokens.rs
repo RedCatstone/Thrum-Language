@@ -47,7 +47,7 @@ pub enum TokenType {
 
     // Keywords
     If, Else,
-    For, In, While,
+    For, In, While, Loop,
     Break, Continue,
     Fn, Return,
     Let, Const,
@@ -70,7 +70,7 @@ pub fn get_keyword(identifier: &str) -> Option<TokenType> {
     match identifier {
         "if" => Some(TokenType::If), "else" => Some(TokenType::Else),
         "and" => Some(TokenType::Ampersand), "or" => Some(TokenType::Pipe),
-        "for" => Some(TokenType::For), "in" => Some(TokenType::In), "while" => Some(TokenType::While),
+        "for" => Some(TokenType::For), "in" => Some(TokenType::In), "while" => Some(TokenType::While), "loop" => Some(TokenType::Loop),
         "break" => Some(TokenType::Break), "continue" => Some(TokenType::Continue),
         "fn" => Some(TokenType::Fn), "return" => Some(TokenType::Return),
         "let" => Some(TokenType::Let), "const" => Some(TokenType::Const),

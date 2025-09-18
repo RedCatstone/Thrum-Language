@@ -1,16 +1,7 @@
-let map = (arr: arr<num>, transform_fn) -> {
-  let i = 0;
-  while i < 3 {
-    arr[i] = transform_fn(arr[i]);
-    i += 1;
-  }
-  arr
+match (1, 69, 2) {
+    (1, 0, 2) -> "nope"
+    (1, 69, 2) -> "nope 2"
+    (1, 69, 0) -> "nope 3"
+    (0, 1, 2) -> "YES"
+    _ -> "other"
 }
-
-let numbers = [10, 20, 30];
-
-let tripled = map(numbers, (x) -> x * 3);
-
-print("Tripled: {tripled}"); // Expected: [30, 60, 90]
-
-tripled
