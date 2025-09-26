@@ -352,10 +352,7 @@ impl VM {
                     match callee {
                         Value::NativeFn(native_fn) => {
                             let result = native_fn(&mut args)?;
-                            match result {
-                                Value::Void => { /* do nothing */}
-                                _ => self.value_stack.push(result),
-                            }
+                            self.value_stack.push(result);
                         }
 
                         Value::Closure { chunk_index } => {
@@ -389,6 +386,7 @@ impl VM {
         frame.ip += 1;
         byte
     }
+    #[inline(always)]
     fn read_bytes<const N: usize>(frame: &mut CallFrame, chunk: &BytecodeChunk) -> [u8; N] {
         let end = frame.ip + N;
         let bytes = chunk.codes[frame.ip..end]

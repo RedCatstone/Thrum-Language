@@ -132,13 +132,13 @@ impl Parser {
                 TokenType::Caret => Expr::Deref { expr: Box::new(left_expr) }.into(),
                 
                 _ => {  // other operators
-                    let right_expr = self.parse_expression(operator_precedence)?;
                     if operator_precedence == Precedence::Assign {
-                        let assign_pattern = self.convert_assign_expr_into_pattern(left_expr)?;
-                        let extra_operator = Precedence::convert_assign_operator_to_operator(&operator).unwrap();
-                        Expr::Assign { left: Box::new(assign_pattern), extra_operator, right: Box::new(right_expr) }.into()
+                        self.parse_assign_expression(left_expr, operator)?
                     }
-                    else { Expr::Infix { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into() }
+                    else {
+                        let right_expr = self.parse_expression(operator_precedence)?;
+                        Expr::Infix { left: Box::new(left_expr), operator, right: Box::new(right_expr) }.into()
+                    }
                 }
             }
             // loop again to see if there's another operator to the right
@@ -168,7 +168,7 @@ impl Parser {
                     TokenType::LeftParen => self.parse_grouped_expression(),
                     TokenType::LeftBracket => self.parse_array_expression(),
                     TokenType::StringStart => self.parse_template_string(),
-                    TokenType::Let => self.parse_let_expression(),
+                    TokenType::Let => self.parse_let_pattern(),
                     TokenType::If => self.parse_if_expression(),
                     TokenType::While => self.parse_while_expression(),
                     TokenType::Loop => self.parse_loop_expression(),
@@ -266,8 +266,9 @@ impl Parser {
         self.pipe_operators_active -= 1;
 
         Ok(Expr::Block(vec![
-            Expr::Let {
-                pattern: AssignablePattern::Binding { name: pipe_identifier_name, typ: TypeKind::ParserUnknown },
+            Expr::Assign {
+                pattern: Box::new(AssignablePattern::Binding { name: pipe_identifier_name, typ: TypeKind::ParserUnknown }),
+                extra_operator: TokenType::Equal,
                 value: Box::new(left_expr),
                 alternative: None,
             }.into(),
@@ -282,23 +283,10 @@ impl Parser {
 
 
 
-    fn parse_let_expression(&mut self) -> Result<TypedExpr, String> {
+    fn parse_let_pattern(&mut self) -> Result<TypedExpr, String> {
         // 'let' already consumed.
-        let pattern = self.parse_binding_pattern(false)?;
-
-        // `=`
-        self.expect_token(TokenType::Equal, "Expected '=' after variable name.")?;
-
-        // expression
-        let value = Box::new(self.parse_expression(Precedence::Lowest)?);
-
-        // optional else
-        let alternative = if self.optional_token(TokenType::Else) {
-            Some(Box::new(self.parse_expression(Precedence::Lowest)?))
-        }
-        else { None };
-
-        Ok(Expr::Let { pattern, value, alternative }.into())
+        let pattern = self.parse_let_binding_pattern(false)?;
+        Ok(Expr::ParserTempLetPattern(pattern).into())
     }
 
 
@@ -414,6 +402,10 @@ impl Parser {
                 Ok(AssignablePattern::Place(PlaceExpr::Index { left: Rc::new(*left), index: Rc::new(*index) }))
             }
 
+            Expr::ParserTempLetPattern(pattern) => {
+                Ok(pattern)
+            }
+
             Expr::Array(elements) => {
                 let mut converted_elements = Vec::new();
                 for element in elements {
@@ -445,12 +437,33 @@ impl Parser {
 
 
 
+    fn parse_assign_expression(&mut self, left_expr: TypedExpr, operator: TokenType) -> Result<TypedExpr, String> {
+        // '='-like operator already consumed
+        let assign_pattern = Box::new(self.convert_assign_expr_into_pattern(left_expr)?);
+        let extra_operator = Precedence::convert_assign_operator_to_operator(&operator).unwrap();
+
+        // expression
+        let value = Box::new(self.parse_expression(Precedence::Lowest)?);
+
+        // optional else
+        let alternative = if self.optional_token(TokenType::Else) {
+            Some(Box::new(self.parse_expression(Precedence::Lowest)?))
+        }
+        else { None };
+
+        Ok(Expr::Assign { pattern: assign_pattern, extra_operator, value, alternative }.into())
+    }
+
+
+
+
+
 
     
     fn parse_if_expression(&mut self) -> Result<TypedExpr, String> {
         // 'if' already consumed.
         if self.optional_token(TokenType::Let) {
-            let pattern = self.parse_binding_pattern(false)?;
+            let pattern = self.parse_let_binding_pattern(false)?;
             self.expect_token(TokenType::Equal, "Expected '=' after 'if let <pattern>'")?;
             let value = Box::new(self.parse_expression(Precedence::Lowest)?);
             let (consequence, alternative) = self.parse_if_and_else()?;
@@ -502,7 +515,7 @@ impl Parser {
         let mut arms = Vec::new();
 
         while !matches!(self.peek().token_type, TokenType::RightBrace | TokenType::EndOfFile) {
-            let pattern = self.parse_binding_pattern(false)?;
+            let pattern = self.parse_let_binding_pattern(false)?;
 
             self.expect_token( TokenType::RightArrow, "Expected '->' after match block case.")?;            
             let body = self.parse_expression(Precedence::Lowest)?;
@@ -529,7 +542,7 @@ impl Parser {
 
             if self.optional_token(TokenType::LeftParen) {
                 while self.peek().token_type != TokenType::RightParen {
-                    inner_types.push(self.parse_binding_pattern(true)?);
+                    inner_types.push(self.parse_let_binding_pattern(true)?);
                     if !self.optional_token(TokenType::Comma) { break }
                 }
                 self.expect_token(TokenType::RightParen, "Expected ')' to close enum parameter list.")?;
@@ -648,7 +661,7 @@ impl Parser {
 
 
 
-    fn parse_binding_pattern(&mut self, type_annotation_required: bool) -> Result<AssignablePattern, String> {
+    fn parse_let_binding_pattern(&mut self, type_annotation_required: bool) -> Result<AssignablePattern, String> {
         let pattern = match self.peek().token_type.clone() {
             TokenType::Number(num) => { self.advance(); Ok(AssignablePattern::Literal(Value::Num(num))) }
             TokenType::Bool(bool) => { self.advance(); Ok(AssignablePattern::Literal(Value::Bool(bool))) }
@@ -676,7 +689,7 @@ impl Parser {
             TokenType::LeftParen => {
                 self.advance();
 
-                let first_pattern = self.parse_binding_pattern(type_annotation_required)?;
+                let first_pattern = self.parse_let_binding_pattern(type_annotation_required)?;
                 if self.optional_token(TokenType::Comma) {
                     // Tuple!
                     let mut tuple_body = vec![first_pattern];
@@ -704,7 +717,7 @@ impl Parser {
     fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<AssignablePattern>, String> {
         let mut list = Vec::new();
         while self.peek().token_type != end_token {
-            list.push(self.parse_binding_pattern(type_annotation_required)?);
+            list.push(self.parse_let_binding_pattern(type_annotation_required)?);
             if !self.optional_token(TokenType::Comma) { break; }
         }
         self.expect_token(end_token, error_msg)?;

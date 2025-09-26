@@ -31,17 +31,12 @@ pub enum Expr {
     Identifier {
         name: String,
     },
-    
-    Let {  // let x = 2
-        pattern: AssignablePattern,
+
+    Assign {  // x = 2  or  let x = 2
+        pattern: Box<AssignablePattern>,
+        extra_operator: TokenType,
         value: Box<TypedExpr>,
         alternative: Option<Box<TypedExpr>>,
-    },
-
-    Assign {  // x = 2
-        left: Box<AssignablePattern>,
-        extra_operator: TokenType,
-        right: Box<TypedExpr>,
     },
 
     // { ... }
@@ -140,6 +135,7 @@ pub enum Expr {
     Void,
 
     ParserTempTypeAnnotation(AssignablePattern),
+    ParserTempLetPattern(AssignablePattern),
 }
 
 #[derive(Debug, Clone)]

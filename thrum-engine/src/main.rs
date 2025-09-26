@@ -1,5 +1,6 @@
 use std::env;
 use std::process;
+use std::time::Instant;
 
 use crate::pretty_printing::join_slice_to_string;
 use crate::to_bytecode::Compiler;
@@ -101,9 +102,10 @@ fn main() {
     println!("\n--- Execution ---");
     let mut vm = VM::new();
     vm.load_bytecodes(bytecode_chunks);
+    let time_took = Instant::now();
     match vm.run(cfg!(debug_assertions)) {
         Ok(()) => {
-            println!("\n--- Execution Successfull ---");
+            println!("\n--- Execution Successfull ({:?}) ---", time_took.elapsed());
             println!("{}", join_slice_to_string(&vm.value_stack, ", "));
         }
         Err(err) => {

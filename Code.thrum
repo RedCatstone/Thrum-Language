@@ -1,7 +1,10 @@
-match (1, 69, 2) {
-    (1, 0, 2) -> "nope"
-    (1, 69, 2) -> "nope 2"
-    (1, 69, 0) -> "nope 3"
-    (0, 1, 2) -> "YES"
-    _ -> "other"
+fn fib(n: num) -> num {
+    if n <= 1 {
+        return n
+    }
+
+    fib(n - 1) + fib(n - 2)
 }
+
+
+fib(5)

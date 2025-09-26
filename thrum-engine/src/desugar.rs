@@ -12,7 +12,7 @@ pub fn loop_over_every_ast_node(
     pattern_closure: impl Fn(AssignablePattern) -> AssignablePattern,
 ) {
     let mut exprs: Vec<&mut TypedExpr> = program.iter_mut().collect();
-    let mut patterns = Vec::new();
+    let mut patterns: Vec<&mut AssignablePattern> = Vec::new();
     loop {
         if let Some(expr) = exprs.pop() {
             *expr = expr_closure(std::mem::replace(
@@ -21,11 +21,6 @@ pub fn loop_over_every_ast_node(
             ));
 
             match &mut expr.expression {
-                Expr::Let { value, pattern, alternative, .. } => {
-                    patterns.push(pattern); // Also finalize patterns!
-                    exprs.push(value);
-                    if let Some(alt) = alternative { exprs.push(alt); }
-                }
                 Expr::Block(x) | Expr::Array(x) | Expr::Tuple(x) | Expr::TemplateString(x) => {
                     exprs.extend(x);
                 }
@@ -43,9 +38,10 @@ pub fn loop_over_every_ast_node(
                     exprs.push(expr1);
                     exprs.push(expr2);
                 }
-                Expr::Assign { left, right, .. } => {
-                    patterns.push(left);
-                    exprs.push(right);
+                Expr::Assign { pattern, value, alternative, .. } => {
+                    patterns.push(pattern);
+                    exprs.push(value);
+                    if let Some(alt) = alternative { exprs.push(alt); }
                 }
                 Expr::If { condition, consequence, alternative } => {
                     exprs.push(condition);
@@ -77,7 +73,7 @@ pub fn loop_over_every_ast_node(
 
                 // types should already be finalized
                 Expr::Literal(_) | Expr::Identifier { .. } | Expr::Path(_) | Expr::EnumDefinition{..}
-                | Expr::Void | Expr::ParserTempTypeAnnotation(_) => { /* already finalized */ }
+                | Expr::Void | Expr::ParserTempTypeAnnotation(_) | Expr::ParserTempLetPattern(_) => { /* already finalized */ }
             }
         }
         else if let Some(pattern) = patterns.pop() {

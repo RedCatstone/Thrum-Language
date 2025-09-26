@@ -1,6 +1,6 @@
 use std::fmt;
 use crate::{
-    ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
+    ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
     to_bytecode::{BytecodeChunk, OpCode},
     tokens::{Token, TokenType},
     vm::{CallFrame, VM}
@@ -173,8 +173,8 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
         Expr::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
         Expr::Identifier { name } => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
         
-        Expr::Let { pattern, value, alternative } => {
-            writeln!(f, "{i}{branch}{prefix}Let (pattern: {pattern}) {type_info}")?;
+        Expr::Assign { pattern, extra_operator, value, alternative } => {
+            writeln!(f, "{i}{branch}{prefix}Assign (pattern: {pattern}) ({extra_operator}) {type_info}")?;
             format_recursive(value, f, indent + 1, "value: ", true)?;
             if let Some(alt) = alternative {
                 format_recursive(alt, f, indent + 1, "alternative: ", true)?;
@@ -228,6 +228,13 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
             writeln!(f, "{i}{branch}{prefix}Loop {type_info}")?;
             format_recursive(body, f, indent + 1, "body: ", true)?;
         }
+        Expr::FnDefinition { name, params, return_type, body } => {
+            writeln!(f, "{i}{branch}{prefix}FnDefintion({name}) -> {return_type} {type_info}")?;
+            for param in params {
+                writeln!(f, "{i}{branch}{prefix}param: {param}")?;
+            }
+            format_recursive(body, f, indent + 1, "body: ", true)?;
+        }
         // Fallback for any other expression types
         _ => writeln!(f, "{i}{branch}{prefix}{:?} {type_info}", eat.expression)?,
     }
@@ -251,7 +258,7 @@ impl fmt::Display for AssignablePattern {
                 )
             }
             AssignablePattern::Wildcard => write!(f, "_"),
-            AssignablePattern::Place(place_expr) => write!(f, "*({})", place_expr),
+            AssignablePattern::Place(place_expr) => write!(f, "place({})", place_expr),
             AssignablePattern::Conditional { pattern, body } => {
                 write!(f, "{} if ({:?})", pattern, body)
             }
@@ -324,9 +331,9 @@ impl fmt::Display for BytecodeChunk {
             if opnums.is_empty() { strings.push(format!("{:?}", op_code)); }
             else { strings.push(format!("{:?}({})", op_code, join_slice_to_string(&opnums, ", "))); }
 
-            match op_code {
-                OpCode::Return => break,
-                _ => {}
+            // if we are at the end
+            if frame.ip >= self.codes.len() - 1 {
+                break;
             }
         }
         write!(f, "OpCodes - [{}],\nConstants - [{}]", strings.join(", "), join_slice_to_string(&self.constants, ", "))

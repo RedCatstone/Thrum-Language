@@ -195,10 +195,14 @@ impl TypeChecker {
 
     fn unify_type_vec(&mut self, vec: &[TypeKind]) -> TypeKind {
         if let Some((first, others)) = vec.split_first() {
+            let mut is_never = false;
             for other in others {
                 self.unify_types(first, other);
+                if self.prune(other) == TypeKind::Never {
+                    is_never = true;
+                }
             }
-            first.clone()
+            if is_never { TypeKind::Never } else { first.clone() }
         }
         else { self.new_inference_type() }
     }
@@ -223,7 +227,6 @@ impl TypeChecker {
             Expr::Array(elements) => self.check_array(elements),
             Expr::Index { left, index } => self.check_index(left, index),
 
-            Expr::Let { pattern, value, alternative } => self.check_let(pattern, value, alternative),
             Expr::Block(body) => self.check_block(body),
             Expr::Prefix { operator, right } => self.check_prefix(operator, right),
             Expr::Infix { left, operator, right } => {
@@ -239,7 +242,9 @@ impl TypeChecker {
             Expr::While { condition, body } => self.check_while(condition, body),
             Expr::Loop { body } => self.check_loop(body),
             
-            Expr::Assign { left, extra_operator: operator, right } => self.check_assign(left, operator, right),
+            Expr::Assign { pattern, extra_operator, value, alternative } => {
+                self.check_assign(pattern, extra_operator, value, alternative)
+            }
             Expr::MutRef { expr } => {
                 self.check_expression(expr);
                 match &mut expr.expression {
@@ -272,6 +277,7 @@ impl TypeChecker {
             Expr::Void => { TypeKind::Void }
 
             Expr::ParserTempTypeAnnotation(_) => self.add_error(format!("Type annotations are not allowed here.")),
+            Expr::ParserTempLetPattern(_) => self.add_error(format!("Let patterns are not allowed here.")),
         };
 
         expr.typ = self.prune(&inferred_type);
@@ -287,20 +293,6 @@ impl TypeChecker {
             Value::Bool(_) => TypeKind::Bool,
             _ => unreachable!() // other values are not used in the parser
         }
-    }
-
-    fn check_let(&mut self, pattern: &mut AssignablePattern, val: &mut TypedExpr, alternative: &mut Option<Box<TypedExpr>>) -> TypeKind {
-        self.check_expression(val);
-        let pattern_type = self.check_binding_pattern(pattern, true);
-        self.unify_types(&pattern_type.typ, &val.typ);
-
-        if pattern_type.has_place { self.add_error(format!("Place patterns are not allowed in let-bindings.")); }
-
-        if let Some(alt) = alternative {
-            self.check_expression(alt);
-            self.unify_types(&TypeKind::Never, &alt.typ);
-        }
-        TypeKind::Void
     }
 
     fn checked_define_variable(&mut self, name: String, typ: TypeKind) {
@@ -474,9 +466,9 @@ impl TypeChecker {
         for scope in self.env.scopes.iter_mut().rev() {
             if let Some(scope_type) = scope.vars.get_mut(name) {
                 if let Some(already_borrowed_by) = &mut scope_type.mut_borrowed_by {
-                    self.errors.push(TypeCheckError {
-                        message: format!("Cannot borrow {name} as mutable because it is already borrowed as mutable by {already_borrowed_by}.")
-                    });
+                    // self.errors.push(TypeCheckError {
+                    //     message: format!("Cannot borrow {name} as mutable because it is already borrowed as mutable by {already_borrowed_by}.")
+                    // });
                 }
                 scope_type.mut_borrowed_by = Some(name.to_string());
                 return;
@@ -622,18 +614,24 @@ impl TypeChecker {
 
     fn check_tuple(&mut self, elements: &mut Vec<TypedExpr>) -> TypeKind {
         let mut tuple_types = Vec::new();
+        let mut is_never = false;
 
         for element in elements {
             self.check_expression(element);
+            if self.prune(&element.typ) == TypeKind::Never {
+                is_never = true;
+            }
             tuple_types.push(element.typ.clone());
         }
-        TypeKind::Tup(tuple_types)
+        if is_never { TypeKind::Never }
+        else { TypeKind::Tup(tuple_types) }
     }
 
     fn check_array(&mut self, elements: &mut Vec<TypedExpr>) -> TypeKind {
         let types: Vec<TypeKind> = elements.iter_mut().map(|element| { self.check_expression(element); element.typ.clone() }).collect();
         let arr_type = self.unify_type_vec(&types);
-        TypeKind::Arr(Box::new(arr_type))
+        if arr_type == TypeKind::Never { TypeKind::Never }
+        else { TypeKind::Arr(Box::new(arr_type)) }
     }
 
     fn check_index(&mut self, left: &mut TypedExpr, index: &mut TypedExpr) -> TypeKind {
@@ -646,14 +644,16 @@ impl TypeChecker {
         element_type
     }
 
-    fn check_assign(&mut self, left: &mut AssignablePattern, operator: &TokenType, right: &mut TypedExpr) -> TypeKind {
-        let pattern_type = self.check_binding_pattern(left, false);
-        if !pattern_type.vars.is_empty() {
-            self.add_error(format!("Variable defintions are not allowed in assign pattern."));
+    fn check_assign(&mut self, pattern: &mut AssignablePattern, extra_operator: &TokenType, value: &mut TypedExpr, alternative: &mut Option<Box<TypedExpr>>) -> TypeKind {
+        self.check_expression(value);
+        let pattern_type = self.check_binding_pattern(pattern, true);
+        if *extra_operator == TokenType::Equal { self.unify_types(&pattern_type.typ, &value.typ); }
+        else { self.check_infix(&pattern_type.typ, extra_operator, &value.typ); }
+        
+        if let Some(alt) = alternative {
+            self.check_expression(alt);
+            self.unify_types(&TypeKind::Never, &alt.typ);
         }
-        self.check_expression(right);
-        if *operator == TokenType::Equal { self.unify_types(&pattern_type.typ, &right.typ); }
-        else { self.check_infix(&pattern_type.typ, operator, &right.typ); }
 
         TypeKind::Void
     }

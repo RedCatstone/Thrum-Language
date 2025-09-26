@@ -75,7 +75,7 @@ impl Compiler {
             program,
             &[],
             &mut bytecode_chunks,
-            self.globals.clone()
+            &mut self.globals
         );
         bytecode_chunks
     }
@@ -102,7 +102,7 @@ struct CompileFunction<'a> {
 
     curr_scope_depth: usize,
     locals: Vec<Local>,
-    globals: HashMap<String, Value>,
+    globals: &'a mut HashMap<String, Value>,
 
     cur_temp_amount: usize,
 
@@ -120,7 +120,7 @@ impl<'a> CompileFunction<'a> {
         program: &[TypedExpr],
         params: &[AssignablePattern],
         bytecode_chunks: &mut Vec<BytecodeChunk>,
-        globals: HashMap<String, Value>
+        globals: &mut HashMap<String, Value>
     ) -> usize
         {
         let mut compile_function = CompileFunction {
@@ -130,7 +130,7 @@ impl<'a> CompileFunction<'a> {
 
             curr_scope_depth: 0,
             locals: Vec::new(),
-            cur_temp_amount: 0,
+            cur_temp_amount: params.len(),
             loop_jumps: Vec::new(),
         };
         // push the new bytecode chunk for this function
@@ -184,11 +184,28 @@ impl<'a> CompileFunction<'a> {
 
             Expr::Block(body) => self.compile_block_expression(body),
 
-            Expr::Let { pattern, value, alternative } => {
-                self.compile_expression(value);
+            Expr::Identifier { name } => {
+                self.push_get_identifier(name);
+            }
 
+            Expr::Assign { pattern: left, extra_operator, value, alternative } => {
+                // push value to the stack
+                if *extra_operator == TokenType::Equal {
+                    self.compile_expression(value);
+                }
+                else {
+                    match *left.clone() {
+                        AssignablePattern::Place(place) => {
+                            self.push_place_expr_value(place);
+                            self.compile_expression(value);
+                            self.compile_infix(&value.typ, extra_operator, &value.typ);
+                        }
+                        _ => unreachable!("Infix assignments are only allowed for place patterns.")
+                    }
+                }
+                // compile the binding pattern
                 let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(pattern, &mut failure_jumps);
+                self.compile_binding_pattern(&left, &mut failure_jumps);
 
                 // if AssignablePattern can fail, use the else block or panic
                 if !failure_jumps.is_empty() {
@@ -201,35 +218,12 @@ impl<'a> CompileFunction<'a> {
                         self.compile_expression(alt);
                     }
                     else {
-                        self.push_get_constant_op(Value::Str("Let assignment-pattern did not match.".to_string()));
+                        self.push_get_constant_op(Value::Str("Assignment-pattern did not match.".to_string()));
                         self.push_op(OpCode::Panic);
                     }
 
                     self.patch_jump_op(success_jump);
                 }
-                self.push_void();
-            }
-            Expr::Identifier { name } => {
-                self.push_get_identifier(name);
-            }
-
-            Expr::Assign { left, extra_operator, right } => {
-                if *extra_operator == TokenType::Equal {
-                    self.compile_expression(right);
-                }
-                else {
-                    match *left.clone() {
-                        AssignablePattern::Place(place) => {
-                            self.push_place_expr_value(place);
-                            self.compile_expression(right);
-                            self.compile_infix(&right.typ, extra_operator, &right.typ);
-                        }
-                        _ => unreachable!("Infix assignments are only allowed for place patterns.")
-                    }
-                }
-                
-                let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(&left, &mut failure_jumps);
 
                 self.push_void();
             }
@@ -377,20 +371,34 @@ impl<'a> CompileFunction<'a> {
                 self.cur_temp_amount -= arguments.len();
             }
 
-            Expr::FnDefinition { name, params, body, .. } => {
-                self.compile_fn_expression(name.to_string(), params, body);
-                self.push_define_local(name.to_string());
-
+            Expr::FnDefinition { .. } => {
+                // already handled in compile_block_expression
                 self.push_void();
             }
 
             Expr::Closure { params, body, .. } => {
-                self.compile_fn_expression("<closure>".to_string(), params, body);
+                let fn_index = CompileFunction::compile_function(
+                    "<closure>".to_string(),
+                    std::slice::from_ref(body),
+                    &params,
+                    self.bytecode_chunks,
+                    self.globals
+                );
+                self.push_get_constant_op(Value::Closure { chunk_index: fn_index });
             }
 
             Expr::Return(expr) => {
+                let temp_pop_amount = self.cur_temp_amount;
+
+                // pop all temp values
+                for _ in 0..temp_pop_amount {
+                    self.push_pop_value();
+                }
+                // then compile the break expression
                 self.compile_expression(expr);
                 self.push_op(OpCode::Return);
+
+                self.cur_temp_amount += temp_pop_amount;
             }
 
             _ => { panic!("{expr:?} not yet implemented") }
@@ -569,6 +577,28 @@ impl<'a> CompileFunction<'a> {
 
 
     fn compile_block_expression(&mut self, body: &[TypedExpr]) {
+        // define FnDefinitions first
+        // they will actually be globals, so that another CompileFunction can also call it
+        for expr in body {
+            match &expr.expression {
+                Expr::FnDefinition { name, params, body, .. } => {
+                    let fn_index = self.bytecode_chunks.len();
+                    let function_value = Value::Closure { chunk_index: fn_index };
+                    self.globals.insert(name.clone(), function_value);
+    
+                    CompileFunction::compile_function(
+                        name.to_string(),
+                        std::slice::from_ref(body),
+                        &params,
+                        self.bytecode_chunks,
+                        self.globals
+                    );
+                }
+                _ => { /* Do nothing */}
+            }
+        }
+
+        // process all other expressions
         if let Some((last_expr, preceding_exprs)) = body.split_last() {
             self.enter_scope();
 
@@ -586,17 +616,6 @@ impl<'a> CompileFunction<'a> {
             // if block is empty, just push void
             self.push_void();
         }
-    }
-
-    fn compile_fn_expression(&mut self, name: String, params: &[AssignablePattern], body: &TypedExpr) {
-        let fn_index = CompileFunction::compile_function(
-            name,
-            std::slice::from_ref(body),
-            &params,
-            self.bytecode_chunks,
-            self.globals.clone()
-        );
-        self.push_get_constant_op(Value::Closure { chunk_index: fn_index });
     }
 
 
