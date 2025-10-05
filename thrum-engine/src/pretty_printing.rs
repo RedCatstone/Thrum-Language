@@ -2,7 +2,7 @@ use std::fmt;
 use crate::{
     ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
     to_bytecode::{BytecodeChunk, OpCode},
-    tokens::{Token, TokenType},
+    tokens::{LexerToken, TokenType},
     vm::{CallFrame, VM}
 };
 
@@ -113,7 +113,7 @@ impl fmt::Display for TokenType {
     }
 }
 
-impl fmt::Display for Token {
+impl fmt::Display for LexerToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.token_type)
     }

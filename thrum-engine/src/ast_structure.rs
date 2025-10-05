@@ -66,8 +66,13 @@ pub enum Expr {
         expr: Box<TypedExpr>,
     },
     
+    // arr.len
+    MemberAccess {
+        left: Box<TypedExpr>,
+        member: String,
+    },
     // Option::Some
-    Path(Vec<String>),
+    TypePath(Vec<String>),
 
     Call {  // x(1, 2)
         callee: Box<TypedExpr>,
@@ -266,6 +271,18 @@ pub enum TypeKind {
 #[derive(Clone)]
 pub enum DefinedTypeKind {
     Enum {
+        name: String,
         inner_types: HashMap<String, Vec<AssignablePattern>>,
+    },
+
+    Native(TypeKind),
+}
+
+impl DefinedTypeKind {
+    pub fn to_typekind(self) -> TypeKind {
+        match self {
+            Self::Native(typ) => typ,
+            Self::Enum { name, .. } => TypeKind::Enum { name },
+        }
     }
 }

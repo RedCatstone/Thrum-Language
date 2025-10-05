@@ -32,22 +32,23 @@ fn main() {
     println!("\n\n\n--- START ({}) ---", file_path);
 
     // tokenizing
-    let tokens = lexer::tokenize_file(file_path).unwrap_or_else(|e| {
+    let (tokens, lexer_errors) = lexer::tokenize_file(file_path).unwrap_or_else(|e| {
         eprintln!("Application error: {}", e);
         process::exit(1);
     });
+    println!("\n--- Lexer Tokens --- \n{:?}", tokens);
+    if !lexer_errors.is_empty() {
+        println!("\n--- Lexer Errors ---\n{}", join_slice_to_string(&lexer_errors, "\n"));
+        process::exit(1);
+    }
 
     // AST parsing
     let mut parser = parser::Parser::new(tokens);
     let mut program = parser.parse_program();
+    println!("\n--- Parsed Program ---{:#?}", program);
     if !parser.errors.is_empty() {
-        println!("{:#?}", program);
-        println!("--- Parser Errors ---\n{:?}", parser.errors);
+        println!("\n--- Parser Errors ---\n{}", join_slice_to_string(&parser.errors, "\n"));
         process::exit(1);
-    }
-    else {
-        println!("\n--- Parsed Program ---");
-        println!("{:#?}", program);
     }
     drop(parser);
 
@@ -64,10 +65,7 @@ fn main() {
     println!("inference map: {:?}", type_checker.inference_id_lookup);
     println!("{:#?}", program);
     if !type_checker.errors.is_empty() {
-        println!("--- Type Errors ---");
-        for error in type_checker.errors {
-            println!("{}", error);
-        }
+        println!("--- Type Errors ---\n{}", join_slice_to_string(&type_checker.errors, "\n"));
         process::exit(1);
     }
     else { println!("\n--- Type Check Passed ---"); }
@@ -91,8 +89,7 @@ fn main() {
 
 
     // to bytecode
-    let mut compiler = Compiler::new();
-    let bytecode_chunks = compiler.compile_program(&program);
+    let bytecode_chunks = Compiler::compile_program(&program);
     println!("\n--- Compiled to Bytecode ---");
     println!("{:?}", bytecode_chunks);
     println!("{}", join_slice_to_string(&bytecode_chunks, "\n\n"));
@@ -109,7 +106,7 @@ fn main() {
             println!("{}", join_slice_to_string(&vm.value_stack, ", "));
         }
         Err(err) => {
-            println!("\n--- Runtime Error ---");
+            println!("\n--- Runtime Error ({:?}) ---", time_took.elapsed());
             println!("{}", err);
         }
     }

@@ -1,5 +1,7 @@
 use crate::{
-    ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, desugar, nativelib::get_native_lib, tokens::TokenType
+    ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
+    desugar,
+    nativelib::{ThrumModule, ThrumType, get_native_lib}, tokens::TokenType
 };
 use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
@@ -18,11 +20,11 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
 #[derive(Default)]
 struct TypeCheckScope {
-    vars: HashMap<String, ScopeType>,
-    types: HashMap<String, DefinedTypeKind>,
+    vars: HashMap<String, ThrumTypecheckValue>,
+    types: HashMap<String, ThrumType>,
 }
 
-struct ScopeType {
+pub struct ThrumTypecheckValue {
     typ: TypeKind,
     mut_borrowed_by: Option<String>,
 }
@@ -39,7 +41,7 @@ impl TypecheckEnvironment {
 
     pub fn define_variable(&mut self, name: String, typ: TypeKind) -> bool {
         let already_exists = self.name_exists_already(&name);
-        self.scopes.last_mut().unwrap().vars.insert(name, ScopeType { typ, mut_borrowed_by: None });
+        self.scopes.last_mut().unwrap().vars.insert(name, ThrumTypecheckValue { typ, mut_borrowed_by: None });
         already_exists
     }
     pub fn lookup_variable(&self, name: &str) -> Option<TypeKind> {
@@ -51,12 +53,12 @@ impl TypecheckEnvironment {
         None
     }
 
-    pub fn define_type(&mut self, name: String, typ: DefinedTypeKind) -> bool {
+    pub fn define_type(&mut self, name: String, typ: ThrumType) -> bool {
         let already_exists = self.name_exists_already(&name);
         self.scopes.last_mut().unwrap().types.insert(name, typ);
         already_exists
     }
-    pub fn lookup_type(&mut self, name: &str) -> Option<DefinedTypeKind> {
+    pub fn lookup_type(&mut self, name: &str) -> Option<ThrumType> {
         for scope in self.scopes.iter().rev() {
             if let Some(t) = scope.types.get(name) {
                 return Some(t.clone());
@@ -101,6 +103,7 @@ struct AssignablePatternType {
 pub struct TypeChecker {
     pub errors: Vec<TypeCheckError>,
     env: TypecheckEnvironment,
+    library: ThrumModule,
     pub inference_id_lookup: HashMap<usize, TypeKind>,
     next_inference_id: usize,
 
@@ -110,21 +113,31 @@ pub struct TypeChecker {
 
 impl TypeChecker {
     pub fn new() -> Self {
-        let mut checker = TypeChecker {
+        let library = get_native_lib();
+        let mut env = TypecheckEnvironment::new();
+        Self::load_prelude_into_env(&library, &mut env);
+
+        TypeChecker {
             errors: Vec::new(),
-            env: TypecheckEnvironment::new(),
+            env,
+            library,
             inference_id_lookup: HashMap::new(),
             next_inference_id: 0,
             current_function_return_type: None,
             current_break_types: Vec::new(),
-        };
-
-        let native_lib = get_native_lib();
-        for (name, typ, _val) in native_lib {
-            checker.env.define_variable(name, typ);
         }
+    }
 
-        checker
+    fn load_prelude_into_env(module: &ThrumModule, env: &mut TypecheckEnvironment) {
+        for (name, value) in &module.values {
+            if value.is_prelude {
+                env.define_variable(name.clone(), value.typ.clone());
+            }
+        }
+        // Recursion
+        for sub_module in module.sub_modules.values() {
+            Self::load_prelude_into_env(sub_module, env);
+        }
     }
 
     fn add_error(&mut self, message: String) -> TypeKind {
@@ -272,7 +285,9 @@ impl TypeChecker {
             Expr::Return(ret) => self.check_return(ret),
             Expr::Break { expr } => self.check_break(expr),
             Expr::Call { callee, arguments } => self.check_fn_call(callee, arguments),
-            Expr::Path(segments) => self.check_path_expression(segments),
+
+            Expr::TypePath(segments) => self.check_path_expression(segments),
+            Expr::MemberAccess { left, member } => self.check_member_acess_expression(left, member),
             Expr::EnumDefinition { name, enums } => self.check_enum_expression(name, enums),
             Expr::Void => { TypeKind::Void }
 
@@ -300,7 +315,7 @@ impl TypeChecker {
             self.add_error(format!("Name '{name}' is already defined in this scope."));
         }
     }
-    fn checked_define_type(&mut self, name: String, typ: DefinedTypeKind) {
+    fn checked_define_type(&mut self, name: String, typ: ThrumType) {
         if self.env.define_type(name.clone(), typ) {
             self.add_error(format!("Name '{name}' is already defined in this scope."));
         }
@@ -791,34 +806,65 @@ impl TypeChecker {
 
 
     fn check_enum_expression(&mut self, name: &mut String, enums: &mut Vec<EnumExpression>) -> TypeKind {
-        self.checked_define_type(name.clone(), DefinedTypeKind::Enum {
-            inner_types: enums.into_iter()
-                .map(|x| (x.name.clone(), x.inner_types.clone()))
-                .collect()
+        self.checked_define_type(name.clone(), ThrumType {
+            typ: DefinedTypeKind::Enum {
+                name: name.to_string(),
+                inner_types: enums.into_iter()
+                    .map(|x| (x.name.clone(), x.inner_types.clone()))
+                    .collect()
+            },
+            values: HashMap::new()
         });
         TypeKind::Void
     }
 
 
     fn check_path_expression(&mut self, segments: &[String]) -> TypeKind {
-        // Look up the first segment as a defined type (e.g., an Enum name)
-        let first_segment = &segments[0];
+        let mut curr_module = &self.library;
 
-        if let Some(typ) = self.env.lookup_type(first_segment) {
-            match typ {
-                DefinedTypeKind::Enum { inner_types } => {
-                    let enum_variation_name = &segments[1];
-                    if let Some(enum_variation) = inner_types.get(enum_variation_name) {
-                        return TypeKind::Enum { name: first_segment.clone() };
+        for (i, segment) in segments.iter().enumerate() {
+            // try to descend into a sub module
+            if let Some(sub_module) = curr_module.sub_modules.get(segment) {
+                curr_module = sub_module;
+                continue;
+            }
+
+            // else check for types (e.g. str::len)
+            if let Some(module_type) = curr_module.types.get(segment) {
+                let remaining_segments = &segments[(i + 1)..];
+                match remaining_segments {
+                    // 0 remaining segments -> type
+                    [] => return module_type.typ.clone().to_typekind(),
+                    // 1 remaining, meaning its a value defined on that type.
+                    [last_segment] => {
+                        if let Some(type_val) = module_type.values.get(last_segment) {
+                            return type_val.typ.clone()
+                        }
                     }
-                    else { return self.add_error(format!("Enum {} doesn't have a variation named {}.", first_segment, enum_variation_name)) }
+                    // 2 or more remaining segments
+                    _ => return self.add_error(format!("type path had 2 or more remaining segments."))
                 }
             }
+
+            // else check for consts/functions (e.g. io::print)
+            if let Some(module_val) = curr_module.values.get(segment) {
+                if i == segments.len() - 1 {
+                    return module_val.typ.clone()
+                }
+                else {
+                    return self.add_error(format!("value path too long."))
+                }
+            }
+
+            return self.add_error(format!("segment {segment} could not be found..."));
         }
-        else if let Some(var) = self.env.lookup_variable(first_segment) {
-            return var.clone();
-        }
-        else { return self.add_error(format!("Could not find {}.", first_segment)); }
+
+        self.add_error(format!("'{}' could not be found...", segments.join("::")))
+    }
+
+
+    fn check_member_acess_expression(&mut self, left: &mut TypedExpr, member: &mut String) -> TypeKind {
+        todo!()
     }
 
 

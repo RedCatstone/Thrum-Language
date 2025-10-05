@@ -1,32 +1,31 @@
+use core::fmt;
 use std::{fs::File, str::Chars, iter::Peekable};
 use memmap2::Mmap;
 
-use crate::tokens::{Token, TokenType, get_keyword};
+use crate::tokens::{LexerToken, TokenType, get_keyword};
 
 
 
-pub fn tokenize_file(path: &str) -> Result<Vec<Token>, Box<dyn std::error::Error>> {
+pub fn tokenize_file(path: &str) -> Result<(Vec<LexerToken>, Vec<LexerError>), Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     // memory-map the file. (unsafe because it could be modified by another process)
     let mmap = unsafe { Mmap::map(&file)? };
     // treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
     let source_code = std::str::from_utf8(&mmap)?;
 
-    let tokens = tokenize_code(source_code);
-    println!("{:?}", tokens);
-    Ok(tokens)
+    Ok(tokenize_code(source_code))
 }
 
-fn tokenize_code(source_code: &str) -> Vec<Token> {
+fn tokenize_code(source_code: &str) -> (Vec<LexerToken>, Vec<LexerError>) {
     let mut lexer = Lexer::new(source_code);
     lexer.tokenize(None);
-    lexer.tokens
+    (lexer.tokens, lexer.errors)
 }
 
 
 pub struct Lexer<'a> {
     source_iter: Peekable<Chars<'a>>,
-    pub tokens: Vec<Token>,
+    pub tokens: Vec<LexerToken>,
     line: usize,
     pub errors: Vec<LexerError>
 }
@@ -35,6 +34,12 @@ pub struct Lexer<'a> {
 pub struct LexerError {
     pub line: usize,
     pub message: String,
+}
+
+impl fmt::Display for LexerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.line, self.message)
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -48,7 +53,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn add_token(&mut self, token_type: TokenType) {
-        self.tokens.push(Token { token_type, line: self.line });
+        self.tokens.push(LexerToken { token_type, line: self.line });
     }
 
     fn add_error(&mut self, error_msg: String) {

@@ -1,8 +1,8 @@
-use std::{collections::HashMap, u8, usize};
+use std::{u8, usize};
 
 use num_enum::TryFromPrimitive;
 
-use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, nativelib::get_native_lib, tokens::TokenType};
+use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, nativelib::{ThrumModule, get_native_lib}, tokens::TokenType};
 
 
 #[repr(u8)]
@@ -45,7 +45,7 @@ pub enum OpCode {
     Panic,
 }
 
-#[derive(Default, Debug, Clone)]  // Clone is only for printing
+#[derive(Default, Debug)]
 pub struct BytecodeChunk {
     pub name: String,
     pub codes: Vec<u8>,
@@ -58,26 +58,37 @@ pub struct BytecodeChunk {
 
 
 pub struct Compiler {
-    globals: HashMap<String, Value>,
 }
 
 impl Compiler {
-    pub fn new() -> Self {
-        Compiler {
-            globals: get_native_lib().into_iter().map(|(name, _typ, val)| (name, val)).collect(),
-        }
-    }
-
-    pub fn compile_program(&mut self, program: &[TypedExpr]) -> Vec<BytecodeChunk> {
+    pub fn compile_program(program: &[TypedExpr]) -> Vec<BytecodeChunk> {
         let mut bytecode_chunks = Vec::new();
+
+        let library = get_native_lib();
+        let mut locals = vec![Vec::new()];
+        Self::load_prelude_into_locals_vec(&library, &mut locals[0]);
+
         CompileFunction::compile_function(
             "<main>".to_string(),
             program,
             &[],
             &mut bytecode_chunks,
-            &mut self.globals
+            &mut locals,
+            &library,
         );
         bytecode_chunks
+    }
+
+    fn load_prelude_into_locals_vec(module: &ThrumModule, locals: &mut Vec<Local>) {
+        for (name, value) in &module.values {
+            if value.is_prelude {
+                locals.push(Local { name: name.clone(), scope_depth: 0, known_value: Some(value.val.clone()) });
+            }
+        }
+        // Recursion
+        for sub_module in module.sub_modules.values() {
+            Self::load_prelude_into_locals_vec(sub_module, locals);
+        }
     }
 }
 
@@ -100,18 +111,22 @@ struct CompileFunction<'a> {
     bytecode_chunks: &'a mut Vec<BytecodeChunk>,
     curr_bytecode_index: usize,
 
+    // locals: vec![localvec_from_previous_compile_function, this_locals_vec]
+    // if this CompileFunction needs to push/pop locals, its local vec is always .last()
+    locals: &'a mut Vec<Vec<Local>>,
     curr_scope_depth: usize,
-    locals: Vec<Local>,
-    globals: &'a mut HashMap<String, Value>,
 
-    cur_temp_amount: usize,
-
+    library: &'a ThrumModule,
+    
     // break / continue
     loop_jumps: Vec<Vec<usize>>,
+    // compiling `let x = 2 + 2` first has 2 temps (2, 2) then goes to 1 temp (4) then goes to 0.
+    cur_temp_amount: usize,
 }
 struct Local {
     name: String,
     scope_depth: usize,
+    known_value: Option<Value>,
 }
 
 impl<'a> CompileFunction<'a> {
@@ -120,21 +135,23 @@ impl<'a> CompileFunction<'a> {
         program: &[TypedExpr],
         params: &[AssignablePattern],
         bytecode_chunks: &mut Vec<BytecodeChunk>,
-        globals: &mut HashMap<String, Value>
+        locals: &mut Vec<Vec<Local>>,
+        library: &ThrumModule,
     ) -> usize
         {
         let mut compile_function = CompileFunction {
             curr_bytecode_index: bytecode_chunks.len(),
             bytecode_chunks,
-            globals,
-
+            locals,
             curr_scope_depth: 0,
-            locals: Vec::new(),
+            library,
+
             cur_temp_amount: params.len(),
             loop_jumps: Vec::new(),
         };
-        // push the new bytecode chunk for this function
+        // push the new bytecode_chunk and localsvec for this function
         compile_function.bytecode_chunks.push(BytecodeChunk { name, ..Default::default() });
+        compile_function.locals.push(Vec::new());
 
         // compile the params first
         for param in params.iter().rev() {
@@ -143,8 +160,10 @@ impl<'a> CompileFunction<'a> {
 
         // then compile the body!!
         compile_function.compile_block_expression(program);
-        compile_function.push_op(OpCode::Return);
 
+        // finally, return
+        compile_function.push_op(OpCode::Return);
+        compile_function.locals.pop();
         compile_function.curr_bytecode_index
     }
 
@@ -382,7 +401,8 @@ impl<'a> CompileFunction<'a> {
                     std::slice::from_ref(body),
                     &params,
                     self.bytecode_chunks,
-                    self.globals
+                    self.locals,
+                    self.library
                 );
                 self.push_get_constant_op(Value::Closure { chunk_index: fn_index });
             }
@@ -399,6 +419,50 @@ impl<'a> CompileFunction<'a> {
                 self.push_op(OpCode::Return);
 
                 self.cur_temp_amount += temp_pop_amount;
+            }
+
+
+            Expr::TypePath(segments) => {
+                let mut curr_module = self.library;
+
+                for (i, segment) in segments.iter().enumerate() {
+                    // try to descend into a sub module
+                    if let Some(sub_module) = curr_module.sub_modules.get(segment) {
+                        curr_module = sub_module;
+                        continue;
+                    }
+        
+                    // else check for types (e.g. str::len)
+                    if let Some(module_type) = curr_module.types.get(segment) {
+                        let remaining_segments = &segments[(i + 1)..];
+                        match remaining_segments {
+                            // 0 remaining segments -> type
+                            [] => unreachable!("Cannot use a type ('{}') as a value.", segment),
+                            // 1 remaining, meaning its a value defined on that type.
+                            [last_segment] => {
+                                if let Some(type_val) = module_type.values.get(last_segment) {
+                                    self.push_get_constant_op(type_val.val.clone());
+                                    break;
+                                }
+                            }
+                            // 2 or more remaining segments
+                            _ => unreachable!("type path had 2 or more remaining segments.")
+                        }
+                    }
+        
+                    // else check for consts/functions (e.g. io::print)
+                    if let Some(module_val) = curr_module.values.get(segment) {
+                        if i == segments.len() - 1 {
+                            self.push_get_constant_op(module_val.val.clone());
+                            break;
+                        }
+                        else {
+                            unreachable!("value path too long.")
+                        }
+                    }
+        
+                    unreachable!("segment {segment} could not be found...");
+                }
             }
 
             _ => { panic!("{expr:?} not yet implemented") }
@@ -481,34 +545,40 @@ impl<'a> CompileFunction<'a> {
         self.curr_scope_depth -= 1;
 
         // update the max locals needed variable
-        let before_cleanup = self.locals.len();
+        let before_cleanup = self.get_curr_locals().len();
         if before_cleanup > self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed {
             self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = before_cleanup
         }
 
         // trash locals that are now out of scope
-        while !self.locals.is_empty() && self.locals.last().unwrap().scope_depth > self.curr_scope_depth {
-            self.locals.pop();
+        while !self.get_curr_locals().is_empty() && self.get_curr_locals().last().unwrap().scope_depth > self.curr_scope_depth {
+            self.get_curr_locals().pop();
         }
 
         let mut cleanup_code = Vec::new();
-        let cleanup_amount = before_cleanup - self.locals.len();
+        let cleanup_amount = before_cleanup - self.get_curr_locals().len();
         if cleanup_amount > 0 {
             cleanup_code.push(OpCode::LocalsFree as u8);
-            cleanup_code.push(self.locals.len() as u8);
+            cleanup_code.push(self.get_curr_locals().len() as u8);
             cleanup_code.push(cleanup_amount as u8);
         }
         cleanup_code
     }
 
-    fn push_define_local(&mut self, name: String) {
-        self.push_op_with_opnum(OpCode::LocalSet, self.locals.len());
-        self.locals.push(Local { name, scope_depth: self.curr_scope_depth });
+    fn get_curr_locals(&mut self) -> &mut Vec<Local> {
+        self.locals.last_mut().unwrap()
+    }
+
+    fn push_define_local(&mut self, name: String, known_value: Option<Value>) {
+        let curr_locals_len = self.get_curr_locals().len();
+        self.push_op_with_opnum(OpCode::LocalSet, curr_locals_len);
+        let new_local = Local { name, scope_depth: self.curr_scope_depth, known_value };
+        self.get_curr_locals().push(new_local);
         
         self.cur_temp_amount -= 1;
     }
     fn get_local_index(&mut self, name: &str) -> Option<usize> {
-        for (i, local) in self.locals.iter().enumerate().rev() {
+        for (i, local) in self.get_curr_locals().iter().enumerate().rev() {
             if local.name == name {
                 return Some(i);
             }
@@ -516,20 +586,29 @@ impl<'a> CompileFunction<'a> {
         None
     }
     fn push_get_identifier(&mut self, name: &str) {
-        let opt_i = self.get_local_index(name);
-        match opt_i {
-            Some(i) => {
-                self.push_op_with_opnum(OpCode::LocalGet, i);
-                self.cur_temp_amount += 1;
-            }
-            None => {
-                match self.globals.get(name) {
-                    Some(val) => self.push_get_constant_op(val.clone()),
-                    None => unreachable!("could not find {name} in locals vec or globals...")
+        for (curr_compiler_i, local_locals) in self.locals.iter().rev().enumerate() {
+            for (index, local) in local_locals.iter().enumerate().rev() {
+                if local.name == name {
+                    // if it has a known value, just push it as a const
+                    if let Some(val) = &local.known_value {
+                        self.push_get_constant_op(val.clone());
+                        return;
+                    }
+
+                    // if it is found within this CompileFunction's stack
+                    else if curr_compiler_i == 0 {
+                        self.push_op_with_opnum(OpCode::LocalGet, index);
+                        self.cur_temp_amount += 1;
+                        return;
+                    }
+                    else { panic!("capturing isn't implemented yet :((") }
                 }
             }
         }
+        unreachable!("could not find {name} in locals vec or globals...")
     }
+
+
     fn push_set_local(&mut self, name: &str) {
         let i = self.get_local_index(name).unwrap_or_else(|| panic!("could not find {name} in the locals vec..."));
         self.push_op_with_opnum(OpCode::LocalSet, i);
@@ -584,14 +663,16 @@ impl<'a> CompileFunction<'a> {
                 Expr::FnDefinition { name, params, body, .. } => {
                     let fn_index = self.bytecode_chunks.len();
                     let function_value = Value::Closure { chunk_index: fn_index };
-                    self.globals.insert(name.clone(), function_value);
+                    self.push_get_constant_op(function_value.clone());
+                    self.push_define_local(name.clone(), Some(function_value));
     
                     CompileFunction::compile_function(
                         name.to_string(),
                         std::slice::from_ref(body),
                         &params,
                         self.bytecode_chunks,
-                        self.globals
+                        self.locals,
+                        self.library,
                     );
                 }
                 _ => { /* Do nothing */}
@@ -627,7 +708,7 @@ impl<'a> CompileFunction<'a> {
     fn compile_binding_pattern(&mut self, pattern: &AssignablePattern, failure_jumps: &mut Vec<FailureJump>) {
         match pattern {
             // the value is already on the stack, just the compiler just needs a variable that points to it.
-            AssignablePattern::Binding { name, .. } => self.push_define_local(name.clone()),
+            AssignablePattern::Binding { name, .. } => self.push_define_local(name.clone(), None),
             AssignablePattern::Wildcard => self.push_pop_value(),
 
             AssignablePattern::Tuple(patterns) => {

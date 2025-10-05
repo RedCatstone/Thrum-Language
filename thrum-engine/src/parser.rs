@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
 use crate::ast_structure::*;
-use crate::tokens::{Token, TokenType};
+use crate::tokens::{LexerToken, TokenType};
 
 
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<LexerToken>,
     position: usize,
     pub errors: Vec<String>,
     prev_token_line: usize,
@@ -13,12 +13,12 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+    pub fn new(tokens: Vec<LexerToken>) -> Self {
         Parser { tokens, position: 0, errors: Vec::new(), prev_token_line: 0, pipe_operators_active: 0 }
     }
 
-    fn peek(&self) -> &Token {
-        self.tokens.get(self.position).unwrap_or(&Token {
+    fn peek(&self) -> &LexerToken {
+        self.tokens.get(self.position).unwrap_or(&LexerToken {
             token_type: TokenType::EndOfFile, line: usize::MAX,
         })
     }
@@ -32,7 +32,7 @@ impl Parser {
         self.peek().line == self.prev_token_line
     }
 
-    fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Result<Token, String> {
+    fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Result<LexerToken, String> {
         let token = self.peek();
         if std::mem::discriminant(&token.token_type) == std::mem::discriminant(&expected) {
             let cloned_token = token.clone();
@@ -100,6 +100,10 @@ impl Parser {
         Expr::Block(expression_body).into()
     }
 
+
+
+
+
     fn parse_expression(&mut self, precedence: Precedence) -> Result<TypedExpr, String> {
         // could be number, identifier, '-', 'let', ...
         let mut left_expr = self.parse_prefix()?;
@@ -121,7 +125,7 @@ impl Parser {
 
             self.advance();
 
-            // parse infix/postfix
+            // parse infix
             left_expr = match operator {
                 TokenType::LeftParen => self.parse_call_operator(left_expr)?,
                 TokenType::RightArrow => self.parse_closure_operator(left_expr)?,
@@ -129,7 +133,7 @@ impl Parser {
                 TokenType::Colon => self.parse_type_annotation_operator(left_expr)?,
                 TokenType::ColonColon => self.parse_path_operator(left_expr)?,
                 TokenType::PipeGreater => self.parse_pipe_greater_operator(left_expr)?,
-                TokenType::Caret => Expr::Deref { expr: Box::new(left_expr) }.into(),
+                TokenType::Dot => self.parse_member_access_operator(left_expr)?,
                 
                 _ => {  // other operators
                     if operator_precedence == Precedence::Assign {
@@ -147,44 +151,41 @@ impl Parser {
     }
 
 
+
     fn parse_prefix(&mut self) -> Result<TypedExpr, String> {
         let token_type = self.peek().token_type.clone();
-        // before advancing:
+        self.advance();
+        // after advancing:
         match token_type {
-            TokenType::ColonColon => Ok(Expr::Path(vec!["".to_string()]).into()),
-            _ => {
-                self.advance();
-                // after advancing:
-                match token_type {
-                    TokenType::Identifier(name) => Ok(Expr::Identifier { name }.into()),
-                    TokenType::Number(val) => Ok(Expr::Literal(Value::Num(val)).into()),
-                    TokenType::StringFrag(val) => Ok(Expr::Literal(Value::Str(val)).into()),
-                    TokenType::Bool(val) => Ok(Expr::Literal(Value::Bool(val)).into()),
+            TokenType::Identifier(name) => Ok(Expr::Identifier { name }.into()),
+            TokenType::Number(val) => Ok(Expr::Literal(Value::Num(val)).into()),
+            TokenType::StringFrag(val) => Ok(Expr::Literal(Value::Str(val)).into()),
+            TokenType::Bool(val) => Ok(Expr::Literal(Value::Bool(val)).into()),
 
-                    // Prefix operators
-                    TokenType::Minus | TokenType::Exclamation | TokenType::BitNot | TokenType::DotDotDot => self.parse_prefix_operator(token_type),
-                    TokenType::Caret => self.parse_caret_expression(),
-                    TokenType::LeftBrace => Ok(self.parse_block_expression(TokenType::RightBrace)),
-                    TokenType::LeftParen => self.parse_grouped_expression(),
-                    TokenType::LeftBracket => self.parse_array_expression(),
-                    TokenType::StringStart => self.parse_template_string(),
-                    TokenType::Let => self.parse_let_pattern(),
-                    TokenType::If => self.parse_if_expression(),
-                    TokenType::While => self.parse_while_expression(),
-                    TokenType::Loop => self.parse_loop_expression(),
-                    TokenType::Match => self.parse_match_expression(),
-                    TokenType::Enum => self.parse_enum_expression(),
-                    TokenType::Fn => self.parse_fn_definition(),
-                    TokenType::Return => self.parse_return_expression(),
-                    TokenType::Break => self.parse_break_expression(),
-                    TokenType::Mut => {
-                        let name = self.expect_identifier("Expected identifier after mut.")?;
-                        Ok(Expr::MutRef { expr: Box::new(Expr::Identifier { name }.into()) }.into())
-                    }
-
-                    _ => Err(format!("Expected an expression. Found '{}' instead", token_type)),
-                }
+            // Prefix operators
+            TokenType::Minus | TokenType::Exclamation | TokenType::BitNot | TokenType::DotDotDot => self.parse_prefix_operator(token_type),
+            TokenType::Star => self.parse_star_expression(),
+            TokenType::Caret => self.parse_caret_expression(),
+            TokenType::LeftBrace => Ok(self.parse_block_expression(TokenType::RightBrace)),
+            TokenType::LeftParen => self.parse_grouped_expression(),
+            TokenType::LeftBracket => self.parse_array_expression(),
+            TokenType::StringStart => self.parse_template_string(),
+            TokenType::ColonColon => self.parse_path_operator(Expr::TypePath(vec!["".to_string()]).into()),
+            TokenType::Let => self.parse_let_pattern(),
+            TokenType::If => self.parse_if_expression(),
+            TokenType::While => self.parse_while_expression(),
+            TokenType::Loop => self.parse_loop_expression(),
+            TokenType::Match => self.parse_match_expression(),
+            TokenType::Enum => self.parse_enum_expression(),
+            TokenType::Fn => self.parse_fn_definition(),
+            TokenType::Return => self.parse_return_expression(),
+            TokenType::Break => self.parse_break_expression(),
+            TokenType::Mut => {
+                let name = self.expect_identifier("Expected identifier after mut.")?;
+                Ok(Expr::MutRef { expr: Box::new(Expr::Identifier { name }.into()) }.into())
             }
+
+            _ => Err(format!("Expected an expression. Found '{}' instead", token_type)),
         }
     }
 
@@ -198,6 +199,10 @@ impl Parser {
     fn parse_caret_expression(&mut self) -> Result<TypedExpr, String> {
         let name = format!("_pipe_{}", self.pipe_operators_active);
         Ok(Expr::Identifier { name }.into())
+    }
+
+    fn parse_star_expression(&mut self) -> Result<TypedExpr, String> {
+        Ok(Expr::Deref { expr: Box::new(self.parse_expression(Precedence::Prefix)?) }.into())
     }
 
 
@@ -248,15 +253,21 @@ impl Parser {
         match left_expr.expression {
             Expr::Identifier { name } => {
                 let next_path_segment = self.expect_identifier("Expected identifier after '::'")?;
-                Ok(Expr::Path(vec![name, next_path_segment]).into())
+                Ok(Expr::TypePath(vec![name, next_path_segment]).into())
             }
-            Expr::Path(mut segments) => {
+            Expr::TypePath(mut segments) => {
                 let next_path_segment = self.expect_identifier("Expected identifier after '::'")?;
                 segments.push(next_path_segment);
-                Ok(Expr::Path(segments).into())
+                Ok(Expr::TypePath(segments).into())
             }
             _ => return Err(format!("'::'-paths are only allowed after identifiers. Found after: {:?}", left_expr)),
         }
+    }
+
+    fn parse_member_access_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, String> {
+        // '.' already consumed.
+        let member = self.expect_identifier("Expected member name after '.'")?;
+        Ok(Expr::MemberAccess { left: Box::new(left_expr), member }.into())
     }
 
     fn parse_pipe_greater_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, String> {
@@ -738,6 +749,7 @@ impl Parser {
             return Ok(AssignablePattern::Binding { name: segments.pop().unwrap(), typ: type_annotation })
         }
 
+        // enum-pattern
         let inner_patterns = if self.optional_token(TokenType::LeftParen) {
             self.parse_binding_pattern_list(TokenType::RightParen, type_annotation_required, "Expected ')' to close enum variant pattern.")?
         }

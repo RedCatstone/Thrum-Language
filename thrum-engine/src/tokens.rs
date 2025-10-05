@@ -60,7 +60,7 @@ pub enum TokenType {
 }
 
 #[derive(Clone, Debug)]
-pub struct Token {
+pub struct LexerToken {
     pub token_type: TokenType,
     pub line: usize,
 }

@@ -72,7 +72,7 @@ pub fn loop_over_every_ast_node(
                 }
 
                 // types should already be finalized
-                Expr::Literal(_) | Expr::Identifier { .. } | Expr::Path(_) | Expr::EnumDefinition{..}
+                Expr::Literal(_) | Expr::Identifier { .. } | Expr::MemberAccess { .. }  | Expr::TypePath { .. } | Expr::EnumDefinition{..}
                 | Expr::Void | Expr::ParserTempTypeAnnotation(_) | Expr::ParserTempLetPattern(_) => { /* already finalized */ }
             }
         }
