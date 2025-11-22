@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypedExpr, Value};
+use crate::parsing::ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypedExpr, Value};
 
 
 

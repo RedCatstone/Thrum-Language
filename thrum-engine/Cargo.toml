@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-memmap2 = "0.9.8"
-num_enum = "0.7"
+num_enum = "0.7.5"
+
+[lib]
+name = "thrum_engine"
+path = "src/lib.rs"

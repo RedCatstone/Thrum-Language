@@ -1,6 +1,6 @@
 use std::{fmt, rc::Rc, u8};
 
-use crate::{ast_structure::Value, pretty_printing::join_slice_to_string, to_bytecode::{BytecodeChunk, OpCode}};
+use crate::{parsing::ast_structure::Value, pretty_printing::join_slice_to_string, vm_compiling::{BytecodeChunk, OpCode}};
 
 
 pub struct RuntimeError {
@@ -209,11 +209,11 @@ impl VM {
                 OpCode::ValuePop => {
                     self.value_stack.pop().unwrap();
                 }
-                OpCode::ValueDrop => {
-                    // [1, 2, 3, 4] -> [1, 2, 4]
-                    let index = self.value_stack.len() - 2;
-                    self.value_stack.swap_remove(index);
-                }
+                // OpCode::ValueDrop => {
+                //     // [1, 2, 3, 4] -> [1, 2, 4]
+                //     let index = self.value_stack.len() - 2;
+                //     self.value_stack.swap_remove(index);
+                // }
 
                 OpCode::ValueDup => {
                     let value = self.value_stack.last().unwrap().clone();

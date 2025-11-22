@@ -1,9 +1,8 @@
 use std::fmt;
 use crate::{
-    ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
-    to_bytecode::{BytecodeChunk, OpCode},
-    tokens::{LexerToken, TokenType},
-    vm::{CallFrame, VM}
+    lexing::tokens::{LexerToken, TokenType},
+    parsing::ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
+    vm_compiling::{BytecodeChunk, OpCode}, vm_evaluating::{CallFrame, VM}
 };
 
 
@@ -13,7 +12,7 @@ impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             // Literals with data
-            TokenType::Identifier(s) => write!(f, "{}", s),
+            TokenType::Identifier(s) => write!(f, "ident<{}>", s),
             TokenType::Number(n) => write!(f, "{}", n),
             TokenType::StringFrag(s) => write!(f, "\"{}\"", s),
             TokenType::Bool(b) => write!(f, "{}", b),
@@ -22,10 +21,10 @@ impl fmt::Display for TokenType {
             // Basic punctuation
             TokenType::LeftParen => write!(f, "("),
             TokenType::RightParen => write!(f, ")"),
-            TokenType::LeftBrace => write!(f, "{{"),
-            TokenType::RightBrace => write!(f, "}}"),
             TokenType::LeftBracket => write!(f, "["),
             TokenType::RightBracket => write!(f, "]"),
+            TokenType::LeftBrace => write!(f, "{{"),
+            TokenType::RightBrace => write!(f, "}}"),
             TokenType::Comma => write!(f, ","),
             TokenType::Dot => write!(f, "."),
             TokenType::Semicolon => write!(f, ";"),
@@ -115,7 +114,7 @@ impl fmt::Display for TokenType {
 
 impl fmt::Display for LexerToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.token_type)
+        write!(f, "[{}:{}]", self.line, self.token_type)
     }
 }
 

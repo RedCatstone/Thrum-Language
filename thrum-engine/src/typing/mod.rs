@@ -1,10 +1,13 @@
 use crate::{
-    ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value},
-    desugar,
-    nativelib::{ThrumModule, ThrumType, get_native_lib}, tokens::TokenType
+    lexing::tokens::TokenType,
+    nativelib::{ThrumModule, ThrumType, get_native_lib},
+    parsing::{ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, typing::type_environment::TypecheckEnvironment
 };
 use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
+
+mod type_environment;
+mod inference;
 
 
 // example:
@@ -12,71 +15,9 @@ use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 // let y = x
 // let z: str = x[1]
 //
-// x gets assigned arr<Inference(x)<Unbound>>
-// y gets assigned arr<Inference(x)<Unbound>>
-// z gets assigned arr<Inference(x)<Bound<str>>> and figures the type of x out. now InferenceVar(x) gets changed to str everywhere.
-
-
-
-#[derive(Default)]
-struct TypeCheckScope {
-    vars: HashMap<String, ThrumTypecheckValue>,
-    types: HashMap<String, ThrumType>,
-}
-
-pub struct ThrumTypecheckValue {
-    typ: TypeKind,
-    mut_borrowed_by: Option<String>,
-}
-
-pub struct TypecheckEnvironment {
-    scopes: Vec<TypeCheckScope>,
-}
-impl TypecheckEnvironment {
-    pub fn new() -> Self { TypecheckEnvironment { scopes: vec![TypeCheckScope::default()] } }
-
-    // e.g. for a block or function
-    pub fn enter_scope(&mut self) { self.scopes.push(TypeCheckScope::default()); }
-    pub fn exit_scope(&mut self) { self.scopes.pop(); }
-
-    pub fn define_variable(&mut self, name: String, typ: TypeKind) -> bool {
-        let already_exists = self.name_exists_already(&name);
-        self.scopes.last_mut().unwrap().vars.insert(name, ThrumTypecheckValue { typ, mut_borrowed_by: None });
-        already_exists
-    }
-    pub fn lookup_variable(&self, name: &str) -> Option<TypeKind> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(t) = scope.vars.get(name) {
-                return Some(t.typ.clone());
-            }
-        }
-        None
-    }
-
-    pub fn define_type(&mut self, name: String, typ: ThrumType) -> bool {
-        let already_exists = self.name_exists_already(&name);
-        self.scopes.last_mut().unwrap().types.insert(name, typ);
-        already_exists
-    }
-    pub fn lookup_type(&mut self, name: &str) -> Option<ThrumType> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(t) = scope.types.get(name) {
-                return Some(t.clone());
-            }
-        }
-        None
-    }
-
-    pub fn name_exists_already(&mut self, name: &str) -> bool {
-        self.lookup_variable(name).is_some() || self.lookup_type(name).is_some()
-    }
-}
-
-
-
-
-
-
+// x -> Inference(0) - (0 -> arr<inference<1>>)
+// y -> Inference(2) - (2 -> arr<inference<1>>)
+// z -> Inference(3) - (3 -> str) and figures the type of inference<1> out. now all types are fully known.
 
 
 
@@ -140,84 +81,13 @@ impl TypeChecker {
         }
     }
 
-    fn add_error(&mut self, message: String) -> TypeKind {
+    fn error(&mut self, message: String) -> TypeKind {
         self.errors.push(TypeCheckError { message });
         TypeKind::TypeError
     }
 
     fn type_mismatch(&mut self, expected: &TypeKind, found: &TypeKind) {
-        self.add_error(format!("Type mismatch. Expected {}, found {}.", expected, found));
-    }
-
-    fn new_inference_type(&mut self) -> TypeKind {
-        self.next_inference_id += 1;
-        TypeKind::Inference(self.next_inference_id)
-    }
-
-    fn prune(&mut self, typ: &TypeKind) -> TypeKind {
-        if let TypeKind::Inference(id) = typ {
-            if let Some(entry) = self.inference_id_lookup.get(&id) {
-                let pruned = self.prune(&entry.clone());
-                return pruned;
-            }
-        }
-        typ.clone()
-    }
-
-
-    fn unify_types(&mut self, a: &TypeKind, b: &TypeKind) {
-        let type_a = self.prune(a);
-        let type_b = self.prune(b);
-        
-        match (&type_a, &type_b) {
-            _ if type_a == type_b => { /* Do nothing */ }
-
-            // if one is an inference variable, bind it to the other type.
-            (TypeKind::Inference(id), _) => { self.inference_id_lookup.insert(*id, type_b.clone()); }
-            (_, TypeKind::Inference(id)) => { self.inference_id_lookup.insert(*id, type_a.clone()); }
-            
-            (TypeKind::Never, _) => { /* Do nothing */ }
-            (_, TypeKind::Never) => { /* Do nothing */ }
-
-            (TypeKind::MutPointer(inner_a), TypeKind::MutPointer(inner_b))
-            | (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
-                self.unify_types(inner_a, inner_b);
-            }
-            (TypeKind::Tup(inners_a), TypeKind::Tup(inners_b)) => {
-                if inners_a.len() == inners_b.len() {
-                    for (ia, ib) in inners_a.iter().zip(inners_b.iter()) {
-                        self.unify_types(ia, ib);
-                    }
-                }
-                else { self.type_mismatch(&type_a, &type_b); }
-            }
-            (TypeKind::Fn { param_types: params_a, return_type: return_a },
-            TypeKind::Fn { param_types: params_b, return_type: return_b }) => {
-                if params_a.len() == params_b.len() {
-                    for (ia, ib) in params_a.iter().zip(params_b.iter()) {
-                        self.unify_types(ia, ib);
-                    }
-                }
-                else { self.type_mismatch(&type_a, &type_b); }
-                self.unify_types(&return_a, &return_b);
-            }
-
-            _ => { self.type_mismatch(&type_a, &type_b); }
-        }
-    }
-
-    fn unify_type_vec(&mut self, vec: &[TypeKind]) -> TypeKind {
-        if let Some((first, others)) = vec.split_first() {
-            let mut is_never = false;
-            for other in others {
-                self.unify_types(first, other);
-                if self.prune(other) == TypeKind::Never {
-                    is_never = true;
-                }
-            }
-            if is_never { TypeKind::Never } else { first.clone() }
-        }
-        else { self.new_inference_type() }
+        self.error(format!("Type mismatch. Expected {}, found {}.", expected, found));
     }
 
 
@@ -265,7 +135,7 @@ impl TypeChecker {
                         self.lookup_variable_mut(name);
                         TypeKind::MutPointer(Box::new(expr.typ.clone()))
                     }
-                    _ => self.add_error(format!("Cannot borrow non identifier as mut."))
+                    _ => self.error(format!("Cannot borrow non identifier as mut."))
                 }
             }
             Expr::Deref { expr } => {
@@ -291,8 +161,8 @@ impl TypeChecker {
             Expr::EnumDefinition { name, enums } => self.check_enum_expression(name, enums),
             Expr::Void => { TypeKind::Void }
 
-            Expr::ParserTempTypeAnnotation(_) => self.add_error(format!("Type annotations are not allowed here.")),
-            Expr::ParserTempLetPattern(_) => self.add_error(format!("Let patterns are not allowed here.")),
+            Expr::ParserTempTypeAnnotation(_) => self.error(format!("Type annotations are not allowed here.")),
+            Expr::ParserTempLetPattern(_) => self.error(format!("Let patterns are not allowed here.")),
         };
 
         expr.typ = self.prune(&inferred_type);
@@ -312,12 +182,12 @@ impl TypeChecker {
 
     fn checked_define_variable(&mut self, name: String, typ: TypeKind) {
         if self.env.define_variable(name.clone(), typ) {
-            self.add_error(format!("Name '{name}' is already defined in this scope."));
+            self.error(format!("Name '{name}' is already defined in this scope."));
         }
     }
     fn checked_define_type(&mut self, name: String, typ: ThrumType) {
         if self.env.define_type(name.clone(), typ) {
-            self.add_error(format!("Name '{name}' is already defined in this scope."));
+            self.error(format!("Name '{name}' is already defined in this scope."));
         }
     }
 
@@ -326,17 +196,19 @@ impl TypeChecker {
             AssignablePattern::Literal(lit) => {
                 AssignablePatternType { typ: self.check_literal(lit), has_place: false, can_fail: false, vars: Vec::new() }
             }
+
             AssignablePattern::Binding { name, typ } => {
                 if *typ == TypeKind::ParserUnknown {
                     // if no type is annotated create a new inference var
                     *typ = self.new_inference_type();
                 }
                 else if *typ == TypeKind::Never {
-                    self.add_error(format!("Type Never '!' is not allowed in binding patterns."));
+                    self.error(format!("Type Never '!' is not allowed in binding patterns."));
                 }
                 if define_pattern_vars { self.checked_define_variable(name.clone(), typ.clone()); }
                 AssignablePatternType { typ: typ.clone(), has_place: false, can_fail: false, vars: vec![(name.clone(), typ.clone())] }
             }
+
             AssignablePattern::Array(elements) => {
                 let mut arr_types = Vec::new();
                 let mut has_place = false;
@@ -351,6 +223,7 @@ impl TypeChecker {
                 let arr_type = self.unify_type_vec(&arr_types);
                 AssignablePatternType { typ: TypeKind::Arr(Box::new(arr_type)), has_place, can_fail: true, vars }
             }
+
             AssignablePattern::Tuple(elements) => {
                 let mut tuple_types = Vec::new();
                 let mut has_place = false;
@@ -366,9 +239,11 @@ impl TypeChecker {
                 }
                 AssignablePatternType { typ: TypeKind::Tup(tuple_types), has_place, can_fail, vars }
             }
+
             AssignablePattern::Wildcard => {
                 AssignablePatternType { typ: self.new_inference_type(), has_place: false, can_fail: false, vars: Vec::new() }
             }
+
             AssignablePattern::Or(patterns) => {
                 let mut or_types = Vec::new();
                 let mut has_place = false;
@@ -382,12 +257,12 @@ impl TypeChecker {
                     if i == 0 { vars = pattern_type.vars.into_iter().collect(); }
                     else {
                         if pattern_type.vars.len() != vars.len() {
-                            self.add_error(format!("Pattern expects {} variables defined, found {}.", vars.len(), pattern_type.vars.len()));
+                            self.error(format!("Pattern expects {} variables defined, found {}.", vars.len(), pattern_type.vars.len()));
                         }
                         for (pattern_var_str, pattern_var_type) in pattern_type.vars {
                             match vars.get(&pattern_var_str) {
                                 Some(x) => { self.unify_types(x, &pattern_var_type); }
-                                None => { self.add_error(format!("All or-assign-patterns must define the same variables. Found {}", pattern_var_str)); }
+                                None => { self.error(format!("All or-assign-patterns must define the same variables. Found {}", pattern_var_str)); }
                             }
                         }
                     }
@@ -398,6 +273,7 @@ impl TypeChecker {
                 let typ = self.unify_type_vec(&or_types);
                 AssignablePatternType { typ, has_place, can_fail, vars: vars.into_iter().collect() }
             }
+
             AssignablePattern::Conditional { pattern, body } => {
                 let mut typ = self.check_binding_pattern(pattern, define_pattern_vars);
                 self.check_expression(Rc::get_mut(body).unwrap());
@@ -443,13 +319,15 @@ impl TypeChecker {
 
             AssignablePattern::Place(PlaceExpr::Identifier(name)) => {
                 AssignablePatternType { typ: self.check_identifier(name, true).clone(), has_place: true, can_fail: false, vars: Vec::new() }
-            },
+            }
+
             AssignablePattern::Place(PlaceExpr::Deref(name)) => {
                 let typ = self.check_identifier(name, true);
                 let inner_type = self.new_inference_type();
                 self.unify_types(&TypeKind::MutPointer(Box::new(inner_type.clone())), &typ);
                 AssignablePatternType { typ: inner_type, has_place: true, can_fail: false, vars: Vec::new() }
             }
+
             AssignablePattern::Place(PlaceExpr::Index { left, index }) => {
                 self.check_expression(Rc::get_mut(left).unwrap());
                 let arr_type = self.new_inference_type();
@@ -469,7 +347,7 @@ impl TypeChecker {
     fn check_identifier(&mut self, name: &str, mutable: bool) -> TypeKind {
         let typ = match self.env.lookup_variable(name) {
             Some(x) => x,
-            None => return self.add_error(format!("Undefined identifier: '{}'", name))
+            None => return self.error(format!("Undefined identifier: '{}'", name))
         };
         if mutable { self.lookup_variable_mut(name); }
 
@@ -527,7 +405,7 @@ impl TypeChecker {
                 self.unify_types(&TypeKind::Num, &right.typ);
                 right.typ.clone()
             }
-            _ => { self.add_error(format!("Unsupported prefix operator: {:?}", operator)); TypeKind::TypeError }
+            _ => { self.error(format!("Unsupported prefix operator: {:?}", operator)); TypeKind::TypeError }
         }
     }
 
@@ -542,7 +420,7 @@ impl TypeChecker {
                     TypeKind::Num | TypeKind::Str => returned_type,
                     // let it propagate, it will be solved later.
                     TypeKind::Inference(_) => returned_type,
-                    _ => self.add_error(format!("Cannot apply operator '{}' to type {}.", operator, unified_type))
+                    _ => self.error(format!("Cannot apply operator '{}' to type {}.", operator, unified_type))
                 }
             }
 
@@ -561,7 +439,7 @@ impl TypeChecker {
                     TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup(_) => TypeKind::Bool,
                     // let it propagate, it will be solved later.
                     TypeKind::Inference(_) => TypeKind::Bool,
-                    _ => self.add_error(format!("Cannot compare types {}.", unified_type))
+                    _ => self.error(format!("Cannot compare types {}.", unified_type))
                 }
             }
 
@@ -571,7 +449,7 @@ impl TypeChecker {
                 self.unify_types(&TypeKind::Bool, right_type);
                 TypeKind::Bool
             }
-            _ => { self.add_error(format!("Unsupported infix operator: {:?}", operator)) }
+            _ => { self.error(format!("Unsupported infix operator: {:?}", operator)) }
         }
     }
 
@@ -591,7 +469,7 @@ impl TypeChecker {
         let pattern_type = self.check_binding_pattern(pattern, true);
         self.check_expression(value);
         self.unify_types(&value.typ, &pattern_type.typ);
-        if pattern_type.has_place { return self.add_error(format!("Place patterns are not allowed in if let expressions.")) }
+        if pattern_type.has_place { return self.error(format!("Place patterns are not allowed in if let expressions.")) }
 
         self.check_expression(consequence);
         self.env.exit_scope();
@@ -678,8 +556,8 @@ impl TypeChecker {
         for param_pattern in params.iter_mut() {
             let pattern_type = self.check_binding_pattern(param_pattern, define_params);
 
-            if pattern_type.has_place { self.add_error(format!("Place patterns are not allowed in function parameters.")); }
-            if pattern_type.can_fail { self.add_error(format!("Failable patterns are not allowed in function parameters.")); }
+            if pattern_type.has_place { self.error(format!("Place patterns are not allowed in function parameters.")); }
+            if pattern_type.can_fail { self.error(format!("Failable patterns are not allowed in function parameters.")); }
 
             param_types.push(pattern_type.typ);
         }
@@ -726,7 +604,7 @@ impl TypeChecker {
         match &mut callee.typ {
             TypeKind::Fn { param_types, return_type } => {
                 if param_types.len() != arg_types.len() {
-                    return self.add_error(format!("Expected {} arguments, found {}.", param_types.len(), arg_types.len()));
+                    return self.error(format!("Expected {} arguments, found {}.", param_types.len(), arg_types.len()));
                 }
                 for (param_type, arg_type) in param_types.iter().zip(arg_types.iter()) {
                     self.unify_types(param_type, arg_type);
@@ -740,7 +618,7 @@ impl TypeChecker {
                 self.unify_types(&fn_type, &TypeKind::Inference(*id));
                 return_type
             }
-            _ => self.add_error(format!("Cannot call a non-function type '{}'", callee.typ))
+            _ => self.error(format!("Cannot call a non-function type '{}'", callee.typ))
         }
     }
 
@@ -750,7 +628,7 @@ impl TypeChecker {
         if let Some(x) = self.current_function_return_type.clone() {
             self.unify_types(&x, &return_expression.typ);
         }
-        else { self.add_error(format!("'return' is only allowed inside functions.")); }
+        else { self.error(format!("'return' is only allowed inside functions.")); }
 
         TypeKind::Never
     }
@@ -761,7 +639,7 @@ impl TypeChecker {
         if let Some((label, typ)) = self.current_break_types.last().cloned() {
             self.unify_types(&typ, &expr.typ);
         }
-        else { self.add_error(format!("'break' is only allowed inside loops.")); }
+        else { self.error(format!("'break' is only allowed inside loops.")); }
         TypeKind::Never
     }
 
@@ -798,7 +676,7 @@ impl TypeChecker {
             None => false,
             Some(remaining_cases) => !remaining_cases.is_empty()
         } {
-            self.add_error(format!("Match expression does not cover all cases. Remaining cases: {:?}", cases_to_cover.unwrap()));
+            self.error(format!("Match expression does not cover all cases. Remaining cases: {:?}", cases_to_cover.unwrap()));
         }
 
         self.unify_type_vec(&arm_types)
@@ -830,7 +708,7 @@ impl TypeChecker {
             }
 
             // else check for types (e.g. str::len)
-            if let Some(module_type) = curr_module.types.get(segment) {
+            else if let Some(module_type) = curr_module.types.get(segment) {
                 let remaining_segments = &segments[(i + 1)..];
                 match remaining_segments {
                     // 0 remaining segments -> type
@@ -842,24 +720,24 @@ impl TypeChecker {
                         }
                     }
                     // 2 or more remaining segments
-                    _ => return self.add_error(format!("type path had 2 or more remaining segments."))
+                    _ => return self.error(format!("type path had 2 or more remaining segments."))
                 }
             }
 
             // else check for consts/functions (e.g. io::print)
-            if let Some(module_val) = curr_module.values.get(segment) {
+            else if let Some(module_val) = curr_module.values.get(segment) {
                 if i == segments.len() - 1 {
                     return module_val.typ.clone()
                 }
                 else {
-                    return self.add_error(format!("value path too long."))
+                    return self.error(format!("value path too long."))
                 }
             }
 
-            return self.add_error(format!("segment {segment} could not be found..."));
+            return self.error(format!("segment {segment} could not be found..."));
         }
 
-        self.add_error(format!("'{}' could not be found...", segments.join("::")))
+        self.error(format!("'{}' could not be found...", segments.join("::")))
     }
 
 
@@ -918,7 +796,7 @@ impl TypeChecker {
         let final_typ = match &mut pruned {
             TypeKind::Inference(id) => {
                 self.inference_id_lookup.insert(*id, TypeKind::TypeError);
-                self.add_error(format!("Cannot infer type {}.", pruned))
+                self.error(format!("Cannot infer type {}.", pruned))
             }
             TypeKind::Arr(inner) => TypeKind::Arr(Box::new(self.finalize_type(inner))),
             TypeKind::Tup(inners) => TypeKind::Tup(inners.iter_mut().map(|t| self.finalize_type(t)).collect()),

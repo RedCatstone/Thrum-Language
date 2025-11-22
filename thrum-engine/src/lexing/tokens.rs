@@ -2,8 +2,8 @@
 pub enum TokenType {
     // Basic
     LeftParen, RightParen,      // ( )
-    LeftBrace, RightBrace,      // { }
     LeftBracket, RightBracket,  // [ ]
+    LeftBrace, RightBrace,      // { }
     Comma, Dot, Semicolon,      // , . ;
     Colon, ColonColon,          // : ::
 
@@ -62,7 +62,9 @@ pub enum TokenType {
 #[derive(Clone, Debug)]
 pub struct LexerToken {
     pub token_type: TokenType,
+    pub byte_start: usize,
     pub line: usize,
+    pub length: usize,
 }
 
 

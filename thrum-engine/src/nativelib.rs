@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{ast_structure::{DefinedTypeKind, TypeKind, Value}, vm::RuntimeError};
+use crate::{parsing::ast_structure::{DefinedTypeKind, TypeKind, Value}, vm_evaluating::RuntimeError};
 
 pub type NativeFn = fn(&mut [Value]) -> Result<Value, RuntimeError>;
 

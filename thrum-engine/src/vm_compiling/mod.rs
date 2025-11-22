@@ -2,7 +2,7 @@ use std::{u8, usize};
 
 use num_enum::TryFromPrimitive;
 
-use crate::{ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, nativelib::{ThrumModule, get_native_lib}, tokens::TokenType};
+use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}};
 
 
 #[repr(u8)]
@@ -22,7 +22,6 @@ pub enum OpCode {
     
     // operations on the temp part of the stack
     ValuePop,
-    ValueDrop,
     ValueDup,
 
     // operators / types
@@ -82,7 +81,7 @@ impl Compiler {
     fn load_prelude_into_locals_vec(module: &ThrumModule, locals: &mut Vec<Local>) {
         for (name, value) in &module.values {
             if value.is_prelude {
-                locals.push(Local { name: name.clone(), scope_depth: 0, known_value: Some(value.val.clone()) });
+                locals.push(Local { name: name.clone(), scope_depth: 0, const_value: Some(value.val.clone()) });
             }
         }
         // Recursion
@@ -126,7 +125,7 @@ struct CompileFunction<'a> {
 struct Local {
     name: String,
     scope_depth: usize,
-    known_value: Option<Value>,
+    const_value: Option<Value>,
 }
 
 impl<'a> CompileFunction<'a> {
@@ -569,10 +568,10 @@ impl<'a> CompileFunction<'a> {
         self.locals.last_mut().unwrap()
     }
 
-    fn push_define_local(&mut self, name: String, known_value: Option<Value>) {
+    fn push_define_local(&mut self, name: String, const_value: Option<Value>) {
         let curr_locals_len = self.get_curr_locals().len();
         self.push_op_with_opnum(OpCode::LocalSet, curr_locals_len);
-        let new_local = Local { name, scope_depth: self.curr_scope_depth, known_value };
+        let new_local = Local { name, scope_depth: self.curr_scope_depth, const_value };
         self.get_curr_locals().push(new_local);
         
         self.cur_temp_amount -= 1;
@@ -590,7 +589,7 @@ impl<'a> CompileFunction<'a> {
             for (index, local) in local_locals.iter().enumerate().rev() {
                 if local.name == name {
                     // if it has a known value, just push it as a const
-                    if let Some(val) = &local.known_value {
+                    if let Some(val) = &local.const_value {
                         self.push_get_constant_op(val.clone());
                         return;
                     }

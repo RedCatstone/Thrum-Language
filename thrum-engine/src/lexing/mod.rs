@@ -1,45 +1,30 @@
 use core::fmt;
-use std::{fs::File, str::Chars, iter::Peekable};
-use memmap2::Mmap;
+use std::{str::Chars, iter::Peekable};
+// use memmap2::Mmap;
 
-use crate::tokens::{LexerToken, TokenType, get_keyword};
+use crate::lexing::tokens::{LexerToken, TokenType, get_keyword};
+
+pub mod tokens;
 
 
 
-pub fn tokenize_file(path: &str) -> Result<(Vec<LexerToken>, Vec<LexerError>), Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    // memory-map the file. (unsafe because it could be modified by another process)
-    let mmap = unsafe { Mmap::map(&file)? };
-    // treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
-    let source_code = std::str::from_utf8(&mmap)?;
+// pub fn tokenize_file(path: &str) -> Result<(Vec<LexerToken>, Vec<LexerError>), Box<dyn std::error::Error>> {
+//     let file = File::open(path)?;
+//     // memory-map the file. (unsafe because it could be modified by another process)
+//     let mmap = unsafe { Mmap::map(&file)? };
+//     // treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
+//     let source_code = std::str::from_utf8(&mmap)?;
 
-    Ok(tokenize_code(source_code))
-}
-
-fn tokenize_code(source_code: &str) -> (Vec<LexerToken>, Vec<LexerError>) {
-    let mut lexer = Lexer::new(source_code);
-    lexer.tokenize(None);
-    (lexer.tokens, lexer.errors)
-}
+//     Ok(tokenize_code(source_code))
+// }
 
 
 pub struct Lexer<'a> {
     source_iter: Peekable<Chars<'a>>,
-    pub tokens: Vec<LexerToken>,
+    tokens: Vec<LexerToken>,
+    byte_offset: usize,
     line: usize,
-    pub errors: Vec<LexerError>
-}
-
-#[derive(Debug)]
-pub struct LexerError {
-    pub line: usize,
-    pub message: String,
-}
-
-impl fmt::Display for LexerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.line, self.message)
-    }
+    errors: Vec<LexerError>
 }
 
 impl<'a> Lexer<'a> {
@@ -47,35 +32,61 @@ impl<'a> Lexer<'a> {
         Lexer {
             source_iter: source_code.chars().peekable(),
             tokens: Vec::new(),
-            line: 0,
+            byte_offset: 0,
+            line: 1,
             errors: Vec::new()
         }
     }
 
-    fn add_token(&mut self, token_type: TokenType) {
-        self.tokens.push(LexerToken { token_type, line: self.line });
+    pub fn tokenize_code(source_code: &str) -> (Vec<LexerToken>, Vec<LexerError>) {
+        let mut lexer = Lexer::new(source_code);
+        lexer.tokenize(None);
+        (lexer.tokens, lexer.errors)
     }
 
-    fn add_error(&mut self, error_msg: String) {
-        self.errors.push(LexerError { line: self.line, message: error_msg });
+    fn advance(&mut self) -> Option<char> {
+        let c = self.source_iter.next();
+        if let Some(ch) = c {
+            self.byte_offset += ch.len_utf8();
+            if ch == '\n' {
+                self.line += 1;
+            }
+        }
+        c
     }
 
     fn match_next(&mut self, expected: char) -> bool {
         if let Some(&next_char) = self.source_iter.peek() {
             if next_char == expected {
-                self.source_iter.next();
+                self.advance();
                 return true;
             }
         }
         false
     }
 
+    fn add_token(&mut self, token_type: TokenType) {
+        self.tokens.push(LexerToken {
+            token_type,
+            line: self.line,
+            byte_start: self.byte_offset,
+            length: 0,
+        });
+    }
+
+    fn add_error(&mut self, error_msg: String) {
+        self.errors.push(LexerError { line: self.line, message: error_msg });
+    }
+
+
     pub fn tokenize(&mut self, mut string_brace_level: Option<usize>) {
-        while let Some(c) = self.source_iter.next() {
+        while let Some(c) = self.advance() {
             match c {
                 // Basic
                 '(' => self.add_token(TokenType::LeftParen),
                 ')' => self.add_token(TokenType::RightParen),
+                '[' => self.add_token(TokenType::LeftBracket),
+                ']' => self.add_token(TokenType::RightBracket),
                 '{' => {
                     self.add_token(TokenType::LeftBrace);
                     if let Some(s) = &mut string_brace_level {
@@ -89,8 +100,6 @@ impl<'a> Lexer<'a> {
                         if *s == 0 { return; }
                     }
                 }
-                '[' => self.add_token(TokenType::LeftBracket),
-                ']' => self.add_token(TokenType::RightBracket),
 
                 ',' => self.add_token(TokenType::Comma),
                 '.' => self.process_dot_token(),
@@ -121,23 +130,17 @@ impl<'a> Lexer<'a> {
                 }
                 '/' => {
                     if self.match_next('/') {
-                        // It's a comment, consume until newline
-                        while let Some(comment_char) = self.source_iter.next() {
-                            if comment_char == '\n' {
-                                self.line += 1;
-                                break;
-                            }
+                        // comment!!! consume until newline
+                        while let Some(comment_char) = self.advance() {
+                            if comment_char == '\n' { break; }
                         }
                     }
-                    else if self.match_next('*') {
-                        while let Some(comment_char) = self.source_iter.next() {
-                            if comment_char == '*' {
-                                if let Some('/') = self.source_iter.peek() {
-                                    self.source_iter.next(); // Consume the '/'
-                                    break;
-                                }
+                    else if self.match_next('\\') {
+                        // multi line comment, consume until '\/'
+                        while let Some(comment_char) = self.advance() {
+                            if comment_char == '\\' {
+                                if self.match_next('/') { break; }
                             }
-                            else if comment_char == '\n' { self.line += 1; }
                         }
                     }
                     else {
@@ -204,10 +207,8 @@ impl<'a> Lexer<'a> {
                 },
 
                 
-                // Ignore whitespace
-                ' ' | '\r' | '\t' => (),
-
-                '\n' => self.line += 1,
+                // Ignore whitespace/new lines
+                ' ' | '\r' | '\t' | '\n' => (),
 
                 // Handle string literals
                 '"' => self.lex_string('"'),
@@ -228,37 +229,45 @@ impl<'a> Lexer<'a> {
     fn lex_string(&mut self, quote: char) {
         self.add_token(TokenType::StringStart);
         let mut string = String::new();
-        while let Some(c) = self.source_iter.next() {
+        while let Some(c) = self.advance() {
             match c {
-                c if c == quote => {
+                _ if c == quote => {
+                    // quote ends
                     if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
                     self.add_token(TokenType::StringEnd);
                     return;
                 }
                 '{' => {
+                    // start template string sttuff
                     if !string.is_empty() { self.add_token(TokenType::StringFrag(string)); }
                     string = String::new();
                     self.add_token(TokenType::LeftBrace);
                     self.tokenize(Some(1));
-                    continue;
+
+                    // we are back from recursion, meaning we hit the correct '}'
                 }
-                '\n' => self.line += 1,
                 '\\' => {
-                    if let Some(backslash_c) = self.source_iter.next() {
+                    // backslashed chars
+                    if let Some(backslash_c) = self.advance() {
                         match backslash_c {
                             'n' => string.push('\n'),
+                            't' => string.push('\t'),
+                            'r' => string.push('\r'),
+                            '0' => string.push('\0'),
                             '\n' => {
+                                // skip whitespaces on new line
                                 string.push('\n');
-                                while let Some(' ') = self.source_iter.peek() { self.source_iter.next(); }
+                                while let Some(' ') = self.source_iter.peek() { self.advance(); }
                             }
                             any => string.push(any),
                         }
                     }
-                    continue;
                 }
-                _ => { }
+                _ => {
+                    // normal char, just add it!
+                    string.push(c);
+                }
             }
-            string.push(c);
         }
         self.add_error(format!("Unterminated string."));
     }
@@ -271,18 +280,18 @@ impl<'a> Lexer<'a> {
         while let Some(&c) = self.source_iter.peek() {
             if c.is_ascii_digit() {
                 text.push(c);
-                self.source_iter.next();
+                self.advance();
             }
             else if c == '.' {
                 if already_has_dot { break; }
                 already_has_dot = true;
-                self.source_iter.next();
+                self.advance();
                 // '.' is only part of the number if the next character is a digit
                 if let Some(after_dot) = self.source_iter.peek() {
                     if after_dot.is_ascii_digit() {
                         text.push('.');
                         text.push(*after_dot);
-                        self.source_iter.next();
+                        self.advance();
                     }
                     else {
                         process_dot_later = true;
@@ -291,7 +300,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             else if c == '_' {
-                self.source_iter.next();
+                self.advance();
             }
             else { break; }
         }
@@ -315,16 +324,27 @@ impl<'a> Lexer<'a> {
     fn lex_identifier(&mut self, first_char: char) {
         let mut text = String::from(first_char);
         
-        while let Some(&c) = self.source_iter.peek() {
-            if !c.is_alphanumeric() && c != '_' { break; }
+        while let Some(&c) = self.source_iter.peek() && (c == '_' || c.is_alphanumeric()) {
             text.push(c);
-            self.source_iter.next();
+            self.advance();
         }
         
         // Check if the identifier is a reserved keyword
-        if let Some(token_type) = get_keyword(&text) {
-            self.add_token(token_type);
+        if let Some(keyword_token) = get_keyword(&text) {
+            self.add_token(keyword_token);
         }
         else { self.add_token(TokenType::Identifier(text)); }
+    }
+}
+
+
+
+pub struct LexerError {
+    pub line: usize,
+    pub message: String,
+}
+impl fmt::Display for LexerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.line, self.message)
     }
 }

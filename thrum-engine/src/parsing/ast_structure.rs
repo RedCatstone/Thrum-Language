@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use crate::{nativelib::NativeFn, tokens::TokenType};
+use crate::{lexing::tokens::TokenType, nativelib::NativeFn};
 
 
 pub struct TypedExpr {
