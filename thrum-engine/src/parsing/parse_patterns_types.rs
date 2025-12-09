@@ -78,6 +78,10 @@ impl Parser {
             // 'x'
             Expr::Identifier { name } => Ok(AssignablePattern::Binding { name, typ: TypeKind::ParserUnknown }),
 
+            Expr::Assign { pattern, extra_operator: _, value } if value.is_none() => {
+                Ok(*pattern)
+            }
+
             // '[x, y]'
             Expr::Array(elements) => {
                 let mut converted_elements = Vec::new();
@@ -105,14 +109,11 @@ impl Parser {
     pub(super) fn convert_assign_expr_into_pattern(&mut self, assign_expr: TypedExpr) -> Result<AssignablePattern, ParserError> {
         match assign_expr.expression {
             Expr::Identifier { name } => {
-                Ok(AssignablePattern::Place(PlaceExpr::Identifier(name)))
+                if name.starts_with("_") { Ok(AssignablePattern::Wildcard) }
+                else { Ok(AssignablePattern::Place(PlaceExpr::Identifier(name))) }
             }
             Expr::Index { left, index } => {
                 Ok(AssignablePattern::Place(PlaceExpr::Index { left: Rc::new(*left), index: Rc::new(*index) }))
-            }
-
-            Expr::ParserTempLetPattern(pattern) => {
-                Ok(pattern)
             }
 
             Expr::Array(elements) => {

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::parsing::ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypedExpr, Value};
+use crate::parsing::ast_structure::{AssignablePattern, Expr, PlaceExpr, TypedExpr, Value};
 
 
 
@@ -21,7 +21,10 @@ pub fn loop_over_every_ast_node(
             ));
 
             match &mut expr.expression {
-                Expr::Block(x) | Expr::Array(x) | Expr::Tuple(x) | Expr::TemplateString(x) => {
+                Expr::Block(x)
+                | Expr::Array(x)
+                | Expr::Tuple(x)
+                | Expr::TemplateString(x) => {
                     exprs.extend(x);
                 }
                 Expr::Prefix { right: expr, .. }
@@ -38,21 +41,25 @@ pub fn loop_over_every_ast_node(
                     exprs.push(expr1);
                     exprs.push(expr2);
                 }
-                Expr::Assign { pattern, value, alternative, .. } => {
+                Expr::Assign { pattern, value, extra_operator: _ } => {
                     patterns.push(pattern);
-                    exprs.push(value);
-                    if let Some(alt) = alternative { exprs.push(alt); }
+                    if let Some(val) = value { exprs.push(val); }
                 }
                 Expr::If { condition, consequence, alternative } => {
                     exprs.push(condition);
                     exprs.push(consequence);
                     exprs.push(alternative);
                 }
-                Expr::IfLet { pattern, value, consequence, alternative } => {
+                Expr::Case { pattern, value } => {
                     patterns.push(pattern);
                     exprs.push(value);
-                    exprs.push(consequence);
-                    exprs.push(alternative);
+                }
+                Expr::Match { match_value, arms } => {
+                    exprs.push(match_value);
+                    for arm in arms {
+                        patterns.push(&mut arm.pattern);
+                        exprs.push(&mut arm.body);
+                    }
                 }
                 Expr::Call { callee: function, arguments } => {
                     exprs.push(function);
@@ -63,17 +70,10 @@ pub fn loop_over_every_ast_node(
                     for param in params { patterns.push(param); }
                     exprs.push(Rc::get_mut(body).unwrap());
                 }
-                Expr::Match { match_value, arms } => {
-                    exprs.push(match_value);
-                    for arm in arms {
-                        patterns.push(&mut arm.pattern);
-                        exprs.push(&mut arm.body);
-                    }
-                }
 
                 // types should already be finalized
                 Expr::Literal(_) | Expr::Identifier { .. } | Expr::MemberAccess { .. }  | Expr::TypePath { .. } | Expr::EnumDefinition{..}
-                | Expr::Void | Expr::ParserTempTypeAnnotation(_) | Expr::ParserTempLetPattern(_) => { /* already finalized */ }
+                | Expr::Void | Expr::ParserTempTypeAnnotation(_) => { /* already finalized */ }
             }
         }
         else if let Some(pattern) = patterns.pop() {
@@ -131,24 +131,6 @@ pub fn desugar(program: &mut [TypedExpr]) {
                     }.into()
                 }
 
-                Expr::IfLet { pattern, value, consequence, alternative } => {
-                    // modify into
-                    Expr::Match {
-                        match_value: value,
-                        arms: vec![
-                            MatchArm {
-                                pattern,
-                                body: *consequence,
-                            },
-                            MatchArm {
-                                pattern: AssignablePattern::Wildcard,
-                                body: *alternative,
-                            }
-                        ]
-                    }.into()
-                }
-
-
                 Expr::TemplateString(ref segments) => {
                     if segments.len() == 1 && let Expr::Literal(Value::Str(string)) = &segments.first().unwrap().expression {
                         Expr::Literal(Value::Str(string.clone())).into()
@@ -156,7 +138,7 @@ pub fn desugar(program: &mut [TypedExpr]) {
                     else { expr }
                 }
 
-                /* Do nothing to other nodes */
+                // Do nothing to other nodes
                 _ => expr
             }
         },

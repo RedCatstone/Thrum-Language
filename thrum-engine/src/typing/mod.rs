@@ -118,16 +118,13 @@ impl TypeChecker {
                 self.check_infix(&left.typ, operator, &right.typ)
             }
             Expr::If { condition, consequence, alternative } => self.check_if(condition, consequence, alternative),
-            Expr::IfLet { pattern, value, consequence, alternative } => {
-                self.check_if_let(pattern, value, consequence, alternative)
-            }
             Expr::Match { match_value, arms: cases } => self.check_match(match_value, cases),
             Expr::While { condition, body } => self.check_while(condition, body),
             Expr::Loop { body } => self.check_loop(body),
             
-            Expr::Assign { pattern, extra_operator, value, alternative } => {
-                self.check_assign(pattern, extra_operator, value, alternative)
-            }
+            Expr::Assign { pattern, extra_operator, value } => self.check_assign(pattern, extra_operator, value),
+            Expr::Case { pattern, value } => self.check_case(pattern, value),
+
             Expr::MutRef { expr } => {
                 self.check_expression(expr);
                 match &mut expr.expression {
@@ -162,7 +159,6 @@ impl TypeChecker {
             Expr::Void => { TypeKind::Void }
 
             Expr::ParserTempTypeAnnotation(_) => self.error(format!("Type annotations are not allowed here.")),
-            Expr::ParserTempLetPattern(_) => self.error(format!("Let patterns are not allowed here.")),
         };
 
         expr.typ = self.prune(&inferred_type);
@@ -194,7 +190,7 @@ impl TypeChecker {
     fn check_binding_pattern(&mut self, pattern: &mut AssignablePattern, define_pattern_vars: bool) -> AssignablePatternType {
         match pattern {
             AssignablePattern::Literal(lit) => {
-                AssignablePatternType { typ: self.check_literal(lit), has_place: false, can_fail: false, vars: Vec::new() }
+                AssignablePatternType { typ: self.check_literal(lit), has_place: false, can_fail: true, vars: Vec::new() }
             }
 
             AssignablePattern::Binding { name, typ } => {
@@ -275,11 +271,11 @@ impl TypeChecker {
             }
 
             AssignablePattern::Conditional { pattern, body } => {
-                let mut typ = self.check_binding_pattern(pattern, define_pattern_vars);
+                let mut pattern_typ = self.check_binding_pattern(pattern, define_pattern_vars);
                 self.check_expression(Rc::get_mut(body).unwrap());
                 self.unify_types(&TypeKind::Bool, &body.typ);
-                typ.can_fail = true;
-                typ
+                pattern_typ.can_fail = true;
+                pattern_typ
             }
 
             AssignablePattern::EnumVariant { path, name, inner_patterns } => {
@@ -464,21 +460,6 @@ impl TypeChecker {
         consequence.typ.clone()
     }
 
-    fn check_if_let(&mut self, pattern: &mut AssignablePattern, value: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Box<TypedExpr>) -> TypeKind {
-        self.env.enter_scope();
-        let pattern_type = self.check_binding_pattern(pattern, true);
-        self.check_expression(value);
-        self.unify_types(&value.typ, &pattern_type.typ);
-        if pattern_type.has_place { return self.error(format!("Place patterns are not allowed in if let expressions.")) }
-
-        self.check_expression(consequence);
-        self.env.exit_scope();
-
-        self.check_expression(alternative);
-        self.unify_types(&consequence.typ, &alternative.typ);
-        consequence.typ.clone()
-    }
-
     fn check_while(&mut self, condition: &mut TypedExpr, body: &mut TypedExpr) -> TypeKind {
         self.check_expression(condition);
         self.unify_types(&TypeKind::Bool, &condition.typ);
@@ -537,18 +518,43 @@ impl TypeChecker {
         element_type
     }
 
-    fn check_assign(&mut self, pattern: &mut AssignablePattern, extra_operator: &TokenType, value: &mut TypedExpr, alternative: &mut Option<Box<TypedExpr>>) -> TypeKind {
-        self.check_expression(value);
+    fn check_assign(&mut self, pattern: &mut AssignablePattern, extra_operator: &TokenType, value: &mut Option<Box<TypedExpr>>) -> TypeKind {
         let pattern_type = self.check_binding_pattern(pattern, true);
-        if *extra_operator == TokenType::Equal { self.unify_types(&pattern_type.typ, &value.typ); }
-        else { self.check_infix(&pattern_type.typ, extra_operator, &value.typ); }
-        
-        if let Some(alt) = alternative {
-            self.check_expression(alt);
-            self.unify_types(&TypeKind::Never, &alt.typ);
+        if pattern_type.can_fail {
+            self.errors.push(TypeCheckError { message: format!("Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead.") });
         }
-
+        if let Some(val) = value {
+            self.check_expression(val);
+            self.unify_types(&pattern_type.typ, &val.typ);
+            if extra_operator != &TokenType::Equal {
+                self.check_infix(&pattern_type.typ, extra_operator, &val.typ);
+            }
+        }
         TypeKind::Void
+    }
+
+    fn check_case(&mut self, pattern: &mut AssignablePattern, value: &mut TypedExpr) -> TypeKind {
+        let pattern_type = self.check_binding_pattern(pattern, true);
+        self.check_expression(value);
+        self.unify_types(&pattern_type.typ, &value.typ);
+
+        TypeKind::Bool
+
+        // if let Some(alt) = alternative {
+        //     self.check_expression(alt);
+        //     let alt_type = self.prune(&alt.typ);
+        //     if alt_type != TypeKind::Never {
+        //         return_type = self.error(format!("Expected type {}, found type {}", TypeKind::Never, alt_type))
+        //     }
+        // }
+        // else {
+        //     let covers_all_cases = true;
+        //     if !covers_all_cases {
+        //         return_type = self.error(format!("Case expression does not cover all cases and does not have an else block."))
+        //     }
+
+        // }
+        // return_type
     }
 
     fn get_fn_type(&mut self, params: &mut Vec<AssignablePattern>, return_type: &mut TypeKind, define_params: bool) -> TypeKind {

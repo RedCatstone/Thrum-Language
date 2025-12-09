@@ -147,8 +147,6 @@ impl VM {
                 }
 
                 // bools
-                OpCode::BoolAnd => run_infix_op!(self, Value::Bool(l), Value::Bool(r) => Value::Bool(l && r)),
-                OpCode::BoolOr => run_infix_op!(self, Value::Bool(l), Value::Bool(r) => Value::Bool(l || r)),
                 OpCode::BoolNegate => run_prefix_op!(self, Value::Bool(b) => Value::Bool(!b)),
 
                 // Arrays

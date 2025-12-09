@@ -244,7 +244,7 @@ impl<'a> Lexer<'a> {
                     self.add_token(TokenType::LeftBrace);
                     self.tokenize(Some(1));
 
-                    // we are back from recursion, meaning we hit the correct '}'
+                    // back from recursion, meaning that it hit the correct '}'
                 }
                 '\\' => {
                     // backslashed chars
@@ -263,10 +263,8 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                _ => {
-                    // normal char, just add it!
-                    string.push(c);
-                }
+                // normal char, just add it!
+                any => string.push(any),
             }
         }
         self.add_error(format!("Unterminated string."));

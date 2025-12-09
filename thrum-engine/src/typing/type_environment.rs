@@ -4,6 +4,13 @@ use crate::{nativelib::ThrumType, parsing::ast_structure::TypeKind};
 
 
 
+
+
+
+
+
+
+
 #[derive(Default)]
 pub struct TypeCheckScope {
     pub vars: HashMap<String, ThrumTypecheckValue>,

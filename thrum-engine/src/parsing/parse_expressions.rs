@@ -12,8 +12,8 @@ impl Parser {
         while precedence < self.peek_precedence() {
             let operator = self.peek().token_type.clone();
 
-            // call-like operator but not on the same line -> break the loop.
-            if matches!(operator, TokenType::LeftParen | TokenType::LeftBracket) {
+            // operators that are not allowed to be line-split:
+            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon = operator {
                 if !self.peek_is_on_same_line() {
                     break;
                 }
@@ -75,19 +75,13 @@ impl Parser {
             TokenType::PipeGreater => self.parse_pipe_greater_operator(left_expr),
             
             _ if op_precedence == Precedence::Assign => {
-                let assign_pattern = Box::new(self.convert_assign_expr_into_pattern(left_expr)?);
+                let pattern = Box::new(self.convert_assign_expr_into_pattern(left_expr)?);
                 let extra_operator = self.convert_assign_operator_to_operator(&operator).unwrap();
 
                 // expression
-                let value = Box::new(self.parse_expression(Precedence::Lowest)?);
+                let value = Some(Box::new(self.parse_expression(Precedence::Lowest)?));
 
-                // optional else
-                let alternative = if self.optional_token(TokenType::Else) {
-                    Some(Box::new(self.parse_expression(Precedence::Lowest)?))
-                }
-                else { None };
-
-                Ok(Expr::Assign { pattern: assign_pattern, extra_operator, value, alternative }.into())
+                Ok(Expr::Assign { pattern, extra_operator, value }.into())
             },
 
             _ => {  // other operators
@@ -193,24 +187,29 @@ impl Parser {
             TokenType::ColonColon => self.parse_path_operator(Expr::TypePath(vec!["".to_string()]).into()),
 
             TokenType::Let => {
-                Ok(Expr::ParserTempLetPattern(
-                    self.parse_let_binding_pattern(false)?
-                ).into())
+                let pattern = Box::new(self.parse_let_binding_pattern(false)?);
+
+                // value can be optional. for example: `let x` and later `x = ...`
+                let value = if self.optional_token(TokenType::Equal) {
+                    Some(Box::new(self.parse_expression(Precedence::Lowest)?))
+                }
+                else { None };
+
+                Ok(Expr::Assign { pattern, extra_operator: TokenType::Equal, value }.into())
             },
 
+            TokenType::Case => {
+                let pattern = Box::new(self.parse_let_binding_pattern(false)?);
+                self.expect_token(TokenType::Equal, "Expected '=' after case pattern.")?;
+                let value = Box::new(self.parse_expression(Precedence::Lowest)?);
+
+                Ok(Expr::Case { pattern, value }.into())
+            }
+
             TokenType::If => {
-                if self.optional_token(TokenType::Let) {
-                    let pattern = self.parse_let_binding_pattern(false)?;
-                    self.expect_token(TokenType::Equal, "Expected '=' after 'if let <pattern>'")?;
-                    let value = Box::new(self.parse_expression(Precedence::Lowest)?);
-                    let (consequence, alternative) = self.parse_if_and_else()?;
-                    Ok(Expr::IfLet { pattern, value, consequence, alternative }.into())
-                }
-                else {
-                    let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
-                    let (consequence, alternative) = self.parse_if_and_else()?;
-                    Ok(Expr::If { condition, consequence, alternative }.into())
-                }
+                let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
+                let (consequence, alternative) = self.parse_if_and_else()?;
+                Ok(Expr::If { condition, consequence, alternative }.into())
             },
 
             TokenType::While => {
@@ -436,8 +435,7 @@ impl Parser {
             Expr::Assign {
                 pattern: Box::new(AssignablePattern::Binding { name: pipe_identifier_name, typ: TypeKind::ParserUnknown }),
                 extra_operator: TokenType::Equal,
-                value: Box::new(left_expr),
-                alternative: None,
+                value: Some(Box::new(left_expr)),
             }.into(),
             right_expr_result?
         ]).into())

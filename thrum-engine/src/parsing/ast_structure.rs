@@ -35,8 +35,12 @@ pub enum Expr {
     Assign {  // x = 2  or  let x = 2
         pattern: Box<AssignablePattern>,
         extra_operator: TokenType,
+        value: Option<Box<TypedExpr>>,
+    },
+
+    Case {
+        pattern: Box<AssignablePattern>,
         value: Box<TypedExpr>,
-        alternative: Option<Box<TypedExpr>>,
     },
 
     // { ... }
@@ -90,14 +94,6 @@ pub enum Expr {
         alternative: Box<TypedExpr>,  // void if not present
     },
     
-    // sugar
-    IfLet {  // if let [x, 2] = [1, 2] { ... }
-        pattern: AssignablePattern,
-        value: Box<TypedExpr>,
-        consequence: Box<TypedExpr>,
-        alternative: Box<TypedExpr>,  // void if not present
-    },
-    
     Match {  // match response { 2 -> "success", _ -> "nope." }
         match_value: Box<TypedExpr>,
         arms: Vec<MatchArm>,
@@ -140,7 +136,6 @@ pub enum Expr {
     Void,
 
     ParserTempTypeAnnotation(AssignablePattern),
-    ParserTempLetPattern(AssignablePattern),
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +184,7 @@ pub enum AssignablePattern {
         typ: TypeKind,
     },
     Wildcard,  // _
+    Or(Vec<AssignablePattern>),
     Array(Vec<AssignablePattern>),  // [...]
     Tuple(Vec<AssignablePattern>),  // (...)
     EnumVariant {
@@ -197,7 +193,6 @@ pub enum AssignablePattern {
         inner_patterns: Vec<AssignablePattern>,
     },
     Literal(Value),
-    Or(Vec<AssignablePattern>),
     Conditional {
         pattern: Box<AssignablePattern>,
         body: Rc<TypedExpr>,

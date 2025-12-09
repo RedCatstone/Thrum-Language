@@ -99,6 +99,7 @@ impl fmt::Display for TokenType {
             TokenType::Return => write!(f, "return"),
             TokenType::Let => write!(f, "let"),
             TokenType::Const => write!(f, "const"),
+            TokenType::Case => write!(f, "case"),
             TokenType::Mut => write!(f, "mut"),
             TokenType::Struct => write!(f, "struct"),
             TokenType::Enum => write!(f, "enum"),
@@ -172,12 +173,15 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
         Expr::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
         Expr::Identifier { name } => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
         
-        Expr::Assign { pattern, extra_operator, value, alternative } => {
-            writeln!(f, "{i}{branch}{prefix}Assign (pattern: {pattern}) ({extra_operator}) {type_info}")?;
-            format_recursive(value, f, indent + 1, "value: ", true)?;
-            if let Some(alt) = alternative {
-                format_recursive(alt, f, indent + 1, "alternative: ", true)?;
+        Expr::Assign { pattern, extra_operator, value } => {
+            writeln!(f, "{i}{branch}{prefix}Assign: {pattern} ({extra_operator}) {type_info}")?;
+            if let Some(val) = value {
+                format_recursive(val, f, indent + 1, "value: ", true)?;
             }
+        }
+        Expr::Case { pattern, value } => {
+            writeln!(f, "{i}{branch}{prefix}Case: {pattern} {type_info}")?;
+            format_recursive(value, f, indent + 1, "value: ", false)?;
         }
         Expr::Block(body) => {
             writeln!(f, "{i}{branch}{prefix}Block {type_info}")?;
@@ -216,7 +220,7 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
             }
         }
         Expr::Array(elements) | Expr::Tuple(elements) => {
-            let name = if matches!(eat.expression, Expr::Array(_)) { "Array" } else { "Tuple" };
+            let name = if let Expr::Array(_) = eat.expression { "Array" } else { "Tuple" };
             writeln!(f, "{i}{branch}{prefix}{name} {type_info}")?;
             let len = elements.len();
             for (idx, el) in elements.iter().enumerate() {
@@ -246,9 +250,9 @@ impl fmt::Display for AssignablePattern {
         match self {
             AssignablePattern::Literal(value) =>  write!(f, "{}", value),
             AssignablePattern::Binding { name, typ } => write!(f, "{}: {}", name, typ),
+            AssignablePattern::Or(patterns) => write!(f, "{}", join_slice_to_string(patterns, " | ")),
             AssignablePattern::Array(patterns) => write!(f, "[{}]", join_slice_to_string(patterns, ", ")),
             AssignablePattern::Tuple(patterns) => write!(f, "({})", join_slice_to_string(patterns, ", ")),
-            AssignablePattern::Or(patterns) => write!(f, "{}", join_slice_to_string(patterns, " | ")),
             AssignablePattern::EnumVariant { path, name, inner_patterns } => {
                 write!(f, "{}::{}({})",
                     path.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),

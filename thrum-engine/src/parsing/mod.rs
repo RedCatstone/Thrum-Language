@@ -56,14 +56,14 @@ impl Parser {
     }
 
     fn peek_is_expression_start(&self) -> bool {
-        matches!(
-            self.peek().token_type,
+        match self.peek().token_type {
             // these should match parse_prefix function
             TokenType::Identifier(_) | TokenType::Number(_) | TokenType::StringFrag(_) | TokenType::StringStart | TokenType::Bool(_) | TokenType::Null
             | TokenType::Minus | TokenType::Exclamation | TokenType::BitNot
             | TokenType::LeftBrace | TokenType::LeftParen
-            | TokenType::Let | TokenType::If | TokenType::Fn
-        )
+            | TokenType::Let | TokenType::If | TokenType::Fn => true,
+            _ => false
+        }
     }
 
     fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Result<LexerToken, ParserError> {

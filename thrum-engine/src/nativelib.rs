@@ -39,6 +39,11 @@ pub fn get_native_lib() -> ThrumModule {
         val: Value::NativeFn(native_print),
         is_prelude: true,
     });
+    io_module.values.insert("panic".to_string(), ThrumValue {
+        typ: TypeKind::Fn { param_types: vec![TypeKind::Str], return_type: Box::new(TypeKind::Never) },
+        val: Value::NativeFn(native_panic),
+        is_prelude: true,
+    });
     std_module.sub_modules.insert("io".to_string(), io_module);
 
     
@@ -65,6 +70,13 @@ pub fn native_print(val: &mut [Value]) -> Result<Value, RuntimeError> {
     println!("{}", str);
 
     Ok(Value::Void)
+}
+
+pub fn native_panic(val: &mut [Value]) -> Result<Value, RuntimeError> {
+    let Value::Str(str) = &val[0] else { unreachable!() };
+    println!("{}", str);
+
+    Err(RuntimeError { message: str.to_string() })
 }
 
 pub fn native_str_len(val: &mut [Value]) -> Result<Value, RuntimeError> {

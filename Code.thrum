@@ -1,13 +1,6 @@
-// enum Enum {
-//     CaseA, CaseB
-// }
-// 
-// let x = Enum::CaseA;
-// 
-// // match x {
-// //     Enum::CaseA -> "a"
-// //     Enum::CaseB -> "b"
-// // }
+let tup = (30, 1)
 
-
-(x -> x+1)(5)
+if (case (x, 0) = tup) and x > 10 {
+    "{x}"
+}
+else "nope..."

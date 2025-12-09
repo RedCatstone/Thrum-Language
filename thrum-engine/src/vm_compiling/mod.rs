@@ -27,7 +27,7 @@ pub enum OpCode {
     // operators / types
     CmpEqual, CmpLess, CmpGreater,
     NumAdd, NumSubtract, NumMultiply, NumDivide, NumModulo, NumExponent, NumNegate,
-    BoolNegate, BoolAnd, BoolOr,
+    BoolNegate,
     StrAdd, StrTemplate,
     ArrCreate, ArrGet, ArrRefSet, ArrUnpackCheckJump,
     TupCreate, TupUnpack,
@@ -192,8 +192,7 @@ impl<'a> CompileFunction<'a> {
 
             Expr::Infix { left, operator, right } => {
                 self.compile_expression(left);
-                self.compile_expression(right);
-                self.compile_infix(&left.typ, operator, &right.typ);
+                self.compile_infix(operator, &left.typ, right);
             }
             Expr::Prefix { operator, right } => {
                 self.compile_expression(right);
@@ -206,44 +205,72 @@ impl<'a> CompileFunction<'a> {
                 self.push_get_identifier(name);
             }
 
-            Expr::Assign { pattern: left, extra_operator, value, alternative } => {
+            Expr::Assign { pattern, extra_operator, value } => {
+                // TODO
+                let val = value.as_ref().unwrap();
+
                 // push value to the stack
                 if *extra_operator == TokenType::Equal {
-                    self.compile_expression(value);
+                    self.compile_expression(val);
                 }
                 else {
-                    match *left.clone() {
+                    match *pattern.clone() {
                         AssignablePattern::Place(place) => {
                             self.push_place_expr_value(place);
-                            self.compile_expression(value);
-                            self.compile_infix(&value.typ, extra_operator, &value.typ);
+                            self.compile_infix(extra_operator, &val.typ, val);
                         }
                         _ => unreachable!("Infix assignments are only allowed for place patterns.")
                     }
                 }
                 // compile the binding pattern
                 let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(&left, &mut failure_jumps);
+                self.compile_binding_pattern(&pattern, &mut failure_jumps);
 
                 // if AssignablePattern can fail, use the else block or panic
                 if !failure_jumps.is_empty() {
-                    self.push_op(OpCode::Jump);
-                    let success_jump = self.push_opnum_for_patching();
+                    unreachable!("assign pattern didn't match.")
+                    // self.push_op(OpCode::Jump);
+                    // let success_jump = self.push_opnum_for_patching();
 
-                    self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
+                    // self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
                     
-                    if let Some(alt) = alternative {
-                        self.compile_expression(alt);
-                    }
-                    else {
-                        self.push_get_constant_op(Value::Str("Assignment-pattern did not match.".to_string()));
-                        self.push_op(OpCode::Panic);
-                    }
+                    // if let Some(alt) = alternative {
+                    //     self.compile_expression(alt);
+                    // }
+                    // else {
+                    //     self.push_get_constant_op(Value::Str("Assignment-pattern did not match.".to_string()));
+                    //     self.push_op(OpCode::Panic);
+                    // }
 
-                    self.patch_jump_op(success_jump);
+                    // self.patch_jump_op(success_jump);
                 }
 
                 self.push_void();
+            }
+
+            Expr::Case { pattern, value } => {
+                self.compile_expression(value);  // (+1 temp)
+
+                let mut failure_jumps = Vec::new();
+                self.compile_binding_pattern(&pattern, &mut failure_jumps);  // consumes value (-1 temp)
+
+                // its a match! 
+                self.push_get_constant_op(Value::Bool(true)); // (+1 temp - success path)
+                self.cur_temp_amount -= 1;
+
+                // handle failure path, skip to else block
+                if !failure_jumps.is_empty() {
+                    self.push_op(OpCode::Jump);
+                    let jump_over_failure = self.push_opnum_for_patching();
+
+                    self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
+                    
+                    self.push_get_constant_op(Value::Bool(false)); // (+1 temp - failure path)
+                    self.cur_temp_amount -= 1;
+                    
+                    self.patch_jump_op(jump_over_failure);
+                }
+                self.cur_temp_amount += 1;
             }
 
             Expr::MutRef { expr } => {
@@ -823,56 +850,78 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_infix(&mut self, left: &TypeKind, operator: &TokenType, right: &TypeKind) {
-        match (left, right) {
-            (TypeKind::Num, TypeKind::Num) => match operator {
-                TokenType::Plus => self.push_op(OpCode::NumAdd),
-                TokenType::Minus => self.push_op(OpCode::NumSubtract),
-                TokenType::Star => self.push_op(OpCode::NumMultiply),
-                TokenType::Slash => self.push_op(OpCode::NumDivide),
-                TokenType::Percent => self.push_op(OpCode::NumModulo),
-                TokenType::StarStar => self.push_op(OpCode::NumExponent),
-                TokenType::EqualEqual => self.push_op(OpCode::CmpEqual),
-                TokenType::NotEqual => self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate]),
-                TokenType::Less => self.push_op(OpCode::CmpLess),
-                TokenType::Greater => self.push_op(OpCode::CmpGreater),
-                TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
-                TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
-                _ => unreachable!("Unsupported operator {} for type num", operator)
-            },
-            (TypeKind::Str, TypeKind::Str) => match operator {
-                TokenType::Plus => self.push_op(OpCode::StrAdd),
-                TokenType::EqualEqual => self.push_op(OpCode::CmpEqual),
-                TokenType::NotEqual => self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate]),
-                TokenType::Less => self.push_op(OpCode::CmpLess),
-                TokenType::Greater => self.push_op(OpCode::CmpGreater),
-                TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
-                TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
-                _ => unreachable!("Unsupported operator {} for type str", operator)
-            }
-            (TypeKind::Bool, TypeKind::Bool) => match operator {
-                TokenType::Ampersand => self.push_op(OpCode::BoolAnd),
-                TokenType::Pipe => self.push_op(OpCode::BoolOr),
-                TokenType::EqualEqual => self.push_op(OpCode::CmpEqual),
-                TokenType::NotEqual => self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate]),
+    fn compile_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right: &TypedExpr) {
+        if TokenType::EqualEqual == *operator {
+            self.compile_expression(right);
+            self.push_op(OpCode::CmpEqual);
+        }
+        else if TokenType::NotEqual == *operator {
+            self.compile_expression(right);
+            self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate])
+        }
+        else if TypeKind::Bool == *left_type {
+            match operator {
+                TokenType::Ampersand => {
+                    self.push_jump_if_false();
+                    let jump_over_right_expression = self.push_opnum_for_patching();
+                    self.compile_expression(right);
+                    self.push_op(OpCode::Jump);
+                    let right_expression_jump_over_push_true = self.push_opnum_for_patching();
+                    self.patch_jump_op(jump_over_right_expression);
+                    self.push_get_constant_op(Value::Bool(false));
+                    self.patch_jump_op(right_expression_jump_over_push_true);
+                }
+                TokenType::Pipe => {
+                    self.push_op(OpCode::BoolNegate);
+                    self.push_jump_if_false();
+                    let jump_over_right_expression = self.push_opnum_for_patching();
+                    self.compile_expression(right);
+                    self.push_op(OpCode::Jump);
+                    let right_expression_jump_over_push_true = self.push_opnum_for_patching();
+                    self.patch_jump_op(jump_over_right_expression);
+                    self.push_get_constant_op(Value::Bool(true));
+                    self.patch_jump_op(right_expression_jump_over_push_true);
+                }
                 _ => unreachable!("Unsupported operator {} for type bool", operator)
             }
-            (TypeKind::Arr(_), TypeKind::Arr(_)) => match operator {
-                TokenType::EqualEqual => self.push_op(OpCode::CmpEqual),
-                TokenType::NotEqual => self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate]),
-                _ => unreachable!("Unsupported operator {} for type arr", operator)
-            }
-            (TypeKind::Tup(_), TypeKind::Tup(_)) => match operator {
-                TokenType::EqualEqual => self.push_op(OpCode::CmpEqual),
-                TokenType::NotEqual => self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate]),
-                _ => unreachable!("Unsupported operator {} for type tup", operator)
-            }
+        }
+        else {
+            self.compile_expression(right);
+            match left_type {
+                TypeKind::Num => match operator {
+                    TokenType::Plus => self.push_op(OpCode::NumAdd),
+                    TokenType::Minus => self.push_op(OpCode::NumSubtract),
+                    TokenType::Star => self.push_op(OpCode::NumMultiply),
+                    TokenType::Slash => self.push_op(OpCode::NumDivide),
+                    TokenType::Percent => self.push_op(OpCode::NumModulo),
+                    TokenType::StarStar => self.push_op(OpCode::NumExponent),
+                    TokenType::Less => self.push_op(OpCode::CmpLess),
+                    TokenType::Greater => self.push_op(OpCode::CmpGreater),
+                    TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
+                    TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
+                    _ => unreachable!("Unsupported operator {} for type num", operator)
+                },
+                TypeKind::Str => match operator {
+                    TokenType::Plus => self.push_op(OpCode::StrAdd),
+                    TokenType::Less => self.push_op(OpCode::CmpLess),
+                    TokenType::Greater => self.push_op(OpCode::CmpGreater),
+                    TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
+                    TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
+                    _ => unreachable!("Unsupported operator {} for type str", operator)
+                }
+                TypeKind::Arr(_) => match operator {
+                    _ => unreachable!("Unsupported operator {} for type arr", operator)
+                }
+                TypeKind::Tup(_) => match operator {
+                    _ => unreachable!("Unsupported operator {} for type tup", operator)
+                }
 
-            (TypeKind::Never, _) | (_, TypeKind::Never) => {
-                /* Do nothing */
-            }
+                TypeKind::Never => {
+                    /* Do nothing */
+                }
 
-            (left, right) => unreachable!("Mismatched types for infix operation: ({left}, {right})")
+                _ => unreachable!("Mismatched type for infix operation: {left_type}")
+            }
         }
         self.cur_temp_amount -= 1;
     }
