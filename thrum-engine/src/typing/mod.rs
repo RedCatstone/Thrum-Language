@@ -1,7 +1,7 @@
 use crate::{
     lexing::tokens::TokenType,
     nativelib::{ThrumModule, ThrumType, get_native_lib},
-    parsing::{ast_structure::{AssignablePattern, DefinedTypeKind, EnumExpression, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, typing::type_environment::TypecheckEnvironment
+    parsing::{ast_structure::{MatchPattern, DefinedTypeKind, Expr, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, typing::type_environment::TypecheckEnvironment
 };
 use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
@@ -37,6 +37,24 @@ struct AssignablePatternType {
     has_place: bool,
     can_fail: bool,
     vars: Vec<(String, TypeKind)>,
+}
+
+#[derive(Default, Clone)]
+struct ExprContext {
+    expected_type: Option<TypeKind>,
+    allow_conditional_bindings: bool,
+}
+impl ExprContext {
+    fn expect(&self, typ: TypeKind) -> Self {
+        let mut new_ctx = self.clone();
+        new_ctx.expected_type = Some(typ);
+        new_ctx
+    }
+    fn allow_conditional_bindings(&self) -> Self {
+        let mut new_ctx = self.clone();
+        new_ctx.allow_conditional_bindings = true;
+        new_ctx
+    }
 }
 
 
@@ -93,40 +111,174 @@ impl TypeChecker {
 
     pub fn check_program(&mut self, program: &mut Vec<TypedExpr>) {
         // PASS 1: run type unification/constraint solving logic.
-        self.check_block(program);
+        self.check_block(program, &ExprContext::default());
 
         // PASS 2: clean up (remove all TypeKind::Infered(id))
         self.finalize_expressions(program);
     }
 
 
+    fn check_expression(&mut self, expr: &mut TypedExpr, old_ctx: &ExprContext) {
+        let mut ctx = ExprContext::default();
+        let mut is_never = false;
 
-    fn check_expression(&mut self, expr: &mut TypedExpr) {
         let inferred_type = match &mut expr.expression {
             Expr::Literal(val) => self.check_literal(val),
-            Expr::Identifier { name } => self.check_identifier(name, false),
-            Expr::TemplateString(parts) => self.check_template_string(parts),
-            Expr::Tuple(elements) => self.check_tuple(elements),
-            Expr::Array(elements) => self.check_array(elements),
-            Expr::Index { left, index } => self.check_index(left, index),
 
-            Expr::Block(body) => self.check_block(body),
-            Expr::Prefix { operator, right } => self.check_prefix(operator, right),
-            Expr::Infix { left, operator, right } => {
-                self.check_expression(left);
-                self.check_expression(right);
-                self.check_infix(&left.typ, operator, &right.typ)
+            Expr::Identifier { name } => self.check_identifier(name, false),
+
+            Expr::TemplateString(parts) => {
+                for part in parts {
+                    self.check_expression(part, &ctx);
+                    if self.prune(&part.typ).is_never() { is_never = true }
+                }
+                TypeKind::Str
             }
-            Expr::If { condition, consequence, alternative } => self.check_if(condition, consequence, alternative),
-            Expr::Match { match_value, arms: cases } => self.check_match(match_value, cases),
-            Expr::While { condition, body } => self.check_while(condition, body),
-            Expr::Loop { body } => self.check_loop(body),
+
+            Expr::Tuple(elements) => {
+                let mut tuple_types = Vec::new();
+
+                for element in elements {
+                    self.check_expression(element, &ctx);
+                    if self.prune(&element.typ).is_never() { is_never = true }
+                    tuple_types.push(element.typ.clone());
+                }
+
+                TypeKind::Tup(tuple_types)
+            }
+
+            Expr::Array(elements) => {
+                let mut arr_types = Vec::new();
+
+                for element in elements {
+                    self.check_expression(element, &ctx);
+                    arr_types.push(element.typ.clone());
+                }
+
+                let arr_type = self.unify_type_vec(&arr_types);
+                if arr_type.is_never() { is_never = true }
+                TypeKind::Arr(Box::new(arr_type))
+            }
+
+            Expr::Index { left, index } => {
+                let arr_element_type = self.new_inference_type();
+                self.check_expression(left, &ctx.expect(TypeKind::Arr(Box::new(arr_element_type.clone()))));
+                self.check_expression(index, &ctx.expect(TypeKind::Num));
+                if self.prune(&left.typ).is_never() { is_never = true }
+                if self.prune(&index.typ).is_never() { is_never = true }
+                arr_element_type
+            }
+
+            Expr::Block(body) => self.check_block(body, &ctx),
+
+            Expr::Prefix { operator, right } => {
+                match operator {
+                    TokenType::Exclamation => {
+                        self.check_expression(right, &ctx.expect(TypeKind::Bool));
+                        right.typ.clone()
+                    }
+                    TokenType::Minus => {
+                        self.check_expression(right, &ctx.expect(TypeKind::Num));
+                        right.typ.clone()
+                    }
+                    _ => { self.error(format!("Unsupported prefix operator: {:?}", operator)); TypeKind::TypeError }
+                }
+            }
+
+            Expr::Infix { operator, left, right } => {
+                if *operator == TokenType::Ampersand && old_ctx.allow_conditional_bindings {
+                    ctx.allow_conditional_bindings = true;
+                }
+                self.check_expression(left, &ctx);
+                self.check_expression(right, &ctx);
+                self.check_infix(operator, &left.typ, &right.typ)
+            }
+
+            Expr::If { condition, consequence, alternative } => {
+                self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
+    
+                self.check_expression(consequence, &ctx);
+                self.check_expression(alternative, &ctx.expect(consequence.typ.clone()));
+
+                consequence.typ.clone()
+            },
+
+            Expr::Match { match_value, arms: cases } => {
+                self.check_expression(match_value, &ctx);
+
+                let mut cases_to_cover = match self.prune(&match_value.typ) {
+                    TypeKind::Bool => Some(HashSet::from([true.to_string(), false.to_string()])),
+                    _ => None
+                };
+    
+                let mut has_unfailable_arm = false;
+                let mut arm_types = Vec::new();
+    
+                for arm in cases {
+                    self.env.enter_scope();
+                    match arm.pattern {
+                        MatchPattern::Literal(Value::Bool(bool)) => {
+                            cases_to_cover.as_mut().unwrap().remove(&bool.to_string());
+                        }
+                        _ => { }
+                    }
+                    let pattern_type = self.check_binding_pattern(&mut arm.pattern, true);
+                    self.unify_types(&match_value.typ, &pattern_type.typ);
+
+                    if !pattern_type.can_fail { has_unfailable_arm = true; }
+
+                    self.check_expression(&mut arm.body, &ctx);
+                    arm_types.push(arm.body.typ.clone());
+                    self.env.exit_scope();
+                }
+
+                if !has_unfailable_arm && match &cases_to_cover {
+                    None => false,
+                    Some(remaining_cases) => !remaining_cases.is_empty()
+                } {
+                    self.error(format!("Match expression does not cover all cases. Remaining cases: {:?}", cases_to_cover.unwrap()));
+                }
+
+                self.unify_type_vec(&arm_types)
+            },
+
+            Expr::Loop { body } => {
+                let loop_break_type = self.new_inference_type();
+                self.current_break_types.push(("loop".to_string(), loop_break_type.clone()));
+                self.check_expression(body, &ctx.expect(TypeKind::Void));
+                self.current_break_types.pop().unwrap();
+                loop_break_type
+            },
             
-            Expr::Assign { pattern, extra_operator, value } => self.check_assign(pattern, extra_operator, value),
-            Expr::Case { pattern, value } => self.check_case(pattern, value),
+            Expr::Assign { pattern, extra_operator, value } => {
+                let pattern_type = self.check_binding_pattern(pattern, true);
+                if pattern_type.can_fail {
+                    self.errors.push(TypeCheckError { message: format!("Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead.") });
+                }
+                // TODO
+                if let Some(val) = value {
+                    self.check_expression(val, &ctx.expect(pattern_type.typ.clone()));
+                    if val.typ.is_never() { is_never = true }
+                    if *extra_operator != TokenType::Equal {
+                        self.check_infix(extra_operator, &pattern_type.typ, &val.typ);
+                    }
+                }
+                TypeKind::Void
+            },
+
+            Expr::Case { pattern, value } => {
+                let pattern_type = self.check_binding_pattern(pattern, true);
+                self.check_expression(value, &ctx.expect(pattern_type.typ));
+                if value.typ.is_never() { is_never = true }
+                else if !old_ctx.allow_conditional_bindings {
+                    self.error(format!("Binding case-expressions are not allowed here."));
+                }
+
+                TypeKind::Bool
+            },
 
             Expr::MutRef { expr } => {
-                self.check_expression(expr);
+                self.check_expression(expr, &ctx);
                 match &mut expr.expression {
                     Expr::Identifier { name } => {
                         self.lookup_variable_mut(name);
@@ -135,33 +287,104 @@ impl TypeChecker {
                     _ => self.error(format!("Cannot borrow non identifier as mut."))
                 }
             }
+
             Expr::Deref { expr } => {
-                self.check_expression(expr);
                 let inner_typ = self.new_inference_type();
-                self.unify_types(&TypeKind::MutPointer(Box::new(inner_typ.clone())), &expr.typ);
+                self.check_expression(expr, &ctx.expect(TypeKind::MutPointer(Box::new(inner_typ.clone()))));
                 inner_typ
             }
 
             Expr::FnDefinition { params, return_type, body, .. } => {
-                self.check_fn_expression(params, return_type, body);
+                self.check_fn_expression(params, return_type, body, &ctx);
+                if body.typ.is_never() { is_never = true }
                 TypeKind::Void
             }
             Expr::Closure { params, return_type: return_value, body } => {
-                self.check_fn_expression(params, return_value, body)
+                self.check_fn_expression(params, return_value, body, &ctx)
             }
-            Expr::Return(ret) => self.check_return(ret),
-            Expr::Break { expr } => self.check_break(expr),
-            Expr::Call { callee, arguments } => self.check_fn_call(callee, arguments),
+
+            Expr::Return(ret) => {
+                let curr_return_type = self.current_function_return_type.clone()
+                    .unwrap_or_else(|| self.error(format!("'return' is only allowed inside functions.")));
+
+                self.check_expression(ret, &ctx.expect(curr_return_type));
+
+                TypeKind::Never
+            },
+
+            Expr::Break { expr } => {
+                let curr_break_type = match self.current_break_types.last() {
+                    Some((label, typ)) => typ.clone(),
+                    None => self.error(format!("'break' is only allowed inside loops."))
+                };
+                self.check_expression(expr, &ctx.expect(curr_break_type));
+
+                TypeKind::Never
+            },
+
+            Expr::Call { callee, arguments } => {
+                self.check_expression(callee, &ctx);
+    
+                let mut param_types = Vec::new();
+                for arg in arguments {
+                    self.check_expression(arg, &ctx);
+                    param_types.push(arg.typ.clone());
+                }
+
+                match &mut callee.typ {
+                    TypeKind::Fn { param_types, return_type } => {
+                        if param_types.len() != param_types.len() {
+                            self.error(format!("Expected {} arguments, found {}.", param_types.len(), param_types.len()))
+                        }
+                        else {
+                            for (param_type, arg_type) in param_types.iter().zip(param_types.iter()) {
+                                self.unify_types(param_type, arg_type);
+                            }
+                            *return_type.clone()
+                        }
+                    }
+                    TypeKind::Inference(id) => {
+                        // TODO not the best code, but works for now
+                        let return_type = self.new_inference_type();
+                        let fn_type = TypeKind::Fn { param_types, return_type: Box::new(return_type.clone()) };
+                        self.unify_types(&fn_type, &TypeKind::Inference(*id));
+                        return_type
+                    }
+                    _ => self.error(format!("Cannot call a non-function type '{}'", callee.typ))
+                }
+            },
 
             Expr::TypePath(segments) => self.check_path_expression(segments),
-            Expr::MemberAccess { left, member } => self.check_member_acess_expression(left, member),
-            Expr::EnumDefinition { name, enums } => self.check_enum_expression(name, enums),
-            Expr::Void => { TypeKind::Void }
+
+            Expr::MemberAccess { left, member } => {
+                todo!()
+            },
+
+            Expr::EnumDefinition { name, enums } => {
+                self.checked_define_type(name.clone(), ThrumType {
+                    typ: DefinedTypeKind::Enum {
+                        name: name.to_string(),
+                        inner_types: enums.into_iter()
+                            .map(|x| (x.name.clone(), x.inner_types.clone()))
+                            .collect()
+                    },
+                    values: HashMap::new()
+                });
+                TypeKind::Void
+            },
+
+            Expr::Void => TypeKind::Void,
 
             Expr::ParserTempTypeAnnotation(_) => self.error(format!("Type annotations are not allowed here.")),
+            Expr::While { .. } => unreachable!("should be desugared already...")
         };
 
-        expr.typ = self.prune(&inferred_type);
+        expr.typ = if is_never { TypeKind::Never }
+            else { self.prune(&inferred_type) };
+        
+        if let Some(expected) = &old_ctx.expected_type {
+            self.unify_types(expected, &expr.typ);
+        }
     }
 
 
@@ -187,13 +410,13 @@ impl TypeChecker {
         }
     }
 
-    fn check_binding_pattern(&mut self, pattern: &mut AssignablePattern, define_pattern_vars: bool) -> AssignablePatternType {
+    fn check_binding_pattern(&mut self, pattern: &mut MatchPattern, define_pattern_vars: bool) -> AssignablePatternType {
         match pattern {
-            AssignablePattern::Literal(lit) => {
+            MatchPattern::Literal(lit) => {
                 AssignablePatternType { typ: self.check_literal(lit), has_place: false, can_fail: true, vars: Vec::new() }
             }
 
-            AssignablePattern::Binding { name, typ } => {
+            MatchPattern::Binding { name, typ } => {
                 if *typ == TypeKind::ParserUnknown {
                     // if no type is annotated create a new inference var
                     *typ = self.new_inference_type();
@@ -205,7 +428,7 @@ impl TypeChecker {
                 AssignablePatternType { typ: typ.clone(), has_place: false, can_fail: false, vars: vec![(name.clone(), typ.clone())] }
             }
 
-            AssignablePattern::Array(elements) => {
+            MatchPattern::Array(elements) => {
                 let mut arr_types = Vec::new();
                 let mut has_place = false;
                 let mut vars = Vec::new();
@@ -220,7 +443,7 @@ impl TypeChecker {
                 AssignablePatternType { typ: TypeKind::Arr(Box::new(arr_type)), has_place, can_fail: true, vars }
             }
 
-            AssignablePattern::Tuple(elements) => {
+            MatchPattern::Tuple(elements) => {
                 let mut tuple_types = Vec::new();
                 let mut has_place = false;
                 let mut can_fail = false;
@@ -236,11 +459,11 @@ impl TypeChecker {
                 AssignablePatternType { typ: TypeKind::Tup(tuple_types), has_place, can_fail, vars }
             }
 
-            AssignablePattern::Wildcard => {
+            MatchPattern::Wildcard => {
                 AssignablePatternType { typ: self.new_inference_type(), has_place: false, can_fail: false, vars: Vec::new() }
             }
 
-            AssignablePattern::Or(patterns) => {
+            MatchPattern::Or(patterns) => {
                 let mut or_types = Vec::new();
                 let mut has_place = false;
                 let mut can_fail = false;
@@ -270,15 +493,15 @@ impl TypeChecker {
                 AssignablePatternType { typ, has_place, can_fail, vars: vars.into_iter().collect() }
             }
 
-            AssignablePattern::Conditional { pattern, body } => {
-                let mut pattern_typ = self.check_binding_pattern(pattern, define_pattern_vars);
-                self.check_expression(Rc::get_mut(body).unwrap());
+            MatchPattern::Conditional { pattern, body } => {
+                let mut pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
+                self.check_expression(Rc::get_mut(body).unwrap(), &ExprContext::default());
                 self.unify_types(&TypeKind::Bool, &body.typ);
-                pattern_typ.can_fail = true;
-                pattern_typ
+                pattern_type.can_fail = true;
+                pattern_type
             }
 
-            AssignablePattern::EnumVariant { path, name, inner_patterns } => {
+            MatchPattern::EnumVariant { path, name, inner_patterns } => {
                 todo!()
                 // if path.len() != 1 { return AssignablePatternType {
                 //     typ: self.add_error("Multi-segment paths in match patterns are not yet supported.".to_string()), has_place: false, vars: Vec::new()
@@ -313,22 +536,22 @@ impl TypeChecker {
                 // expected_enum_type
             }
 
-            AssignablePattern::Place(PlaceExpr::Identifier(name)) => {
+            MatchPattern::Place(PlaceExpr::Identifier(name)) => {
                 AssignablePatternType { typ: self.check_identifier(name, true).clone(), has_place: true, can_fail: false, vars: Vec::new() }
             }
 
-            AssignablePattern::Place(PlaceExpr::Deref(name)) => {
+            MatchPattern::Place(PlaceExpr::Deref(name)) => {
                 let typ = self.check_identifier(name, true);
                 let inner_type = self.new_inference_type();
                 self.unify_types(&TypeKind::MutPointer(Box::new(inner_type.clone())), &typ);
                 AssignablePatternType { typ: inner_type, has_place: true, can_fail: false, vars: Vec::new() }
             }
 
-            AssignablePattern::Place(PlaceExpr::Index { left, index }) => {
-                self.check_expression(Rc::get_mut(left).unwrap());
+            MatchPattern::Place(PlaceExpr::Index { left, index }) => {
+                self.check_expression(Rc::get_mut(left).unwrap(), &ExprContext::default());
                 let arr_type = self.new_inference_type();
                 self.unify_types(&TypeKind::Arr(Box::new(arr_type.clone())), &left.typ);
-                self.check_expression(Rc::get_mut(index).unwrap());
+                self.check_expression(Rc::get_mut(index).unwrap(), &ExprContext::default());
                 self.unify_types(&TypeKind::Num, &index.typ);
                 AssignablePatternType { typ: arr_type, has_place: true, can_fail: true, vars: Vec::new() }
             }
@@ -367,7 +590,7 @@ impl TypeChecker {
 
 
 
-    fn check_block(&mut self, body: &mut Vec<TypedExpr>) -> TypeKind {
+    fn check_block(&mut self, body: &mut Vec<TypedExpr>, ctx: &ExprContext) -> TypeKind {
         self.env.enter_scope();
 
         // 1. define FnDefinitions
@@ -379,36 +602,30 @@ impl TypeChecker {
         }
 
         // normal pass
-        let mut last_type = TypeKind::Void;
-        for expr in body {
-            self.check_expression(expr);
-            if last_type != TypeKind::Never {
-                last_type = expr.typ.clone();
+        let mut is_never = false;
+        let block_drop_type = if let Some((last_expr, other_exprs)) = body.split_last_mut() {
+            for expr in other_exprs {
+                self.check_expression(expr, ctx);
+                if expr.typ.is_never() { is_never = true }
             }
-        }
+            // conditional bindings are allowed in the last expression of a block, because the current scope is gonna end after this expression anyways.
+            // this isn't reeeaally needed, but it definitely can't hurt to allow.
+            // let x = { case ?x = ... and x > 3 }
+            self.check_expression(last_expr, &ctx.allow_conditional_bindings());
+            if is_never { TypeKind::Never } else { last_expr.typ.clone() }
+        } else {
+            // Empty block returns Void
+            TypeKind::Void
+        };
+
         self.env.exit_scope();
-        last_type
+        block_drop_type
     }
 
-    fn check_prefix(&mut self, operator: &TokenType, right: &mut TypedExpr) -> TypeKind{
-        self.check_expression(right);
-        match operator {
-            TokenType::Exclamation => {
-                self.unify_types(&TypeKind::Bool, &right.typ);
-                right.typ.clone()
-            }
-            TokenType::Minus => {
-                self.unify_types(&TypeKind::Num, &right.typ);
-                right.typ.clone()
-            }
-            _ => { self.error(format!("Unsupported prefix operator: {:?}", operator)); TypeKind::TypeError }
-        }
-    }
-
-    fn check_infix(&mut self, left_type: &TypeKind, operator: &TokenType, right_type: &TypeKind) -> TypeKind {
+    fn check_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right_type: &TypeKind) -> TypeKind {
         match operator {
             // num/str operators
-            TokenType::Plus | TokenType::Greater | TokenType::Less | TokenType::GreaterEqual | TokenType::LessEqual => {
+            TokenType::Plus | TokenType::Greater | TokenType::Less /* | TokenType::GreaterEqual | TokenType::LessEqual */ => {
                 self.unify_types(left_type, right_type);
                 let unified_type = self.prune(left_type);
                 let returned_type = if *operator == TokenType::Plus { unified_type.clone() } else { TypeKind::Bool };
@@ -428,13 +645,12 @@ impl TypeChecker {
             }
 
             // comparison operators
-            TokenType::EqualEqual | TokenType::NotEqual => {
+            TokenType::EqualEqual /* | TokenType::NotEqual */ => {
                 self.unify_types(left_type, right_type);
                 let unified_type = self.prune(left_type);
                 match unified_type {
-                    TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup(_) => TypeKind::Bool,
-                    // let it propagate, it will be solved later.
-                    TypeKind::Inference(_) => TypeKind::Bool,
+                    TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup(_) | TypeKind::Void => TypeKind::Bool,
+                    // TypeKind::Inference(_) => TypeKind::Bool,
                     _ => self.error(format!("Cannot compare types {}.", unified_type))
                 }
             }
@@ -449,115 +665,8 @@ impl TypeChecker {
         }
     }
 
-    fn check_if(&mut self, condition: &mut TypedExpr, consequence: &mut TypedExpr, alternative: &mut Box<TypedExpr>) -> TypeKind {
-        self.check_expression(condition);
-        self.unify_types(&TypeKind::Bool, &condition.typ);
-        
-        self.check_expression(consequence);
-        self.check_expression(alternative);
-        
-        self.unify_types(&consequence.typ, &alternative.typ);
-        consequence.typ.clone()
-    }
 
-    fn check_while(&mut self, condition: &mut TypedExpr, body: &mut TypedExpr) -> TypeKind {
-        self.check_expression(condition);
-        self.unify_types(&TypeKind::Bool, &condition.typ);
-
-        self.current_break_types.push(("while".to_string(), TypeKind::Void));
-        self.check_expression(body);
-        self.current_break_types.pop().unwrap();
-        TypeKind::Void
-    }
-
-    fn check_loop(&mut self, body: &mut TypedExpr) -> TypeKind {
-        let loop_break_type = self.new_inference_type();
-        self.current_break_types.push(("loop".to_string(), loop_break_type.clone()));
-        self.check_expression(body);
-        self.unify_types(&TypeKind::Void, &body.typ);
-        self.current_break_types.pop().unwrap();
-        loop_break_type
-    }
-
-    fn check_template_string(&mut self, parts: &mut Vec<TypedExpr>) -> TypeKind {
-        for part in parts {
-            self.check_expression(part);
-        }
-        TypeKind::Str
-    }
-
-    fn check_tuple(&mut self, elements: &mut Vec<TypedExpr>) -> TypeKind {
-        let mut tuple_types = Vec::new();
-        let mut is_never = false;
-
-        for element in elements {
-            self.check_expression(element);
-            if self.prune(&element.typ) == TypeKind::Never {
-                is_never = true;
-            }
-            tuple_types.push(element.typ.clone());
-        }
-        if is_never { TypeKind::Never }
-        else { TypeKind::Tup(tuple_types) }
-    }
-
-    fn check_array(&mut self, elements: &mut Vec<TypedExpr>) -> TypeKind {
-        let types: Vec<TypeKind> = elements.iter_mut().map(|element| { self.check_expression(element); element.typ.clone() }).collect();
-        let arr_type = self.unify_type_vec(&types);
-        if arr_type == TypeKind::Never { TypeKind::Never }
-        else { TypeKind::Arr(Box::new(arr_type)) }
-    }
-
-    fn check_index(&mut self, left: &mut TypedExpr, index: &mut TypedExpr) -> TypeKind {
-        self.check_expression(left);
-        self.check_expression(index);
-        self.unify_types(&TypeKind::Num, &index.typ);
-        let element_type = self.new_inference_type();
-        let expected_left_type = TypeKind::Arr(Box::new(element_type.clone()));
-        self.unify_types(&left.typ, &expected_left_type);
-        element_type
-    }
-
-    fn check_assign(&mut self, pattern: &mut AssignablePattern, extra_operator: &TokenType, value: &mut Option<Box<TypedExpr>>) -> TypeKind {
-        let pattern_type = self.check_binding_pattern(pattern, true);
-        if pattern_type.can_fail {
-            self.errors.push(TypeCheckError { message: format!("Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead.") });
-        }
-        if let Some(val) = value {
-            self.check_expression(val);
-            self.unify_types(&pattern_type.typ, &val.typ);
-            if extra_operator != &TokenType::Equal {
-                self.check_infix(&pattern_type.typ, extra_operator, &val.typ);
-            }
-        }
-        TypeKind::Void
-    }
-
-    fn check_case(&mut self, pattern: &mut AssignablePattern, value: &mut TypedExpr) -> TypeKind {
-        let pattern_type = self.check_binding_pattern(pattern, true);
-        self.check_expression(value);
-        self.unify_types(&pattern_type.typ, &value.typ);
-
-        TypeKind::Bool
-
-        // if let Some(alt) = alternative {
-        //     self.check_expression(alt);
-        //     let alt_type = self.prune(&alt.typ);
-        //     if alt_type != TypeKind::Never {
-        //         return_type = self.error(format!("Expected type {}, found type {}", TypeKind::Never, alt_type))
-        //     }
-        // }
-        // else {
-        //     let covers_all_cases = true;
-        //     if !covers_all_cases {
-        //         return_type = self.error(format!("Case expression does not cover all cases and does not have an else block."))
-        //     }
-
-        // }
-        // return_type
-    }
-
-    fn get_fn_type(&mut self, params: &mut Vec<AssignablePattern>, return_type: &mut TypeKind, define_params: bool) -> TypeKind {
+    fn get_fn_type(&mut self, params: &mut Vec<MatchPattern>, return_type: &mut TypeKind, define_params: bool) -> TypeKind {
         let mut param_types = Vec::new();
         for param_pattern in params.iter_mut() {
             let pattern_type = self.check_binding_pattern(param_pattern, define_params);
@@ -577,7 +686,7 @@ impl TypeChecker {
     }
 
 
-    fn check_fn_expression(&mut self, params: &mut Vec<AssignablePattern>, return_type: &mut TypeKind, body: &mut Rc<TypedExpr>) -> TypeKind {
+    fn check_fn_expression(&mut self, params: &mut Vec<MatchPattern>, return_type: &mut TypeKind, body: &mut Rc<TypedExpr>, ctx: &ExprContext) -> TypeKind {
         self.env.enter_scope();
         // check the fn_type in a new scope to also define the function parameters
         let fn_type = self.get_fn_type(params, return_type, true);
@@ -587,119 +696,14 @@ impl TypeChecker {
         self.current_function_return_type = Some(return_type.clone());
 
         let body_mut = Rc::get_mut(body).unwrap();
-        self.check_expression(body_mut);
-        self.unify_types(return_type, &body_mut.typ);
+        self.check_expression(body_mut, &ctx.expect(return_type.clone()));
 
         // reset return context
         self.current_function_return_type = previous_function_return_type;
-
         self.env.exit_scope();
 
-        fn_type
-    }
-
-    fn check_fn_call(&mut self, callee: &mut TypedExpr, arguments: &mut Vec<TypedExpr>) -> TypeKind {
-        self.check_expression(callee);
-        
-        let mut arg_types = Vec::new();
-        for arg in arguments {
-            self.check_expression(arg);
-            arg_types.push(arg.typ.clone());
-        }
-
-        match &mut callee.typ {
-            TypeKind::Fn { param_types, return_type } => {
-                if param_types.len() != arg_types.len() {
-                    return self.error(format!("Expected {} arguments, found {}.", param_types.len(), arg_types.len()));
-                }
-                for (param_type, arg_type) in param_types.iter().zip(arg_types.iter()) {
-                    self.unify_types(param_type, arg_type);
-                }
-                *return_type.clone()
-            }
-            TypeKind::Inference(id) => {
-                // not the best code, but works for now
-                let return_type = self.new_inference_type();
-                let fn_type = TypeKind::Fn { param_types: arg_types, return_type: Box::new(return_type.clone()) };
-                self.unify_types(&fn_type, &TypeKind::Inference(*id));
-                return_type
-            }
-            _ => self.error(format!("Cannot call a non-function type '{}'", callee.typ))
-        }
-    }
-
-    fn check_return(&mut self, return_expression: &mut TypedExpr) -> TypeKind {
-        self.check_expression(return_expression);
-
-        if let Some(x) = self.current_function_return_type.clone() {
-            self.unify_types(&x, &return_expression.typ);
-        }
-        else { self.error(format!("'return' is only allowed inside functions.")); }
-
-        TypeKind::Never
-    }
-
-    fn check_break(&mut self, expr: &mut TypedExpr) -> TypeKind {
-        self.check_expression(expr);
-
-        if let Some((label, typ)) = self.current_break_types.last().cloned() {
-            self.unify_types(&typ, &expr.typ);
-        }
-        else { self.error(format!("'break' is only allowed inside loops.")); }
-        TypeKind::Never
-    }
-
-    fn check_match(&mut self, match_value: &mut TypedExpr, arms: &mut Vec<MatchArm>) -> TypeKind {
-        self.check_expression(match_value);
-
-        let mut cases_to_cover = match self.prune(&match_value.typ) {
-            TypeKind::Bool => Some(HashSet::from(["true".to_string(), "false".to_string()])),
-            _ => None
-        };
-        
-        let mut has_unfailable_arm = false;
-        let mut arm_types = Vec::new();
-        
-        for arm in arms {
-            self.env.enter_scope();
-            match arm.pattern {
-                AssignablePattern::Literal(Value::Bool(bool)) => {
-                    cases_to_cover.as_mut().unwrap().remove(&bool.to_string());
-                }
-                _ => { }
-            }
-            let pattern_type = self.check_binding_pattern(&mut arm.pattern, true);
-            self.unify_types(&match_value.typ, &pattern_type.typ);
-
-            if !pattern_type.can_fail { has_unfailable_arm = true; }
-
-            self.check_expression(&mut arm.body);
-            arm_types.push(arm.body.typ.clone());
-            self.env.exit_scope();
-        }
-
-        if !has_unfailable_arm && match &cases_to_cover {
-            None => false,
-            Some(remaining_cases) => !remaining_cases.is_empty()
-        } {
-            self.error(format!("Match expression does not cover all cases. Remaining cases: {:?}", cases_to_cover.unwrap()));
-        }
-
-        self.unify_type_vec(&arm_types)
-    }
-
-
-    fn check_enum_expression(&mut self, name: &mut String, enums: &mut Vec<EnumExpression>) -> TypeKind {
-        self.checked_define_type(name.clone(), ThrumType {
-            typ: DefinedTypeKind::Enum {
-                name: name.to_string(),
-                inner_types: enums.into_iter()
-                    .map(|x| (x.name.clone(), x.inner_types.clone()))
-                    .collect()
-            },
-            values: HashMap::new()
-        });
-        TypeKind::Void
+        if body_mut.typ.is_never() { TypeKind::Never }
+        else { fn_type }
     }
 
 
@@ -747,13 +751,6 @@ impl TypeChecker {
     }
 
 
-    fn check_member_acess_expression(&mut self, left: &mut TypedExpr, member: &mut String) -> TypeKind {
-        todo!()
-    }
-
-
-
-
 
 
 
@@ -787,7 +784,7 @@ impl TypeChecker {
 
             |mut pattern| {
                 match &mut pattern {
-                    AssignablePattern::Binding { typ, .. } => {
+                    MatchPattern::Binding { typ, .. } => {
                         self_cell.borrow_mut().finalize_type(typ);
                     }
                     _ => {}

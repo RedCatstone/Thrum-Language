@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value}}};
+use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{MatchPattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value}}};
 
 impl Parser {
     pub(super) fn parse_type_expression(&mut self) -> Result<TypeKind, ParserError> {
@@ -18,7 +18,7 @@ impl Parser {
         let str_type = if self.optional_token(TokenType::Null) { String::from("null") }
         else if self.optional_token(TokenType::Minus) { String::from("-") }
         else if self.optional_token(TokenType::Exclamation) { String::from("!") }
-        else { self.expect_identifier("Expected a type name.")? };
+        else { self.expect_identifier("to name a type")? };
 
         // '<' start of an inner type
         let inner_types = if self.optional_token(TokenType::Less) { self.parse_type_list()? }
@@ -49,14 +49,14 @@ impl Parser {
         self.parse_comma_separated(
             TokenType::Greater,
             |p| p.parse_type_expression(),
-            "Expected '>' to close generic type list."
+            "to close the generic types list"
         )
     }
 
 
 
 
-    pub(super) fn convert_param_exprs_into_patterns(&mut self, expr: TypedExpr) -> Result<Vec<AssignablePattern>, ParserError> {
+    pub(super) fn convert_param_exprs_into_patterns(&mut self, expr: TypedExpr) -> Result<Vec<MatchPattern>, ParserError> {
         // this function takes what was to the left of `->` and validates it.
         let params = match expr.expression {
             Expr::Tuple(body) => body,
@@ -71,12 +71,12 @@ impl Parser {
             .collect()
     }
 
-    fn convert_param_expr_into_pattern(&mut self, param_expr: TypedExpr) -> Result<AssignablePattern, ParserError> {
+    fn convert_param_expr_into_pattern(&mut self, param_expr: TypedExpr) -> Result<MatchPattern, ParserError> {
         match param_expr.expression {
             // 'x: int'
             Expr::ParserTempTypeAnnotation(pattern) => Ok(pattern),
             // 'x'
-            Expr::Identifier { name } => Ok(AssignablePattern::Binding { name, typ: TypeKind::ParserUnknown }),
+            Expr::Identifier { name } => Ok(MatchPattern::Binding { name, typ: TypeKind::ParserUnknown }),
 
             Expr::Assign { pattern, extra_operator: _, value } if value.is_none() => {
                 Ok(*pattern)
@@ -88,7 +88,7 @@ impl Parser {
                 for element in elements {
                     converted_elements.push(self.convert_param_expr_into_pattern(element)?);
                 }
-                Ok(AssignablePattern::Array(converted_elements))
+                Ok(MatchPattern::Array(converted_elements))
             },
 
             // '(x, y)'
@@ -97,7 +97,7 @@ impl Parser {
                 for element in elements {
                     converted_elements.push(self.convert_param_expr_into_pattern(element)?);
                 }
-                Ok(AssignablePattern::Tuple(converted_elements))
+                Ok(MatchPattern::Tuple(converted_elements))
             }
 
             _ => Err(self.error(&format!("Invalid syntax in parameter list. Found {:?}.", param_expr))),
@@ -106,34 +106,34 @@ impl Parser {
 
 
 
-    pub(super) fn convert_assign_expr_into_pattern(&mut self, assign_expr: TypedExpr) -> Result<AssignablePattern, ParserError> {
+    pub(super) fn convert_lhs_assign_into_pattern(&mut self, assign_expr: TypedExpr) -> Result<MatchPattern, ParserError> {
         match assign_expr.expression {
             Expr::Identifier { name } => {
-                if name.starts_with("_") { Ok(AssignablePattern::Wildcard) }
-                else { Ok(AssignablePattern::Place(PlaceExpr::Identifier(name))) }
+                if name.starts_with("_") { Ok(MatchPattern::Wildcard) }
+                else { Ok(MatchPattern::Place(PlaceExpr::Identifier(name))) }
             }
             Expr::Index { left, index } => {
-                Ok(AssignablePattern::Place(PlaceExpr::Index { left: Rc::new(*left), index: Rc::new(*index) }))
+                Ok(MatchPattern::Place(PlaceExpr::Index { left: Rc::new(*left), index: Rc::new(*index) }))
             }
 
             Expr::Array(elements) => {
                 let mut converted_elements = Vec::new();
                 for element in elements {
-                    converted_elements.push(self.convert_assign_expr_into_pattern(element)?);
+                    converted_elements.push(self.convert_lhs_assign_into_pattern(element)?);
                 }
-                Ok(AssignablePattern::Array(converted_elements))
+                Ok(MatchPattern::Array(converted_elements))
             }
             Expr::Tuple(elements) => {
                 let mut converted_elements = Vec::new();
                 for element in elements {
-                    converted_elements.push(self.convert_assign_expr_into_pattern(element)?);
+                    converted_elements.push(self.convert_lhs_assign_into_pattern(element)?);
                 }
-                Ok(AssignablePattern::Tuple(converted_elements))
+                Ok(MatchPattern::Tuple(converted_elements))
             }
             Expr::Deref { expr } => {
                 match (*expr).expression {
                     Expr::Identifier { name } => {
-                        Ok(AssignablePattern::Place(PlaceExpr::Deref(name)))
+                        Ok(MatchPattern::Place(PlaceExpr::Deref(name)))
                     }
                     _ => Err(self.error(&format!("^ is only allowed after identifiers in place expressions.")))
                 }
@@ -147,21 +147,21 @@ impl Parser {
 
 
 
-    pub(super) fn parse_let_binding_pattern(&mut self, type_annotation_required: bool) -> Result<AssignablePattern, ParserError> {
+    pub(super) fn parse_binding_match_pattern(&mut self, type_annotation_required: bool) -> Result<MatchPattern, ParserError> {
         let pattern = match self.peek().token_type.clone() {
-            TokenType::Number(num) => { self.advance(); Ok(AssignablePattern::Literal(Value::Num(num))) }
-            TokenType::Bool(bool) => { self.advance(); Ok(AssignablePattern::Literal(Value::Bool(bool))) }
+            TokenType::Number(num) => { self.advance(); Ok(MatchPattern::Literal(Value::Num(num))) }
+            TokenType::Bool(bool) => { self.advance(); Ok(MatchPattern::Literal(Value::Bool(bool))) }
             TokenType::StringStart => {
                 self.advance();
                 match self.peek().token_type.clone() {
                     TokenType::StringFrag(str) => {
                         self.advance();
-                        self.expect_token(TokenType::StringEnd, "String literals are not allowed in match patterns.")?;
-                        Ok(AssignablePattern::Literal(Value::Str(str)))
+                        self.expect_token(TokenType::StringEnd, "- String literals are not allowed in match patterns")?;
+                        Ok(MatchPattern::Literal(Value::Str(str)))
                     }
                     TokenType::StringEnd => {
                         self.advance();
-                        Ok(AssignablePattern::Literal(Value::Str("".to_string())))
+                        Ok(MatchPattern::Literal(Value::Str("".to_string())))
                     }
                     _ => Err(self.error(&format!("Complex string literals are not allowed in match patterns.")))
                 }
@@ -169,55 +169,55 @@ impl Parser {
 
             TokenType::Identifier(name) => {
                 self.advance();
-                if name.chars().nth(0).unwrap() == '_' { Ok(AssignablePattern::Wildcard) }
+                if name.chars().nth(0).unwrap() == '_' { Ok(MatchPattern::Wildcard) }
                 else { self.parse_binding_path(name, type_annotation_required) }
             }
             TokenType::LeftBracket => {
                 self.advance();
-                Ok(AssignablePattern::Array(self.parse_binding_pattern_list(
-                    TokenType::RightBracket, type_annotation_required, "Expected ']' to close array pattern."
+                Ok(MatchPattern::Array(self.parse_binding_pattern_list(
+                    TokenType::RightBracket, type_annotation_required, "to close the array pattern"
                 )?))
             }
             TokenType::LeftParen => {
                 self.advance();
 
-                let first_pattern = self.parse_let_binding_pattern(type_annotation_required)?;
+                let first_pattern = self.parse_binding_match_pattern(type_annotation_required)?;
                 if self.optional_token(TokenType::Comma) {
                     // Tuple!
                     let mut tuple_body = vec![first_pattern];
                     tuple_body.extend(self.parse_binding_pattern_list(
-                        TokenType::RightParen, type_annotation_required, "Expected ')' to close tuple pattern."
+                        TokenType::RightParen, type_annotation_required, "to close the tuple pattern"
                     )?);
-                    Ok(AssignablePattern::Tuple(tuple_body))
+                    Ok(MatchPattern::Tuple(tuple_body))
                 }
                 else {
-                    self.expect_token(TokenType::RightParen, "Expected ')' to close grouped pattern.")?;
+                    self.expect_token(TokenType::RightParen, "to close the grouped pattern")?;
                     Ok(first_pattern)
                 }
             }
             TokenType::ColonColon => self.parse_binding_path("".to_string(), type_annotation_required),
-            _ => Err(self.error(&format!("Expected pattern. Found '{}'", self.peek())))
+            _ => Err(self.error(&format!("Expected a pattern. Found '{}' instead.", self.peek())))
         }?;
 
         if self.optional_token(TokenType::If) {
             let body = self.parse_expression(Precedence::Arrow)?;
-            Ok(AssignablePattern::Conditional { pattern: Box::new(pattern), body: Rc::new(body) })
+            Ok(MatchPattern::Conditional { pattern: Box::new(pattern), body: Rc::new(body) })
         }
         else { Ok(pattern) }
     }
 
-    pub(super) fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<AssignablePattern>, ParserError> {
+    pub(super) fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<MatchPattern>, ParserError> {
         self.parse_comma_separated(
             end_token,
-            |p| p.parse_let_binding_pattern(type_annotation_required),
+            |p| p.parse_binding_match_pattern(type_annotation_required),
             error_msg
         )
     }
 
-    fn parse_binding_path(&mut self, path_start: String, type_annotation_required: bool) ->  Result<AssignablePattern, ParserError> {
+    fn parse_binding_path(&mut self, path_start: String, type_annotation_required: bool) ->  Result<MatchPattern, ParserError> {
         let mut segments = vec![path_start];
         while self.optional_token(TokenType::ColonColon) {
-            segments.push(self.expect_identifier("Expected identifier after '::' in pattern.")?);
+            segments.push(self.expect_identifier(&format!("after {}", TokenType::ColonColon))?);
         }
 
         // Binding-pattern
@@ -225,16 +225,16 @@ impl Parser {
             let type_annotation = if self.optional_token(TokenType::Colon) {
                 self.parse_type_expression()?
             } else { TypeKind::ParserUnknown };
-            return Ok(AssignablePattern::Binding { name: segments.pop().unwrap(), typ: type_annotation })
+            return Ok(MatchPattern::Binding { name: segments.pop().unwrap(), typ: type_annotation })
         }
 
         // enum-pattern
         let inner_patterns = if self.optional_token(TokenType::LeftParen) {
-            self.parse_binding_pattern_list(TokenType::RightParen, type_annotation_required, "Expected ')' to close enum variant pattern.")?
+            self.parse_binding_pattern_list(TokenType::RightParen, type_annotation_required, "to close the enum variant tuple.")?
         }
         else { Vec::new() };
 
         let name = segments.pop().unwrap();
-        Ok(AssignablePattern::EnumVariant { path: segments, name, inner_patterns })
+        Ok(MatchPattern::EnumVariant { path: segments, name, inner_patterns })
     }
 }

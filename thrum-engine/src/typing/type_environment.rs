@@ -12,29 +12,29 @@ use crate::{nativelib::ThrumType, parsing::ast_structure::TypeKind};
 
 
 #[derive(Default)]
-pub struct TypeCheckScope {
-    pub vars: HashMap<String, ThrumTypecheckValue>,
+pub struct TypecheckScope {
+    pub vars: HashMap<String, TypecheckValue>,
     types: HashMap<String, ThrumType>,
 }
 
-pub struct ThrumTypecheckValue {
+pub struct TypecheckValue {
     typ: TypeKind,
     pub mut_borrowed_by: Option<String>,
 }
 
 pub struct TypecheckEnvironment {
-    pub scopes: Vec<TypeCheckScope>,
+    pub scopes: Vec<TypecheckScope>,
 }
 impl TypecheckEnvironment {
-    pub fn new() -> Self { TypecheckEnvironment { scopes: vec![TypeCheckScope::default()] } }
+    pub fn new() -> Self { TypecheckEnvironment { scopes: vec![TypecheckScope::default()] } }
 
     // e.g. for a block or function
-    pub fn enter_scope(&mut self) { self.scopes.push(TypeCheckScope::default()); }
+    pub fn enter_scope(&mut self) { self.scopes.push(TypecheckScope::default()); }
     pub fn exit_scope(&mut self) { self.scopes.pop(); }
 
     pub fn define_variable(&mut self, name: String, typ: TypeKind) -> bool {
         let already_exists = self.name_exists_already(&name);
-        self.scopes.last_mut().unwrap().vars.insert(name, ThrumTypecheckValue { typ, mut_borrowed_by: None });
+        self.scopes.last_mut().unwrap().vars.insert(name, TypecheckValue { typ, mut_borrowed_by: None });
         already_exists
     }
     pub fn lookup_variable(&self, name: &str) -> Option<TypeKind> {

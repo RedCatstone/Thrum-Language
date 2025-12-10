@@ -1,7 +1,7 @@
 use std::fmt;
 use crate::{
     lexing::tokens::{LexerToken, TokenType},
-    parsing::ast_structure::{AssignablePattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
+    parsing::ast_structure::{MatchPattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
     vm_compiling::{BytecodeChunk, OpCode}, vm_evaluating::{CallFrame, VM}
 };
 
@@ -190,7 +190,7 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
                 format_recursive(expr, f, indent + 1, "", idx == len - 1)?;
             }
         }
-        Expr::Infix { left, operator, right } => {
+        Expr::Infix { operator, left, right } => {
             writeln!(f, "{i}{branch}{prefix}Infix({operator}) {type_info}")?;
             format_recursive(left, f, indent + 1, "left: ", false)?;
             format_recursive(right, f, indent + 1, "right: ", true)?;
@@ -245,24 +245,24 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
 }
 
 // Custom Debug impl for patterns to make them print cleanly
-impl fmt::Display for AssignablePattern {
+impl fmt::Display for MatchPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AssignablePattern::Literal(value) =>  write!(f, "{}", value),
-            AssignablePattern::Binding { name, typ } => write!(f, "{}: {}", name, typ),
-            AssignablePattern::Or(patterns) => write!(f, "{}", join_slice_to_string(patterns, " | ")),
-            AssignablePattern::Array(patterns) => write!(f, "[{}]", join_slice_to_string(patterns, ", ")),
-            AssignablePattern::Tuple(patterns) => write!(f, "({})", join_slice_to_string(patterns, ", ")),
-            AssignablePattern::EnumVariant { path, name, inner_patterns } => {
+            MatchPattern::Literal(value) =>  write!(f, "{}", value),
+            MatchPattern::Binding { name, typ } => write!(f, "{}: {}", name, typ),
+            MatchPattern::Or(patterns) => write!(f, "{}", join_slice_to_string(patterns, " | ")),
+            MatchPattern::Array(patterns) => write!(f, "[{}]", join_slice_to_string(patterns, ", ")),
+            MatchPattern::Tuple(patterns) => write!(f, "({})", join_slice_to_string(patterns, ", ")),
+            MatchPattern::EnumVariant { path, name, inner_patterns } => {
                 write!(f, "{}::{}({})",
                     path.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     name,
                     inner_patterns.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
                 )
             }
-            AssignablePattern::Wildcard => write!(f, "_"),
-            AssignablePattern::Place(place_expr) => write!(f, "place({})", place_expr),
-            AssignablePattern::Conditional { pattern, body } => {
+            MatchPattern::Wildcard => write!(f, "_"),
+            MatchPattern::Place(place_expr) => write!(f, "place({})", place_expr),
+            MatchPattern::Conditional { pattern, body } => {
                 write!(f, "{} if ({:?})", pattern, body)
             }
         }

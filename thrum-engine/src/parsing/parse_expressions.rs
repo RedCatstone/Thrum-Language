@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{AssignablePattern, EnumExpression, Expr, MatchArm, TypeKind, TypedExpr, Value}}};
+use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{MatchPattern, EnumExpression, Expr, MatchArm, TypeKind, TypedExpr, Value}}};
 
 impl Parser {
     pub(super) fn parse_expression(&mut self, precedence: Precedence) -> Result<TypedExpr, ParserError> {
@@ -38,14 +38,14 @@ impl Parser {
             TokenType::LeftParen => {
                 let arguments = self.parse_comma_seperated_expressions(
                     TokenType::RightParen,
-                    "Expected ')' to close argument list."
+                    "to close the function call argument list"
                 )?;
                 Ok(Expr::Call { callee: Box::new(left_expr), arguments }.into())
             },
 
             TokenType::LeftBracket => {
                 let right_index_expr = self.parse_expression(Precedence::Lowest)?;
-                self.expect_token(TokenType::RightBracket, "Expected ']' to close index expression.")?;
+                self.expect_token(TokenType::RightBracket, "to close the index expression")?;
                 Ok(Expr::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) }.into())
             },
 
@@ -56,7 +56,7 @@ impl Parser {
             },
 
             TokenType::Dot => {
-                let member = self.expect_identifier("Expected member name after '.'")?;
+                let member = self.expect_identifier(&format!("after '{}'", TokenType::Dot))?;
                 Ok(Expr::MemberAccess { left: Box::new(left_expr), member }.into())
             },
 
@@ -64,7 +64,7 @@ impl Parser {
                 match left_expr.expression {
                     Expr::Identifier { name } => {
                         let right_type_expr = self.parse_type_expression()?;
-                        Ok(Expr::ParserTempTypeAnnotation(AssignablePattern::Binding { name, typ: right_type_expr }).into())
+                        Ok(Expr::ParserTempTypeAnnotation(MatchPattern::Binding { name, typ: right_type_expr }).into())
                     }
                     _ => return Err(self.error(&format!("Type annotations are only allowed after identifiers. Found after: {:?}", left_expr))),
                 }
@@ -75,7 +75,7 @@ impl Parser {
             TokenType::PipeGreater => self.parse_pipe_greater_operator(left_expr),
             
             _ if op_precedence == Precedence::Assign => {
-                let pattern = Box::new(self.convert_assign_expr_into_pattern(left_expr)?);
+                let pattern = Box::new(self.convert_lhs_assign_into_pattern(left_expr)?);
                 let extra_operator = self.convert_assign_operator_to_operator(&operator).unwrap();
 
                 // expression
@@ -87,8 +87,8 @@ impl Parser {
             _ => {  // other operators
                 let right_expr = self.parse_expression(op_precedence)?;
                 Ok(Expr::Infix {
-                    left: Box::new(left_expr),
                     operator,
+                    left: Box::new(left_expr),
                     right: Box::new(right_expr)
                 }.into())
             }
@@ -143,19 +143,19 @@ impl Parser {
                 if self.optional_token(TokenType::Comma) {
                     // , => Tuple!
                     let mut tuple_body = vec![first_expr];
-                    tuple_body.extend(self.parse_comma_seperated_expressions(TokenType::RightParen, "Expected ')' to close tuple.")?);
+                    tuple_body.extend(self.parse_comma_seperated_expressions(TokenType::RightParen, "to close the tuple")?);
                     Ok(Expr::Tuple(tuple_body).into())
                 }
                 else {
                     // normal grouped expression
-                    self.expect_token(TokenType::RightParen, "Expected ')' to close grouped expression.")?;
+                    self.expect_token(TokenType::RightParen, "to close the grouped expression")?;
                     Ok(first_expr)
                 }
             },
 
             TokenType::LeftBracket => {
                 Ok(Expr::Array(
-                    self.parse_comma_seperated_expressions(TokenType::RightBracket, "Expected ']' to close array.")?
+                    self.parse_comma_seperated_expressions(TokenType::RightBracket, "to close the array")?
                 ).into())
             },
 
@@ -171,7 +171,7 @@ impl Parser {
                         TokenType::LeftBrace => {
                             self.advance();
                             parts.push(self.parse_expression(Precedence::Lowest)?);
-                            self.expect_token(TokenType::RightBrace, "Expected '}' after expression in template string.")?;
+                            self.expect_token(TokenType::RightBrace, "to close the template string block")?;
                         }
                         TokenType::StringEnd => {
                             self.advance();
@@ -187,7 +187,7 @@ impl Parser {
             TokenType::ColonColon => self.parse_path_operator(Expr::TypePath(vec!["".to_string()]).into()),
 
             TokenType::Let => {
-                let pattern = Box::new(self.parse_let_binding_pattern(false)?);
+                let pattern = Box::new(self.parse_binding_match_pattern(false)?);
 
                 // value can be optional. for example: `let x` and later `x = ...`
                 let value = if self.optional_token(TokenType::Equal) {
@@ -199,8 +199,8 @@ impl Parser {
             },
 
             TokenType::Case => {
-                let pattern = Box::new(self.parse_let_binding_pattern(false)?);
-                self.expect_token(TokenType::Equal, "Expected '=' after case pattern.")?;
+                let pattern = Box::new(self.parse_binding_match_pattern(false)?);
+                self.expect_token(TokenType::Equal, "after the case-expression pattern")?;
                 let value = Box::new(self.parse_expression(Precedence::Lowest)?);
 
                 Ok(Expr::Case { pattern, value }.into())
@@ -214,13 +214,13 @@ impl Parser {
 
             TokenType::While => {
                 let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
-                self.expect_token( TokenType::LeftBrace, "Expected '{' after while condition.")?;
+                self.expect_token( TokenType::LeftBrace, "to open the while block")?;
                 let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
                 Ok(Expr::While { condition, body }.into())
             },
 
             TokenType::Loop => {
-                self.expect_token( TokenType::LeftBrace, "Expected '{' after loop.")?;
+                self.expect_token( TokenType::LeftBrace, "to open the loop block")?;
                 let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
                 Ok(Expr::Loop { body }.into())
             },
@@ -228,13 +228,13 @@ impl Parser {
             TokenType::Match => {
                 let match_value = Box::new(self.parse_expression(Precedence::Lowest)?);
 
-                self.expect_token( TokenType::LeftBrace, "Expected '{' to open match block.")?;
+                self.expect_token( TokenType::LeftBrace, "to open the match block")?;
 
                 let arms = self.parse_line_seperated(
                     TokenType::RightBrace,
                     |p| {
-                        let pattern = p.parse_let_binding_pattern(false)?;
-                        p.expect_token(TokenType::RightArrow, "Expected '->' after match block case.")?;
+                        let pattern = p.parse_binding_match_pattern(false)?;
+                        p.expect_token(TokenType::RightArrow, "after the match arm pattern.")?;
                         let body = p.parse_expression(Precedence::Lowest)?;
                         Ok(MatchArm { pattern, body })
                     },
@@ -246,22 +246,22 @@ impl Parser {
             
             TokenType::Enum => {
                 // enum Option { Some(T), None }
-                let name = self.expect_identifier("Expected enum name after 'enum'.")?;
-                self.expect_token( TokenType::LeftBrace, "Expected '{' to open enum block.")?;
+                let name = self.expect_identifier("to name the enum")?;
+                self.expect_token( TokenType::LeftBrace, "to open the enum definition block")?;
                 let enums = self.parse_comma_separated(
                     TokenType::RightBrace,
-                    |p| p.parse_single_enum(),
-                    "Expected '}' to close enum block."
+                    |p| p.parse_enum_definition_variant(),
+                    "to close the enum definition block"
                 )?;
                 Ok(Expr::EnumDefinition { name, enums }.into())     
             },
 
             TokenType::Fn => {
-                let name = self.expect_identifier("Expected function name after 'fn'.")?;
-                self.expect_token(TokenType::LeftParen, &format!("Expected '(' after 'fn {}'", name))?;
+                let name = self.expect_identifier("to name the function")?;
+                self.expect_token(TokenType::LeftParen, "to open the fn definition paramter list")?;
                 let params = self.parse_binding_pattern_list(
                     TokenType::RightParen,
-                    true, "Expected ')' to close fn parameter list."
+                    true, "to close the fn definition parameter list"
                 )?;
 
                 let return_type = if self.optional_token(TokenType::RightArrow) {
@@ -269,7 +269,7 @@ impl Parser {
                 }
                 else { TypeKind::Void };
 
-                self.expect_token(TokenType::LeftBrace, "Expected '{' after fn definition.")?;
+                self.expect_token(TokenType::LeftBrace, "to open the fn definition block")?;
                 let body = Rc::new(self.parse_block_expression(TokenType::RightBrace));
     
                 Ok(Expr::FnDefinition { name, params, return_type, body }.into())
@@ -292,11 +292,11 @@ impl Parser {
             },
 
             TokenType::Mut => {
-                let name = self.expect_identifier("Expected identifier after mut.")?;
+                let name = self.expect_identifier(&format!("after {}", TokenType::Mut))?;
                 Ok(Expr::MutRef { expr: Box::new(Expr::Identifier { name }.into()) }.into())
             }
 
-            _ => Err(self.error(&format!("Expected an expression. Found '{}' instead", token_type))),
+            _ => Err(self.error(&format!("Expected an expression. Found '{}' instead.", token_type))),
         }
     }
 
@@ -368,7 +368,7 @@ impl Parser {
 
 
     fn parse_if_and_else(&mut self) -> Result<(Box<TypedExpr>, Box<TypedExpr>), ParserError> {
-        self.expect_token( TokenType::LeftBrace, "Expected '{' after if condition.")?;
+        self.expect_token( TokenType::LeftBrace, "to open the if block")?;
 
         let consequence = Box::new(self.parse_block_expression(TokenType::RightBrace));
         let alternative = if self.optional_token(TokenType::Else) {
@@ -379,15 +379,15 @@ impl Parser {
         Ok((consequence, alternative))
     }
 
-    fn parse_single_enum(&mut self) -> Result<EnumExpression, ParserError> {
+    fn parse_enum_definition_variant(&mut self) -> Result<EnumExpression, ParserError> {
         // Some(T)
-        let enum_name = self.expect_identifier("Expected identifier name inside enum block.")?;
+        let enum_name = self.expect_identifier("to name an enum variant")?;
 
         let inner_types = if self.optional_token(TokenType::LeftParen) {
             self.parse_comma_separated(
                 TokenType::RightParen,
-                |p| p.parse_let_binding_pattern(true),
-                "Expected ')' to close enum parameter list."
+                |p| p.parse_binding_match_pattern(true),
+                "to close the enum variant tuple"
             )?
         }
         else { Vec::new() };
@@ -413,11 +413,11 @@ impl Parser {
     fn parse_path_operator(&mut self, left_expr: TypedExpr) -> Result<TypedExpr, ParserError> {
         match left_expr.expression {
             Expr::Identifier { name } => {
-                let next_path_segment = self.expect_identifier("Expected identifier after '::'")?;
+                let next_path_segment = self.expect_identifier(&format!("after {}", TokenType::ColonColon))?;
                 Ok(Expr::TypePath(vec![name, next_path_segment]).into())
             }
             Expr::TypePath(mut segments) => {
-                let next_path_segment = self.expect_identifier("Expected identifier after '::'")?;
+                let next_path_segment = self.expect_identifier(&format!("after {}", TokenType::ColonColon))?;
                 segments.push(next_path_segment);
                 Ok(Expr::TypePath(segments).into())
             }
@@ -433,7 +433,7 @@ impl Parser {
 
         Ok(Expr::Block(vec![
             Expr::Assign {
-                pattern: Box::new(AssignablePattern::Binding { name: pipe_identifier_name, typ: TypeKind::ParserUnknown }),
+                pattern: Box::new(MatchPattern::Binding { name: pipe_identifier_name, typ: TypeKind::ParserUnknown }),
                 extra_operator: TokenType::Equal,
                 value: Some(Box::new(left_expr)),
             }.into(),

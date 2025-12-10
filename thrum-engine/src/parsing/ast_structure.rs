@@ -33,13 +33,13 @@ pub enum Expr {
     },
 
     Assign {  // x = 2  or  let x = 2
-        pattern: Box<AssignablePattern>,
+        pattern: Box<MatchPattern>,
         extra_operator: TokenType,
         value: Option<Box<TypedExpr>>,
     },
 
     Case {
-        pattern: Box<AssignablePattern>,
+        pattern: Box<MatchPattern>,
         value: Box<TypedExpr>,
     },
 
@@ -52,8 +52,8 @@ pub enum Expr {
         right: Box<TypedExpr>,
     },
     Infix {  // a + b
-        left: Box<TypedExpr>,
         operator: TokenType,
+        left: Box<TypedExpr>,
         right: Box<TypedExpr>,
     },
 
@@ -116,13 +116,13 @@ pub enum Expr {
 
     FnDefinition {  // fn square(x: num) -> x**2
         name: String,
-        params: Vec<AssignablePattern>,
+        params: Vec<MatchPattern>,
         return_type: TypeKind,
         body: Rc<TypedExpr>,
     },
 
     Closure {  // x -> x**2
-        params: Vec<AssignablePattern>,
+        params: Vec<MatchPattern>,
         return_type: TypeKind,
         body: Rc<TypedExpr>,
     },
@@ -135,7 +135,7 @@ pub enum Expr {
     // Semicolons are void expressions.
     Void,
 
-    ParserTempTypeAnnotation(AssignablePattern),
+    ParserTempTypeAnnotation(MatchPattern),
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +168,7 @@ impl PartialOrd for Value {
             (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
             (Value::Arr(l), Value::Arr(r)) => l.partial_cmp(r),
             (Value::Tup(l), Value::Tup(r)) => l.partial_cmp(r),
+            (Value::Void, Value::Void) => Some(std::cmp::Ordering::Equal),
             (l, r) => panic!("Cannot compare {l} with {r}"),
         }
     }
@@ -178,23 +179,23 @@ impl PartialEq for Value {
 
 
 #[derive(Debug, Clone)]
-pub enum AssignablePattern {
+pub enum MatchPattern {
     Binding {  // x: num
         name: String,
         typ: TypeKind,
     },
     Wildcard,  // _
-    Or(Vec<AssignablePattern>),
-    Array(Vec<AssignablePattern>),  // [...]
-    Tuple(Vec<AssignablePattern>),  // (...)
+    Or(Vec<MatchPattern>),
+    Array(Vec<MatchPattern>),  // [...]
+    Tuple(Vec<MatchPattern>),  // (...)
     EnumVariant {
         path: Vec<String>, // std::Option
         name: String,   // Some
-        inner_patterns: Vec<AssignablePattern>,
+        inner_patterns: Vec<MatchPattern>,
     },
     Literal(Value),
     Conditional {
-        pattern: Box<AssignablePattern>,
+        pattern: Box<MatchPattern>,
         body: Rc<TypedExpr>,
     },
 
@@ -212,14 +213,14 @@ pub enum PlaceExpr {
 
 #[derive(Debug)]
 pub struct MatchArm {
-    pub pattern: AssignablePattern,
+    pub pattern: MatchPattern,
     pub body: TypedExpr,
 }
 
 #[derive(Debug)]
 pub struct EnumExpression {
     pub name: String,
-    pub inner_types: Vec<AssignablePattern>,
+    pub inner_types: Vec<MatchPattern>,
 }
 
 
@@ -262,12 +263,17 @@ pub enum TypeKind {
     ParserUnknown,
 
 }
+impl TypeKind {
+    pub fn is_never(&self) -> bool {
+        *self == Self::Never
+    }
+}
 
 #[derive(Clone)]
 pub enum DefinedTypeKind {
     Enum {
         name: String,
-        inner_types: HashMap<String, Vec<AssignablePattern>>,
+        inner_types: HashMap<String, Vec<MatchPattern>>,
     },
 
     Native(TypeKind),

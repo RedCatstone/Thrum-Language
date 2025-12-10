@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::parsing::ast_structure::{AssignablePattern, Expr, PlaceExpr, TypedExpr, Value};
+use crate::{lexing::tokens::TokenType, parsing::ast_structure::{MatchPattern, Expr, PlaceExpr, TypedExpr, Value}};
 
 
 
@@ -9,10 +9,10 @@ use crate::parsing::ast_structure::{AssignablePattern, Expr, PlaceExpr, TypedExp
 pub fn loop_over_every_ast_node(
     program: &mut [TypedExpr],
     expr_closure: impl Fn(TypedExpr) -> TypedExpr,
-    pattern_closure: impl Fn(AssignablePattern) -> AssignablePattern,
+    pattern_closure: impl Fn(MatchPattern) -> MatchPattern,
 ) {
     let mut exprs: Vec<&mut TypedExpr> = program.iter_mut().collect();
-    let mut patterns: Vec<&mut AssignablePattern> = Vec::new();
+    let mut patterns: Vec<&mut MatchPattern> = Vec::new();
     loop {
         if let Some(expr) = exprs.pop() {
             *expr = expr_closure(std::mem::replace(
@@ -27,15 +27,16 @@ pub fn loop_over_every_ast_node(
                 | Expr::TemplateString(x) => {
                     exprs.extend(x);
                 }
-                Expr::Prefix { right: expr, .. }
+                Expr::Prefix { right: expr, operator: _ }
                 | Expr::Loop { body: expr }
                 | Expr::Deref { expr }
                 | Expr::MutRef { expr }
                 | Expr::Return(expr)
-                | Expr::Break { expr } => {
+                | Expr::Break { expr }
+                | Expr::MemberAccess { left: expr, member: _ } => {
                     exprs.push(expr);
                 }
-                Expr::Infix { left: expr1, right: expr2, .. }
+                Expr::Infix { left: expr1, right: expr2, operator: _ }
                 | Expr::Index { left: expr1, index: expr2 }
                 | Expr::While { condition: expr1, body: expr2 } => {
                     exprs.push(expr1);
@@ -65,41 +66,42 @@ pub fn loop_over_every_ast_node(
                     exprs.push(function);
                     exprs.extend(arguments);
                 }
-                Expr::FnDefinition { params, body, .. }
-                | Expr::Closure { params, body, .. } => {
+                Expr::FnDefinition { params, body, name: _, return_type: _ }
+                | Expr::Closure { params, body, return_type: _ } => {
                     for param in params { patterns.push(param); }
                     exprs.push(Rc::get_mut(body).unwrap());
                 }
 
                 // types should already be finalized
-                Expr::Literal(_) | Expr::Identifier { .. } | Expr::MemberAccess { .. }  | Expr::TypePath { .. } | Expr::EnumDefinition{..}
+                Expr::Literal(_) | Expr::Identifier { name: _ } | Expr::TypePath(_) | Expr::EnumDefinition{ name: _, enums: _ }
                 | Expr::Void | Expr::ParserTempTypeAnnotation(_) => { /* already finalized */ }
             }
         }
+
         else if let Some(pattern) = patterns.pop() {
             *pattern = pattern_closure(std::mem::replace(
                 pattern,
-                AssignablePattern::Wildcard, // temporary placeholder
+                MatchPattern::Wildcard, // temporary placeholder
             ));
 
             match pattern {
-                AssignablePattern::Array(elements)
-                | AssignablePattern::Tuple(elements)
-                | AssignablePattern::Or(elements)
-                | AssignablePattern::EnumVariant { inner_patterns: elements, .. } => {
+                MatchPattern::Array(elements)
+                | MatchPattern::Tuple(elements)
+                | MatchPattern::Or(elements)
+                | MatchPattern::EnumVariant { inner_patterns: elements, path: _, name: _ } => {
                     patterns.extend(elements);
                 }
-                AssignablePattern::Binding { .. }
-                | AssignablePattern::Wildcard
-                | AssignablePattern::Literal(_)
-                | AssignablePattern::Place(PlaceExpr::Identifier(_)
+                MatchPattern::Binding { name: _, typ: _ }
+                | MatchPattern::Wildcard
+                | MatchPattern::Literal(_)
+                | MatchPattern::Place(PlaceExpr::Identifier(_)
                 | PlaceExpr::Deref(_)) => { /* done */ }
     
-                AssignablePattern::Place(PlaceExpr::Index { left, index }) => {
+                MatchPattern::Place(PlaceExpr::Index { left, index }) => {
                     exprs.push(Rc::get_mut(left).unwrap());
                     exprs.push(Rc::get_mut(index).unwrap());
                 }
-                AssignablePattern::Conditional { pattern, body } => {
+                MatchPattern::Conditional { pattern, body } => {
                     patterns.push(pattern);
                     exprs.push(Rc::get_mut(body).unwrap());
                 }
@@ -120,12 +122,12 @@ pub fn desugar(program: &mut [TypedExpr]) {
         program,
         |expr| {
             match expr.expression {
-                Expr::While { condition, body } => {
+                Expr::While { condition: while_condition, body: while_body } => {
                     // modify into
                     Expr::Loop {
                         body: Expr::If {
-                            condition: condition,
-                            consequence: body,
+                            condition: while_condition,
+                            consequence: while_body,
                             alternative: Expr::Break { expr: Expr::Void.into() }.into()
                         }.into()
                     }.into()
@@ -136,6 +138,16 @@ pub fn desugar(program: &mut [TypedExpr]) {
                         Expr::Literal(Value::Str(string.clone())).into()
                     }
                     else { expr }
+                }
+
+                Expr::Infix { operator, left, right } => {
+                    match operator {
+                        TokenType::NotEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::EqualEqual, left, right }.into() }.into(),
+                        TokenType::LessEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Greater, left, right }.into() }.into(),
+                        TokenType::GreaterEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Less, left, right }.into() }.into(),
+                        // Do nothing
+                        _ => Expr::Infix { operator, left, right }.into()
+                    }
                 }
 
                 // Do nothing to other nodes

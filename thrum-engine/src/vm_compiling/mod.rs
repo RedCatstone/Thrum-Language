@@ -2,7 +2,7 @@ use std::{u8, usize};
 
 use num_enum::TryFromPrimitive;
 
-use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{AssignablePattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}};
+use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{MatchPattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}};
 
 
 #[repr(u8)]
@@ -132,7 +132,7 @@ impl<'a> CompileFunction<'a> {
     fn compile_function(
         name: String,
         program: &[TypedExpr],
-        params: &[AssignablePattern],
+        params: &[MatchPattern],
         bytecode_chunks: &mut Vec<BytecodeChunk>,
         locals: &mut Vec<Vec<Local>>,
         library: &ThrumModule,
@@ -190,7 +190,7 @@ impl<'a> CompileFunction<'a> {
             }
 
 
-            Expr::Infix { left, operator, right } => {
+            Expr::Infix { operator, left, right } => {
                 self.compile_expression(left);
                 self.compile_infix(operator, &left.typ, right);
             }
@@ -215,7 +215,7 @@ impl<'a> CompileFunction<'a> {
                 }
                 else {
                     match *pattern.clone() {
-                        AssignablePattern::Place(place) => {
+                        MatchPattern::Place(place) => {
                             self.push_place_expr_value(place);
                             self.compile_infix(extra_operator, &val.typ, val);
                         }
@@ -731,13 +731,13 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_binding_pattern(&mut self, pattern: &AssignablePattern, failure_jumps: &mut Vec<FailureJump>) {
+    fn compile_binding_pattern(&mut self, pattern: &MatchPattern, failure_jumps: &mut Vec<FailureJump>) {
         match pattern {
             // the value is already on the stack, just the compiler just needs a variable that points to it.
-            AssignablePattern::Binding { name, .. } => self.push_define_local(name.clone(), None),
-            AssignablePattern::Wildcard => self.push_pop_value(),
+            MatchPattern::Binding { name, .. } => self.push_define_local(name.clone(), None),
+            MatchPattern::Wildcard => self.push_pop_value(),
 
-            AssignablePattern::Tuple(patterns) => {
+            MatchPattern::Tuple(patterns) => {
                 self.push_op(OpCode::TupUnpack);
                 self.cur_temp_amount += patterns.len() - 1;
 
@@ -745,22 +745,22 @@ impl<'a> CompileFunction<'a> {
                     self.compile_binding_pattern(pattern, failure_jumps);
                 }
             }
-            AssignablePattern::Place(PlaceExpr::Identifier(name)) => self.push_set_local(name),
+            MatchPattern::Place(PlaceExpr::Identifier(name)) => self.push_set_local(name),
 
-            AssignablePattern::Place(PlaceExpr::Deref(name)) => {
+            MatchPattern::Place(PlaceExpr::Deref(name)) => {
                 self.push_get_identifier(name);
                 self.push_value_ref_set();
             }
 
 
             // all patterns below this point can fail.
-            AssignablePattern::Literal(lit) => {
+            MatchPattern::Literal(lit) => {
                 self.push_get_constant_op(lit.clone());
                 self.push_cmp_equal();
                 self.push_jump_if_false();
                 failure_jumps.push(FailureJump { temps: self.cur_temp_amount, jump_loc: self.push_opnum_for_patching() });
             }
-            AssignablePattern::Array(patterns) => {
+            MatchPattern::Array(patterns) => {
                 self.push_op_with_opnum(OpCode::ArrUnpackCheckJump, patterns.len());
                 failure_jumps.push(FailureJump { temps: self.cur_temp_amount, jump_loc: self.push_opnum_for_patching() });
                 self.cur_temp_amount += patterns.len() - 1;
@@ -770,14 +770,14 @@ impl<'a> CompileFunction<'a> {
                 }
             }
 
-            AssignablePattern::Conditional { pattern, body } => {
+            MatchPattern::Conditional { pattern, body } => {
                 self.compile_binding_pattern(pattern, failure_jumps);
                 self.compile_expression(body);
                 self.push_jump_if_false();
                 failure_jumps.push(FailureJump { temps: self.cur_temp_amount, jump_loc: self.push_opnum_for_patching() });
             }
 
-            AssignablePattern::Place(PlaceExpr::Index { left, index }) => {
+            MatchPattern::Place(PlaceExpr::Index { left, index }) => {
                 self.compile_expression(index);
                 match &left.expression {
                     Expr::Identifier { name } => self.push_get_local_mut(name),
@@ -855,13 +855,13 @@ impl<'a> CompileFunction<'a> {
             self.compile_expression(right);
             self.push_op(OpCode::CmpEqual);
         }
-        else if TokenType::NotEqual == *operator {
-            self.compile_expression(right);
-            self.push_ops([OpCode::CmpEqual, OpCode::BoolNegate])
-        }
         else if TypeKind::Bool == *left_type {
+            // short circuiting logic:
             match operator {
                 TokenType::Ampersand => {
+                    // evaluate left
+                    // left is true => discard it and return right
+                    // left is false => return false
                     self.push_jump_if_false();
                     let jump_over_right_expression = self.push_opnum_for_patching();
                     self.compile_expression(right);
@@ -872,6 +872,9 @@ impl<'a> CompileFunction<'a> {
                     self.patch_jump_op(right_expression_jump_over_push_true);
                 }
                 TokenType::Pipe => {
+                    // evaluate left
+                    // left is true => return true
+                    // left is false => discard it and return right
                     self.push_op(OpCode::BoolNegate);
                     self.push_jump_if_false();
                     let jump_over_right_expression = self.push_opnum_for_patching();
@@ -897,16 +900,12 @@ impl<'a> CompileFunction<'a> {
                     TokenType::StarStar => self.push_op(OpCode::NumExponent),
                     TokenType::Less => self.push_op(OpCode::CmpLess),
                     TokenType::Greater => self.push_op(OpCode::CmpGreater),
-                    TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
-                    TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
                     _ => unreachable!("Unsupported operator {} for type num", operator)
                 },
                 TypeKind::Str => match operator {
                     TokenType::Plus => self.push_op(OpCode::StrAdd),
                     TokenType::Less => self.push_op(OpCode::CmpLess),
                     TokenType::Greater => self.push_op(OpCode::CmpGreater),
-                    TokenType::LessEqual => self.push_ops([OpCode::CmpGreater, OpCode::BoolNegate]),
-                    TokenType::GreaterEqual => self.push_ops([OpCode::CmpLess, OpCode::BoolNegate]),
                     _ => unreachable!("Unsupported operator {} for type str", operator)
                 }
                 TypeKind::Arr(_) => match operator {

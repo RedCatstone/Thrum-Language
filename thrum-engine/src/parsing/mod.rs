@@ -73,7 +73,7 @@ impl Parser {
             self.advance();
             Ok(cloned_token)
         } else {
-            Err(self.error(&format!("{} Found '{}' instead.", error_msg, self.peek())))
+            Err(self.error(&format!("Expected '{}' {}. Found '{}' instead.", expected, error_msg, self.peek())))
         }
     }
     fn expect_identifier(&mut self, error_msg: &str) -> Result<String, ParserError> {
@@ -140,7 +140,7 @@ impl Parser {
                 }
             }
         }
-        if let Err(msg) = self.expect_token(end_token.clone(), &format!("Expected '{}' to close the block.", end_token)) {
+        if let Err(msg) = self.expect_token(end_token.clone(), "to close the block") {
             self.errors.push(msg);
         }
         list

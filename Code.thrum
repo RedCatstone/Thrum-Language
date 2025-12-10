@@ -1,6 +1,3 @@
-let tup = (30, 1)
-
-if (case (x, 0) = tup) and x > 10 {
-    "{x}"
+while case (x if x < 2) = 5 {
+    print("yeee")
 }
-else "nope..."
