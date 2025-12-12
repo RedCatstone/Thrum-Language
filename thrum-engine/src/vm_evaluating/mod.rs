@@ -1,4 +1,4 @@
-use std::{fmt, rc::Rc, u8};
+use std::{fmt, rc::Rc};
 
 use crate::{parsing::ast_structure::Value, pretty_printing::join_slice_to_string, vm_compiling::{BytecodeChunk, OpCode}};
 
@@ -87,7 +87,7 @@ impl VM {
     fn load_frame_from_index(&mut self, chunk_index: usize) {
         let chunk = &self.bytecode_chunks[chunk_index];
         let frame = CallFrame {
-            chunk_index: chunk_index,
+            chunk_index,
             ip: 0,
             base_pointer: self.value_stack.len(),
         };
@@ -417,11 +417,11 @@ impl VM {
             Value::Bool(bool) => bool.to_string(),
 
             Value::Arr(arr) => {
-                let str_results: Vec<String> = arr.iter().map(|x| VM::val_to_string(x)).collect();
+                let str_results: Vec<String> = arr.iter().map(VM::val_to_string).collect();
                 String::from("[") + &str_results.join(", ") + "]"
             }
             Value::Tup(tup) => {
-                let str_results: Vec<String> = tup.iter().map(|x| VM::val_to_string(x)).collect();
+                let str_results: Vec<String> = tup.iter().map(VM::val_to_string).collect();
                 String::from("(") + &str_results.join(", ") + ")"
             }
 

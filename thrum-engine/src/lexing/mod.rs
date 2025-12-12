@@ -56,12 +56,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn match_next(&mut self, expected: char) -> bool {
-        if let Some(&next_char) = self.source_iter.peek() {
-            if next_char == expected {
+        if let Some(&next_char) = self.source_iter.peek()
+            && next_char == expected {
                 self.advance();
                 return true;
             }
-        }
         false
     }
 
@@ -123,9 +122,7 @@ impl<'a> Lexer<'a> {
                 '*' => {
                     let token = if self.match_next('*') {
                         if self.match_next('=') { TokenType::StarStarEqual } else { TokenType::StarStar }
-                    } else {
-                        if self.match_next('=') { TokenType::StarEqual } else { TokenType::Star }
-                    };
+                    } else if self.match_next('=') { TokenType::StarEqual } else { TokenType::Star };
                     self.add_token(token);
                 }
                 '/' => {
@@ -137,10 +134,8 @@ impl<'a> Lexer<'a> {
                     }
                     else if self.match_next('\\') {
                         // multi line comment, consume until '\/'
-                        while let Some(comment_char) = self.advance() {
-                            if comment_char == '\\' {
-                                if self.match_next('/') { break; }
-                            }
+                        while let Some('\\') = self.advance() {
+                            if self.match_next('/') { break; }
                         }
                     }
                     else {
@@ -206,6 +201,8 @@ impl<'a> Lexer<'a> {
                     self.add_token(token);
                 },
 
+                '#' => self.add_token(TokenType::Hashtag),
+
                 
                 // Ignore whitespace/new lines
                 ' ' | '\r' | '\t' | '\n' => (),
@@ -214,14 +211,13 @@ impl<'a> Lexer<'a> {
                 '"' => self.lex_string('"'),
                 '\'' => self.lex_string('\''),
 
-                _ => {
-                    // numbers
-                    if c.is_ascii_digit() { self.lex_number(c); }
+                // numbers
+                _ if c.is_ascii_digit() => self.lex_number(c),
 
-                    // identifiers and keywords
-                    else if c.is_alphabetic() || c == '_' { self.lex_identifier(c); }
-                    else { self.add_error(format!("Unexpected character '{}'.", c)); }
-                }
+                // identifiers and keywords
+                _ if c == '_' || c.is_alphabetic() => { self.lex_identifier(c); }
+
+                _ => self.add_error(format!("Unexpected character '{}'.", c)),
             }
         }
     }
@@ -267,7 +263,7 @@ impl<'a> Lexer<'a> {
                 any => string.push(any),
             }
         }
-        self.add_error(format!("Unterminated string."));
+        self.add_error("Unterminated string.".to_string());
     }
 
     fn lex_number(&mut self, first_char: char) {

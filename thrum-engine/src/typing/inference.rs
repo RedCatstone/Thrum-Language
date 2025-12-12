@@ -11,12 +11,11 @@ impl TypeChecker {
     }
 
     pub fn prune(&mut self, typ: &TypeKind) -> TypeKind {
-        if let TypeKind::Inference(id) = typ {
-            if let Some(entry) = self.inference_id_lookup.get(&id) {
+        if let TypeKind::Inference(id) = typ
+            && let Some(entry) = self.inference_id_lookup.get(id) {
                 let pruned = self.prune(&entry.clone());
                 return pruned;
             }
-        }
         typ.clone()
     }
 
@@ -55,7 +54,7 @@ impl TypeChecker {
                     }
                 }
                 else { self.type_mismatch(&type_a, &type_b); }
-                self.unify_types(&return_a, &return_b);
+                self.unify_types(return_a, return_b);
             }
 
             _ => { self.type_mismatch(&type_a, &type_b); }

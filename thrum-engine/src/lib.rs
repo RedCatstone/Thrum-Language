@@ -37,18 +37,14 @@ pub fn run_code(source: &str) -> Result<Value, ()> {
 
 
     // Type checking!
-    let mut type_checker = typing::TypeChecker::new();
-    type_checker.check_program(&mut program);
-
     println!("--- Typed AST ---");
-    println!("inference map: {:?}", type_checker.inference_id_lookup);
+    let type_errors = typing::TypeChecker::typecheck_program(&mut program);
     println!("{:#?}", program);
-    if !type_checker.errors.is_empty() {
-        println!("--- Type Errors ---\n{}", join_slice_to_string(&type_checker.errors, "\n"));
+    if !type_errors.is_empty() {
+        println!("--- Type Errors ---\n{}", join_slice_to_string(&type_errors, "\n"));
         return Err(());
     }
     else { println!("\n--- Type Check Passed ---"); }
-    drop(type_checker);
 
 
 

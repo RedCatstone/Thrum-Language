@@ -13,11 +13,10 @@ impl Parser {
             let operator = self.peek().token_type.clone();
 
             // operators that are not allowed to be line-split:
-            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon = operator {
-                if !self.peek_is_on_same_line() {
+            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon = operator
+                && !self.peek_is_on_same_line() {
                     break;
                 }
-            }
 
             let mut op_precedence = self.get_precedence(&operator);
             if op_precedence == Precedence::Lowest { break; } // Not an infix operator.
@@ -66,7 +65,7 @@ impl Parser {
                         let right_type_expr = self.parse_type_expression()?;
                         Ok(Expr::ParserTempTypeAnnotation(MatchPattern::Binding { name, typ: right_type_expr }).into())
                     }
-                    _ => return Err(self.error(&format!("Type annotations are only allowed after identifiers. Found after: {:?}", left_expr))),
+                    _ => Err(self.error(&format!("Type annotations are only allowed after identifiers. Found after: {:?}", left_expr))),
                 }
             },
 
@@ -213,16 +212,27 @@ impl Parser {
             },
 
             TokenType::While => {
+                let label = if self.optional_token(TokenType::Hashtag) {
+                    self.expect_identifier("to name the break label.")?
+                } else { "while".to_string() };
+
                 let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
+
                 self.expect_token( TokenType::LeftBrace, "to open the while block")?;
                 let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
-                Ok(Expr::While { condition, body }.into())
+
+                Ok(Expr::While { condition, body, label }.into())
             },
 
             TokenType::Loop => {
+                let label = if self.optional_token(TokenType::Hashtag) {
+                    self.expect_identifier("to name the break label.")?
+                } else { "loop".to_string() };
+
                 self.expect_token( TokenType::LeftBrace, "to open the loop block")?;
                 let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
-                Ok(Expr::Loop { body }.into())
+
+                Ok(Expr::Loop { body, label }.into())
             },
 
             TokenType::Match => {
@@ -284,12 +294,24 @@ impl Parser {
             },
 
             TokenType::Break => {
+                let label = if self.optional_token(TokenType::Hashtag) {
+                    Some(self.expect_identifier("to name the break label.")?)
+                } else { None };
+
                 let break_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
                     Box::new(self.parse_expression(Precedence::Lowest)?)
-                }
-                else { Box::new(Expr::Void.into()) };
-                Ok(Expr::Break { expr: break_expression }.into())
+                } else { Box::new(Expr::Void.into()) };
+
+                Ok(Expr::Break { expr: break_expression, label }.into())
             },
+
+            TokenType::Continue => {
+                let label = if self.optional_token(TokenType::Hashtag) {
+                    Some(self.expect_identifier("to name the break label.")?)
+                } else { None };
+                
+                Ok(Expr::Continue { label }.into())
+            }
 
             TokenType::Mut => {
                 let name = self.expect_identifier(&format!("after {}", TokenType::Mut))?;
@@ -421,7 +443,7 @@ impl Parser {
                 segments.push(next_path_segment);
                 Ok(Expr::TypePath(segments).into())
             }
-            _ => return Err(self.error(&format!("'::'-paths are only allowed after identifiers. Found after: {:?}", left_expr))),
+            _ => Err(self.error(&format!("'::'-paths are only allowed after identifiers. Found after: {:?}", left_expr))),
         }
     }
 

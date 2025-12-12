@@ -28,17 +28,17 @@ pub fn loop_over_every_ast_node(
                     exprs.extend(x);
                 }
                 Expr::Prefix { right: expr, operator: _ }
-                | Expr::Loop { body: expr }
+                | Expr::Loop { body: expr, label: _ }
                 | Expr::Deref { expr }
                 | Expr::MutRef { expr }
                 | Expr::Return(expr)
-                | Expr::Break { expr }
+                | Expr::Break { expr, label: _ }
                 | Expr::MemberAccess { left: expr, member: _ } => {
                     exprs.push(expr);
                 }
                 Expr::Infix { left: expr1, right: expr2, operator: _ }
                 | Expr::Index { left: expr1, index: expr2 }
-                | Expr::While { condition: expr1, body: expr2 } => {
+                | Expr::While { condition: expr1, body: expr2, label: _ } => {
                     exprs.push(expr1);
                     exprs.push(expr2);
                 }
@@ -73,7 +73,7 @@ pub fn loop_over_every_ast_node(
                 }
 
                 // types should already be finalized
-                Expr::Literal(_) | Expr::Identifier { name: _ } | Expr::TypePath(_) | Expr::EnumDefinition{ name: _, enums: _ }
+                Expr::Literal(_) | Expr::Identifier { name: _ } | Expr::TypePath(_) | Expr::EnumDefinition{ name: _, enums: _ } | Expr::Continue { label: _ }
                 | Expr::Void | Expr::ParserTempTypeAnnotation(_) => { /* already finalized */ }
             }
         }
@@ -122,13 +122,14 @@ pub fn desugar(program: &mut [TypedExpr]) {
         program,
         |expr| {
             match expr.expression {
-                Expr::While { condition: while_condition, body: while_body } => {
+                Expr::While { condition: while_condition, body: while_body, label: while_label } => {
                     // modify into
                     Expr::Loop {
+                        label: while_label,
                         body: Expr::If {
                             condition: while_condition,
                             consequence: while_body,
-                            alternative: Expr::Break { expr: Expr::Void.into() }.into()
+                            alternative: Expr::Break { expr: Expr::Void.into(), label: None }.into()
                         }.into()
                     }.into()
                 }

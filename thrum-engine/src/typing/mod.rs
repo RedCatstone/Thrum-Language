@@ -1,7 +1,5 @@
 use crate::{
-    lexing::tokens::TokenType,
-    nativelib::{ThrumModule, ThrumType, get_native_lib},
-    parsing::{ast_structure::{MatchPattern, DefinedTypeKind, Expr, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, typing::type_environment::TypecheckEnvironment
+    lexing::tokens::TokenType, nativelib::{ThrumModule, ThrumType, get_native_lib}, parsing::{ast_structure::{DefinedTypeKind, Expr, MatchPattern, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, pretty_printing::join_slice_to_string, typing::type_environment::TypecheckEnvironment
 };
 use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
@@ -58,12 +56,12 @@ impl ExprContext {
 }
 
 
-
+#[derive(Default)]
 pub struct TypeChecker {
-    pub errors: Vec<TypeCheckError>,
+    errors: Vec<TypeCheckError>,
     env: TypecheckEnvironment,
     library: ThrumModule,
-    pub inference_id_lookup: HashMap<usize, TypeKind>,
+    inference_id_lookup: HashMap<usize, TypeKind>,
     next_inference_id: usize,
 
     current_function_return_type: Option<TypeKind>,
@@ -77,15 +75,26 @@ impl TypeChecker {
         Self::load_prelude_into_env(&library, &mut env);
 
         TypeChecker {
-            errors: Vec::new(),
-            env,
             library,
-            inference_id_lookup: HashMap::new(),
-            next_inference_id: 0,
-            current_function_return_type: None,
-            current_break_types: Vec::new(),
+            env,
+            ..Default::default()
         }
     }
+
+    pub fn typecheck_program(program: &mut [TypedExpr]) -> Vec<TypeCheckError> {
+        let mut type_checker = Self::new();
+        
+        // PASS 1: run type unification/constraint solving logic.
+        type_checker.check_block(program, &ExprContext::default());
+
+        // PASS 2: clean up (remove all TypeKind::Infered(id))
+        type_checker.finalize_expressions(program);
+
+        
+        println!("inference map: {:?}", type_checker.inference_id_lookup);
+        type_checker.errors
+    }
+
 
     fn load_prelude_into_env(module: &ThrumModule, env: &mut TypecheckEnvironment) {
         for (name, value) in &module.values {
@@ -106,15 +115,6 @@ impl TypeChecker {
 
     fn type_mismatch(&mut self, expected: &TypeKind, found: &TypeKind) {
         self.error(format!("Type mismatch. Expected {}, found {}.", expected, found));
-    }
-
-
-    pub fn check_program(&mut self, program: &mut Vec<TypedExpr>) {
-        // PASS 1: run type unification/constraint solving logic.
-        self.check_block(program, &ExprContext::default());
-
-        // PASS 2: clean up (remove all TypeKind::Infered(id))
-        self.finalize_expressions(program);
     }
 
 
@@ -242,18 +242,22 @@ impl TypeChecker {
                 self.unify_type_vec(&arm_types)
             },
 
-            Expr::Loop { body } => {
+            Expr::Loop { body, label } => {
                 let loop_break_type = self.new_inference_type();
-                self.current_break_types.push(("loop".to_string(), loop_break_type.clone()));
+                self.current_break_types.push((label.to_string(), loop_break_type.clone()));
                 self.check_expression(body, &ctx.expect(TypeKind::Void));
                 self.current_break_types.pop().unwrap();
+                if loop_break_type == self.prune(&loop_break_type) {
+                    // loop doesn't have any breaks -> infinite loop
+                    self.unify_types(&loop_break_type, &TypeKind::Never);
+                }
                 loop_break_type
             },
             
             Expr::Assign { pattern, extra_operator, value } => {
                 let pattern_type = self.check_binding_pattern(pattern, true);
                 if pattern_type.can_fail {
-                    self.errors.push(TypeCheckError { message: format!("Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead.") });
+                    self.errors.push(TypeCheckError { message: "Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead.".to_string() });
                 }
                 // TODO
                 if let Some(val) = value {
@@ -270,8 +274,8 @@ impl TypeChecker {
                 let pattern_type = self.check_binding_pattern(pattern, true);
                 self.check_expression(value, &ctx.expect(pattern_type.typ));
                 if value.typ.is_never() { is_never = true }
-                else if !old_ctx.allow_conditional_bindings {
-                    self.error(format!("Binding case-expressions are not allowed here."));
+                else if !pattern_type.vars.is_empty() && !old_ctx.allow_conditional_bindings {
+                    self.error("Binding case-expressions are not allowed here.".to_string());
                 }
 
                 TypeKind::Bool
@@ -284,7 +288,7 @@ impl TypeChecker {
                         self.lookup_variable_mut(name);
                         TypeKind::MutPointer(Box::new(expr.typ.clone()))
                     }
-                    _ => self.error(format!("Cannot borrow non identifier as mut."))
+                    _ => self.error("Cannot borrow non identifier as mut.".to_string())
                 }
             }
 
@@ -305,22 +309,50 @@ impl TypeChecker {
 
             Expr::Return(ret) => {
                 let curr_return_type = self.current_function_return_type.clone()
-                    .unwrap_or_else(|| self.error(format!("'return' is only allowed inside functions.")));
+                    .unwrap_or_else(|| self.error("'return' is only allowed inside functions.".to_string()));
 
                 self.check_expression(ret, &ctx.expect(curr_return_type));
 
                 TypeKind::Never
             },
 
-            Expr::Break { expr } => {
-                let curr_break_type = match self.current_break_types.last() {
-                    Some((label, typ)) => typ.clone(),
-                    None => self.error(format!("'break' is only allowed inside loops."))
+            Expr::Break { expr, label } => {
+                let curr_break_type = if self.current_break_types.is_empty() {
+                    self.error("'break' is only allowed inside loops.".to_string())
+                }
+                else if let Some(break_label) = label {
+                    // break with a label -> find the closest loop with that label
+                    match self.current_break_types
+                        .iter().rev()
+                        .find(|(x_label, _typ)| x_label == break_label) {
+                            Some((_label, typ)) => typ.clone(),
+                            None => self.error(format!(
+                                "could not find a loop to break to, with the label #{break_label} (available labels: {})",
+                                join_slice_to_string(&self.current_break_types.iter().map(|x| "#".to_string() + &x.0).collect::<Vec<_>>(), ", ")
+                            ))
+                        }
+                } else {
+                    // break without a label -> just break to the current loop
+                    self.current_break_types.last().unwrap().1.clone()
                 };
+
                 self.check_expression(expr, &ctx.expect(curr_break_type));
 
                 TypeKind::Never
             },
+
+            Expr::Continue { label } => {
+                if let Some(continue_label) = label
+                    && !self.current_break_types
+                        .iter().rev()
+                        .any(|(x_label, _typ)| x_label == continue_label) {
+                            self.error(format!(
+                                "could not find a loop to break to, with the label #{continue_label} (available labels: {})",
+                                join_slice_to_string(&self.current_break_types.iter().map(|x| "#".to_string() + &x.0).collect::<Vec<_>>(), ", ")
+                            ));
+                        }
+                TypeKind::Never
+            }
 
             Expr::Call { callee, arguments } => {
                 self.check_expression(callee, &ctx);
@@ -356,15 +388,11 @@ impl TypeChecker {
 
             Expr::TypePath(segments) => self.check_path_expression(segments),
 
-            Expr::MemberAccess { left, member } => {
-                todo!()
-            },
-
             Expr::EnumDefinition { name, enums } => {
                 self.checked_define_type(name.clone(), ThrumType {
                     typ: DefinedTypeKind::Enum {
                         name: name.to_string(),
-                        inner_types: enums.into_iter()
+                        inner_types: enums.iter_mut()
                             .map(|x| (x.name.clone(), x.inner_types.clone()))
                             .collect()
                     },
@@ -375,8 +403,11 @@ impl TypeChecker {
 
             Expr::Void => TypeKind::Void,
 
-            Expr::ParserTempTypeAnnotation(_) => self.error(format!("Type annotations are not allowed here.")),
-            Expr::While { .. } => unreachable!("should be desugared already...")
+            Expr::ParserTempTypeAnnotation(_) => self.error("Type annotations are not allowed here.".to_string()),
+            Expr::While { .. } => unreachable!("should be desugared already..."),
+
+
+            Expr::MemberAccess { .. } => todo!()
         };
 
         expr.typ = if is_never { TypeKind::Never }
@@ -422,7 +453,7 @@ impl TypeChecker {
                     *typ = self.new_inference_type();
                 }
                 else if *typ == TypeKind::Never {
-                    self.error(format!("Type Never '!' is not allowed in binding patterns."));
+                    self.error("Type Never '!' is not allowed in binding patterns.".to_string());
                 }
                 if define_pattern_vars { self.checked_define_variable(name.clone(), typ.clone()); }
                 AssignablePatternType { typ: typ.clone(), has_place: false, can_fail: false, vars: vec![(name.clone(), typ.clone())] }
@@ -501,7 +532,7 @@ impl TypeChecker {
                 pattern_type
             }
 
-            MatchPattern::EnumVariant { path, name, inner_patterns } => {
+            MatchPattern::EnumVariant { .. } => {
                 todo!()
                 // if path.len() != 1 { return AssignablePatternType {
                 //     typ: self.add_error("Multi-segment paths in match patterns are not yet supported.".to_string()), has_place: false, vars: Vec::new()
@@ -577,7 +608,7 @@ impl TypeChecker {
     pub fn lookup_variable_mut(&mut self, name: &str) {
         for scope in self.env.scopes.iter_mut().rev() {
             if let Some(scope_type) = scope.vars.get_mut(name) {
-                if let Some(already_borrowed_by) = &mut scope_type.mut_borrowed_by {
+                if let Some(_already_borrowed_by) = &mut scope_type.mut_borrowed_by {
                     // self.errors.push(TypeCheckError {
                     //     message: format!("Cannot borrow {name} as mutable because it is already borrowed as mutable by {already_borrowed_by}.")
                     // });
@@ -590,7 +621,7 @@ impl TypeChecker {
 
 
 
-    fn check_block(&mut self, body: &mut Vec<TypedExpr>, ctx: &ExprContext) -> TypeKind {
+    fn check_block(&mut self, body: &mut [TypedExpr], ctx: &ExprContext) -> TypeKind {
         self.env.enter_scope();
 
         // 1. define FnDefinitions
@@ -666,13 +697,13 @@ impl TypeChecker {
     }
 
 
-    fn get_fn_type(&mut self, params: &mut Vec<MatchPattern>, return_type: &mut TypeKind, define_params: bool) -> TypeKind {
+    fn get_fn_type(&mut self, params: &mut [MatchPattern], return_type: &mut TypeKind, define_params: bool) -> TypeKind {
         let mut param_types = Vec::new();
         for param_pattern in params.iter_mut() {
             let pattern_type = self.check_binding_pattern(param_pattern, define_params);
 
-            if pattern_type.has_place { self.error(format!("Place patterns are not allowed in function parameters.")); }
-            if pattern_type.can_fail { self.error(format!("Failable patterns are not allowed in function parameters.")); }
+            if pattern_type.has_place { self.error("Place patterns are not allowed in function parameters.".to_string()); }
+            if pattern_type.can_fail { self.error("Failable patterns are not allowed in function parameters.".to_string()); }
 
             param_types.push(pattern_type.typ);
         }
@@ -686,7 +717,7 @@ impl TypeChecker {
     }
 
 
-    fn check_fn_expression(&mut self, params: &mut Vec<MatchPattern>, return_type: &mut TypeKind, body: &mut Rc<TypedExpr>, ctx: &ExprContext) -> TypeKind {
+    fn check_fn_expression(&mut self, params: &mut [MatchPattern], return_type: &mut TypeKind, body: &mut Rc<TypedExpr>, ctx: &ExprContext) -> TypeKind {
         self.env.enter_scope();
         // check the fn_type in a new scope to also define the function parameters
         let fn_type = self.get_fn_type(params, return_type, true);
@@ -730,7 +761,7 @@ impl TypeChecker {
                         }
                     }
                     // 2 or more remaining segments
-                    _ => return self.error(format!("type path had 2 or more remaining segments."))
+                    _ => return self.error("type path had 2 or more remaining segments.".to_string())
                 }
             }
 
@@ -740,7 +771,7 @@ impl TypeChecker {
                     return module_val.typ.clone()
                 }
                 else {
-                    return self.error(format!("value path too long."))
+                    return self.error("value path too long.".to_string())
                 }
             }
 
@@ -776,7 +807,7 @@ impl TypeChecker {
                         self_borrow.finalize_type(return_type);
                     }
 
-                    /* Do nothing to other nodes */
+                    // Do nothing to other nodes
                     _ => { }
                 }
                 expr
@@ -784,9 +815,11 @@ impl TypeChecker {
 
             |mut pattern| {
                 match &mut pattern {
+                    // finalize binding pattern types
                     MatchPattern::Binding { typ, .. } => {
                         self_cell.borrow_mut().finalize_type(typ);
                     }
+                    // Do nothing to other patterns
                     _ => {}
                 }
                 pattern

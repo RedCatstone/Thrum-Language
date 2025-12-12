@@ -21,7 +21,7 @@ pub struct TypecheckValue {
     typ: TypeKind,
     pub mut_borrowed_by: Option<String>,
 }
-
+#[derive(Default)]
 pub struct TypecheckEnvironment {
     pub scopes: Vec<TypecheckScope>,
 }

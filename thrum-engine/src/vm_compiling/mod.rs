@@ -1,5 +1,3 @@
-use std::{u8, usize};
-
 use num_enum::TryFromPrimitive;
 
 use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{MatchPattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}};
@@ -118,7 +116,7 @@ struct CompileFunction<'a> {
     library: &'a ThrumModule,
     
     // break / continue
-    loop_jumps: Vec<Vec<usize>>,
+    loop_infos: Vec<LoopInfo>,
     // compiling `let x = 2 + 2` first has 2 temps (2, 2) then goes to 1 temp (4) then goes to 0.
     cur_temp_amount: usize,
 }
@@ -126,6 +124,15 @@ struct Local {
     name: String,
     scope_depth: usize,
     const_value: Option<Value>,
+}
+
+struct LoopInfo {
+    // the end isn't known until the full loop is compiled.
+    // so all break jumps temporarily hang out here
+    break_jumps: Vec<usize>,
+    // where the loop starts (for continue)
+    start: usize,
+    label: String,
 }
 
 impl<'a> CompileFunction<'a> {
@@ -146,7 +153,7 @@ impl<'a> CompileFunction<'a> {
             library,
 
             cur_temp_amount: params.len(),
-            loop_jumps: Vec::new(),
+            loop_infos: Vec::new(),
         };
         // push the new bytecode_chunk and localsvec for this function
         compile_function.bytecode_chunks.push(BytecodeChunk { name, ..Default::default() });
@@ -174,19 +181,25 @@ impl<'a> CompileFunction<'a> {
                 self.push_get_constant_op(val.clone());
             }
             Expr::TemplateString(elements) => {
-                for element in elements { self.compile_expression(element); }
+                for element in elements {
+                    self.compile_expression(element);
+                }
                 self.push_op_with_opnum(OpCode::StrTemplate, elements.len());
-                self.cur_temp_amount -= elements.len() - 1;
+                self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
             }
             Expr::Array(elements) => {
-                for element in elements { self.compile_expression(element); }
+                for element in elements {
+                    self.compile_expression(element);
+                }
                 self.push_op_with_opnum(OpCode::ArrCreate, elements.len());
-                self.cur_temp_amount -= elements.len() - 1;
+                self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
             }
             Expr::Tuple(elements) => {
-                for element in elements { self.compile_expression(element); }
+                for element in elements { 
+                    self.compile_expression(element);
+                }
                 self.push_op_with_opnum(OpCode::TupCreate, elements.len());
-                self.cur_temp_amount -= elements.len() - 1;
+                self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
             }
 
 
@@ -224,7 +237,7 @@ impl<'a> CompileFunction<'a> {
                 }
                 // compile the binding pattern
                 let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(&pattern, &mut failure_jumps);
+                self.compile_binding_pattern(pattern, &mut failure_jumps);
 
                 // if AssignablePattern can fail, use the else block or panic
                 if !failure_jumps.is_empty() {
@@ -252,7 +265,7 @@ impl<'a> CompileFunction<'a> {
                 self.compile_expression(value);  // (+1 temp)
 
                 let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(&pattern, &mut failure_jumps);  // consumes value (-1 temp)
+                self.compile_binding_pattern(pattern, &mut failure_jumps);  // consumes value (-1 temp)
 
                 // its a match! 
                 self.push_get_constant_op(Value::Bool(true)); // (+1 temp - success path)
@@ -276,7 +289,7 @@ impl<'a> CompileFunction<'a> {
             Expr::MutRef { expr } => {
                 match &expr.expression {
                     Expr::Identifier { name } => {
-                        self.push_get_local_mut(&name);
+                        self.push_get_local_mut(name);
                     }
                     _ => todo!()
                 }
@@ -317,29 +330,34 @@ impl<'a> CompileFunction<'a> {
                 self.patch_jump_op(jump_over_else_block);
             }
 
-            Expr::Loop { body } => {
+            Expr::Loop { body, label } => {
                 // what it should look like:
                 // ...loop...
                 // ...loop...
                 // Jump -3
-                let loop_jump_location = self.bytecode_chunks[self.curr_bytecode_index].codes.len();
+                let loop_start = self.bytecode_chunks[self.curr_bytecode_index].codes.len();
 
-                self.loop_jumps.push(Vec::new());
+                self.loop_infos.push(LoopInfo {
+                    break_jumps: Vec::new(),
+                    start: loop_start,
+                    label: label.to_string()
+                });
                 self.compile_expression(body);
                 self.push_pop_value();
-                self.push_backwards_jump_op(loop_jump_location);
+                self.push_backwards_jump_op(loop_start);
 
-                let break_jumps = self.loop_jumps.pop().unwrap();
+                // all break/continue jumps that are refering to this loop.
+                let loop_info = self.loop_infos.pop().unwrap();
 
-                for jump in break_jumps {
+                for jump in loop_info.break_jumps {
                     self.patch_jump_op(jump);
                 }
 
-                // doesnt need to push void, because the only way to get out of the loop are the break jumps
+                // doesnt need to push void, because it's an infinite loop
                 self.cur_temp_amount += 1;
             }
 
-            Expr::Break { expr } => {
+            Expr::Break { expr, label } => {
                 let temp_pop_amount = self.cur_temp_amount;
 
                 // pop all temp values
@@ -352,9 +370,45 @@ impl<'a> CompileFunction<'a> {
                 // and then actually break
                 self.push_op(OpCode::Jump);
                 let break_jump = self.push_opnum_for_patching();
-                self.loop_jumps.last_mut().unwrap().push(break_jump);
 
+                // find the correct loop to break to
+                let loop_info = if let Some(break_label) = label {
+                    self.loop_infos
+                        .iter_mut().rev()
+                        .find(|x| x.label == *break_label)
+                        .unwrap()
+                } else {
+                    self.loop_infos.last_mut().unwrap()
+                };
+                loop_info.break_jumps.push(break_jump);
+
+                // pretend like this break expression didn't happen, to compile expressions after this.
                 self.cur_temp_amount += temp_pop_amount;
+            }
+
+            Expr::Continue { label } => {
+                let temp_pop_amount = self.cur_temp_amount;
+
+                // pop all temp values
+                for _ in 0..temp_pop_amount {
+                    self.push_pop_value();
+                }
+
+                // find the correct loop to break to
+                let loop_info = if let Some(continue_label) = label {
+                    self.loop_infos
+                        .iter().rev()
+                        .find(|x| x.label == *continue_label)
+                        .unwrap()
+                } else {
+                    self.loop_infos.last_mut().unwrap()
+                };
+                let to_start = loop_info.start;
+                // and then actually continue
+                self.push_backwards_jump_op(to_start);
+                
+                // pretend like this break expression didn't happen, to compile expressions after this.
+                self.cur_temp_amount += temp_pop_amount + 1;
             }
 
 
@@ -410,7 +464,7 @@ impl<'a> CompileFunction<'a> {
                 for argument in arguments {
                     self.compile_expression(argument);
                 }
-                self.compile_expression(&callee);
+                self.compile_expression(callee);
                 self.push_op_with_opnum(OpCode::CallFn, arguments.len());
 
                 self.cur_temp_amount -= arguments.len();
@@ -425,7 +479,7 @@ impl<'a> CompileFunction<'a> {
                 let fn_index = CompileFunction::compile_function(
                     "<closure>".to_string(),
                     std::slice::from_ref(body),
-                    &params,
+                    params,
                     self.bytecode_chunks,
                     self.locals,
                     self.library
@@ -505,9 +559,6 @@ impl<'a> CompileFunction<'a> {
 
 
     fn push_op(&mut self, op: OpCode) { self.bytecode_chunks[self.curr_bytecode_index].codes.push(op as u8); }
-    fn push_ops<I>(&mut self, ops: I) where I: IntoIterator<Item = OpCode> {
-        self.bytecode_chunks[self.curr_bytecode_index].codes.extend(ops.into_iter().map(|op| op as u8));
-    }
     fn push_codes(&mut self, codes: &[u8]) { self.bytecode_chunks[self.curr_bytecode_index].codes.extend(codes); }
     fn push_opnum(&mut self, opnum: usize) {
         if opnum < u8::MAX as usize {
@@ -522,10 +573,10 @@ impl<'a> CompileFunction<'a> {
         self.push_op(op);
         self.push_opnum(opnum);
     }
-    fn push_op_with_opnums(&mut self, op: OpCode, opnums: &[usize]) {
-        self.push_op(op);
-        for &opnum in opnums { self.push_opnum(opnum); }
-    }
+    // fn push_op_with_opnums(&mut self, op: OpCode, opnums: &[usize]) {
+    //     self.push_op(op);
+    //     for &opnum in opnums { self.push_opnum(opnum); }
+    // }
 
     fn push_opnum_for_patching(&mut self) -> usize {
         // e.g. Jump, but we dont know where to jump to yet
@@ -695,7 +746,7 @@ impl<'a> CompileFunction<'a> {
                     CompileFunction::compile_function(
                         name.to_string(),
                         std::slice::from_ref(body),
-                        &params,
+                        params,
                         self.bytecode_chunks,
                         self.locals,
                         self.library,
@@ -791,7 +842,7 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_binding_pattern_failure_jumps(&mut self, failure_jumps: &mut Vec<FailureJump>) {
+    fn compile_binding_pattern_failure_jumps(&mut self, failure_jumps: &mut [FailureJump]) {
         // complicated function but it does this:
         // if one failure jump had 5 temps
         // and another had 3 temps

@@ -1,5 +1,4 @@
 use core::fmt;
-use std::usize;
 
 use crate::{lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{Expr, TypedExpr}};
 
@@ -10,7 +9,7 @@ pub mod desugar;
 
 
 
-
+#[derive(Default)]
 pub struct Parser {
     tokens: Vec<LexerToken>,
     position: usize,
@@ -21,7 +20,7 @@ pub struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<LexerToken>) -> Self {
-        Parser { tokens, position: 0, errors: Vec::new(), prev_token_line: 0, pipe_operators_active: 0 }
+        Parser { tokens, ..Default::default() }
     }
 
     pub fn parse_program(tokens: Vec<LexerToken>) -> (Vec<TypedExpr>, Vec<ParserError>) {

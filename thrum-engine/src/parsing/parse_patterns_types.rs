@@ -24,7 +24,7 @@ impl Parser {
         let inner_types = if self.optional_token(TokenType::Less) { self.parse_type_list()? }
         else { Vec::new() };
 
-        Ok(self.type_from_str(&str_type, inner_types)?)
+        self.type_from_str(&str_type, inner_types)
     }
 
     fn type_from_str(&mut self, str: &str, inner_types: Vec<TypeKind>) -> Result<TypeKind, ParserError> {
@@ -35,7 +35,7 @@ impl Parser {
             "tup" => Ok(TypeKind::Tup(inner_types)),
             "arr" => {
                 if inner_types.len() == 1 { Ok(TypeKind::Arr(Box::new(inner_types.into_iter().next().unwrap()))) }
-                else { Err(self.error(&format!("Invalid types for arr. arr needs exactly 1 inner type."))) }
+                else { Err(self.error("Invalid types for arr. arr needs exactly 1 inner type.")) }
             }
             "-" => Ok(TypeKind::Void),
             "!" => Ok(TypeKind::Never),
@@ -131,11 +131,11 @@ impl Parser {
                 Ok(MatchPattern::Tuple(converted_elements))
             }
             Expr::Deref { expr } => {
-                match (*expr).expression {
+                match expr.expression {
                     Expr::Identifier { name } => {
                         Ok(MatchPattern::Place(PlaceExpr::Deref(name)))
                     }
-                    _ => Err(self.error(&format!("^ is only allowed after identifiers in place expressions.")))
+                    _ => Err(self.error("^ is only allowed after identifiers in place expressions."))
                 }
             }
 
@@ -163,7 +163,7 @@ impl Parser {
                         self.advance();
                         Ok(MatchPattern::Literal(Value::Str("".to_string())))
                     }
-                    _ => Err(self.error(&format!("Complex string literals are not allowed in match patterns.")))
+                    _ => Err(self.error("Complex string literals are not allowed in match patterns."))
                 }
             }
 

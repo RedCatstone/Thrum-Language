@@ -103,10 +103,12 @@ pub enum Expr {
     While {
         condition: Box<TypedExpr>,
         body: Box<TypedExpr>,
+        label: String,
     },
 
     Loop {
         body: Box<TypedExpr>,
+        label: String,
     },
 
     EnumDefinition {
@@ -129,7 +131,11 @@ pub enum Expr {
 
     Return(Box<TypedExpr>),
     Break {
+        label: Option<String>,
         expr: Box<TypedExpr>,
+    },
+    Continue {
+        label: Option<String>,
     },
 
     // Semicolons are void expressions.

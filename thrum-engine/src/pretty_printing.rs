@@ -81,6 +81,7 @@ impl fmt::Display for TokenType {
             TokenType::DotDot => write!(f, ".."),
             TokenType::DotDotLess => write!(f, "..<"),
             TokenType::DotDotDot => write!(f, "..."),
+            TokenType::Hashtag=> write!(f, "#"),
 
             // String parts (descriptive)
             TokenType::StringStart => write!(f, "<StringStart>"),
@@ -201,7 +202,7 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
         }
         Expr::Call { callee: function, arguments } => {
             writeln!(f, "{i}{branch}{prefix}Call {type_info}")?;
-            format_recursive(function, f, indent + 1, "func: ", arguments.len() == 0)?;
+            format_recursive(function, f, indent + 1, "func: ", arguments.is_empty())?;
             for (i, arg) in arguments.iter().enumerate() {
                 format_recursive(arg, f, indent + 1, "arg: ", i == arguments.len() - 1)?;
             }
@@ -227,8 +228,8 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
                 format_recursive(el, f, indent + 1, "", idx == len - 1)?;
             }
         }
-        Expr::Loop { body } => {
-            writeln!(f, "{i}{branch}{prefix}Loop {type_info}")?;
+        Expr::Loop { body, label } => {
+            writeln!(f, "{i}{branch}{prefix}Loop (#{label}) {type_info}")?;
             format_recursive(body, f, indent + 1, "body: ", true)?;
         }
         Expr::FnDefinition { name, params, return_type, body } => {
@@ -319,7 +320,7 @@ impl fmt::Display for BytecodeChunk {
 
         let mut frame = CallFrame::default();
         loop {
-            let op_code = VM::read_next_instruction(&mut frame, &self);
+            let op_code = VM::read_next_instruction(&mut frame, self);
             let mut opnums = Vec::new();
 
             for _ in 0..how_many_operands_for_op_code(&op_code) {
@@ -328,7 +329,7 @@ impl fmt::Display for BytecodeChunk {
                         strings.join(", "), join_slice_to_string(&self.constants, ", ")
                     )
                 }
-                opnums.push(VM::read_next_opnum(&mut frame, &self))
+                opnums.push(VM::read_next_opnum(&mut frame, self))
             }
 
             if opnums.is_empty() { strings.push(format!("{:?}", op_code)); }

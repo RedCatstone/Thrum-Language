@@ -37,6 +37,7 @@ pub enum TokenType {
     PipeGreater, Caret,         // |> ^
     DotDot, DotDotLess,         // .. ..<
     DotDotDot,                  // ...
+    Hashtag,
 
     // Literals
     Identifier(String),
