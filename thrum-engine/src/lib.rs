@@ -33,7 +33,7 @@ pub fn run_code(source: &str) -> Result<Value, ()> {
 
 
     parsing::desugar::desugar(&mut program);
-    println!("\n--- Desugared ---\n");
+    println!("\n--- Desugared ---{:#?}", program);
 
 
     // Type checking!

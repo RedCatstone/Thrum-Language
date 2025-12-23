@@ -211,6 +211,13 @@ impl Parser {
                 Ok(Expr::If { condition, consequence, alternative }.into())
             },
 
+            TokenType::Ensure => {
+                let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
+                self.expect_token(TokenType::Else, "after the ensure condition")?;
+                let alternative = Box::new(self.parse_expression(Precedence::Lowest)?);
+                Ok(Expr::Ensure { condition, alternative }.into())
+            },
+
             TokenType::While => {
                 let label = if self.optional_token(TokenType::Hashtag) {
                     self.expect_identifier("to name the break label.")?

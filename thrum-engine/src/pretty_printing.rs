@@ -101,6 +101,7 @@ impl fmt::Display for TokenType {
             TokenType::Let => write!(f, "let"),
             TokenType::Const => write!(f, "const"),
             TokenType::Case => write!(f, "case"),
+            TokenType::Ensure => write!(f, "ensure"),
             TokenType::Mut => write!(f, "mut"),
             TokenType::Struct => write!(f, "struct"),
             TokenType::Enum => write!(f, "enum"),

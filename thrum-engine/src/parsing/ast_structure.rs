@@ -15,6 +15,14 @@ impl From<Expr> for TypedExpr {
         }
     }
 }
+impl Expr {
+    pub fn into_with_type(self, typ: TypeKind) -> TypedExpr {
+        TypedExpr {
+            typ,
+            expression: self,
+        }
+    }
+}
 impl From<Expr> for Box<TypedExpr> {
     fn from(expr: Expr) -> Self {
         Box::new(expr.into())
@@ -88,10 +96,15 @@ pub enum Expr {
         index: Box<TypedExpr>,
     },
 
-    If {  // if (true) ... else ...
+    If {  // if true { ... } else ...
         condition: Box<TypedExpr>,
         consequence: Box<TypedExpr>,
         alternative: Box<TypedExpr>,  // void if not present
+    },
+    
+    Ensure {  // ensure true else { ... }
+        condition: Box<TypedExpr>,
+        alternative: Box<TypedExpr>,
     },
     
     Match {  // match response { 2 -> "success", _ -> "nope." }

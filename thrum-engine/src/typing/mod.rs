@@ -404,11 +404,17 @@ impl TypeChecker {
             Expr::Void => TypeKind::Void,
 
             Expr::ParserTempTypeAnnotation(_) => self.error("Type annotations are not allowed here.".to_string()),
-            Expr::While { .. } => unreachable!("should be desugared already..."),
+            Expr::While { .. } | Expr::Ensure { .. } => unreachable!("should be desugared already..."),
 
 
             Expr::MemberAccess { .. } => todo!()
         };
+
+        if inferred_type.is_never() { is_never = true }
+
+        if !is_never && (expr.typ.is_never() || matches!(old_ctx.expected_type, Some(TypeKind::Never))) {
+            self.type_mismatch(&TypeKind::Never, &inferred_type);
+        }
 
         expr.typ = if is_never { TypeKind::Never }
             else { self.prune(&inferred_type) };

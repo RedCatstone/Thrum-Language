@@ -1,11 +1,8 @@
-let i = 0
-let result_str = ""
 
-while i < 10 {
-    i += 1
+let x = 5
 
-    if i % 2 == 0 { continue }
-    result_str += "{i} "
+ensure x == 2 else {
+    panic("noo!!")
 }
 
-result_str
+x

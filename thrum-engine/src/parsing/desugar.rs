@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::ast_structure::{MatchPattern, Expr, PlaceExpr, TypedExpr, Value}};
+use crate::{lexing::tokens::TokenType, parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, TypeKind, TypedExpr, Value}};
 
 
 
@@ -51,6 +51,9 @@ pub fn loop_over_every_ast_node(
                     exprs.push(consequence);
                     exprs.push(alternative);
                 }
+                Expr::Ensure { .. } => {
+                    unreachable!("hmmm?")
+                },
                 Expr::Case { pattern, value } => {
                     patterns.push(pattern);
                     exprs.push(value);
@@ -108,6 +111,7 @@ pub fn loop_over_every_ast_node(
             }
         }
         else {
+            // no more exprs or patterns to go through...
             break;
         }
     }
@@ -117,11 +121,14 @@ pub fn loop_over_every_ast_node(
 
 
 
-pub fn desugar(program: &mut [TypedExpr]) {
+pub fn desugar(program: &mut Vec<TypedExpr>) {
+    desugar_ensure(program);
+
     loop_over_every_ast_node(
         program,
         |expr| {
             match expr.expression {
+                // turn while loops into normal loops with a conditional break
                 Expr::While { condition: while_condition, body: while_body, label: while_label } => {
                     // modify into
                     Expr::Loop {
@@ -131,30 +138,73 @@ pub fn desugar(program: &mut [TypedExpr]) {
                             consequence: while_body,
                             alternative: Expr::Break { expr: Expr::Void.into(), label: None }.into()
                         }.into()
-                    }.into()
-                }
-
-                Expr::TemplateString(ref segments) => {
-                    if segments.len() == 1 && let Expr::Literal(Value::Str(string)) = &segments.first().unwrap().expression {
-                        Expr::Literal(Value::Str(string.clone())).into()
                     }
-                    else { expr }
                 }
 
-                Expr::Infix { operator, left, right } => {
+                // turn 1 segment long template strings into literals
+                Expr::TemplateString(ref segments)
+                if segments.len() == 1 => {
+                    if let Expr::Literal(Value::Str(string)) = &segments.first().unwrap().expression {
+                        Expr::Literal(Value::Str(string.clone()))
+                    }
+                    else { unreachable!() }
+                }
+
+                Expr::Infix { operator, left, right }
+                if matches!(operator, TokenType::NotEqual | TokenType::LessEqual | TokenType::GreaterEqual) => {
                     match operator {
-                        TokenType::NotEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::EqualEqual, left, right }.into() }.into(),
-                        TokenType::LessEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Greater, left, right }.into() }.into(),
-                        TokenType::GreaterEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Less, left, right }.into() }.into(),
+                        // !=  ! ==
+                        TokenType::NotEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::EqualEqual, left, right }.into() },
+                        // <=  ! >
+                        TokenType::LessEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Greater, left, right }.into() },
+                        // >=  ! <
+                        TokenType::GreaterEqual => Expr::Prefix { operator: TokenType::Exclamation, right: Expr::Infix { operator: TokenType::Less, left, right }.into() },
                         // Do nothing
-                        _ => Expr::Infix { operator, left, right }.into()
+                        _ => unreachable!()
                     }
+                }
+
+                // turn ensure into normal if else
+                Expr::Block(mut exprs) => {
+                    desugar_ensure(&mut exprs);
+                    Expr::Block(exprs)
                 }
 
                 // Do nothing to other nodes
-                _ => expr
+                other => other
             }
+            .into_with_type(expr.typ)
         },
         |pattern| { pattern }
     );
+}
+
+
+fn desugar_ensure(exprs: &mut Vec<TypedExpr>) {
+    // {
+    //     ensure case ?y = x else { return }
+    //     print(y)
+    //     return true
+    // }
+    // {
+    //     if case ?y = x {
+    //         print(y)
+    //         return true
+    //     }
+    //     else { return }
+    // }
+    if let Some(ensure_index) = exprs.iter().position(|x| matches!(x.expression, Expr::Ensure { .. })) {
+        let exprs_after_ensure = exprs.split_off(ensure_index + 1);
+
+        let Expr::Ensure { condition, mut alternative } = exprs.pop().unwrap().expression
+        else { unreachable!() };
+
+        alternative.typ = TypeKind::Never;
+
+        exprs.push(Expr::If {
+            condition,
+            consequence: Box::new(Expr::Block(exprs_after_ensure).into()),
+            alternative
+        }.into());
+    }
 }
