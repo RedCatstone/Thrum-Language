@@ -1,6 +1,6 @@
 use num_enum::TryFromPrimitive;
 
-use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{MatchPattern, Expr, MatchArm, PlaceExpr, TypeKind, TypedExpr, Value}};
+use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{Expr, MatchArm, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TypeKind, TypedExpr, Value}};
 
 
 #[repr(u8)]
@@ -28,7 +28,7 @@ pub enum OpCode {
     BoolNegate,
     StrAdd, StrTemplate,
     ArrCreate, ArrGet, ArrRefSet, ArrUnpackCheckJump,
-    TupCreate, TupUnpack,
+    TupCreate, TupGet, TupUnpack,
 
     // control flow
     Jump, JumpBack, JumpIfFalse,
@@ -194,12 +194,13 @@ impl<'a> CompileFunction<'a> {
                 self.push_op_with_opnum(OpCode::ArrCreate, elements.len());
                 self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
             }
-            Expr::Tuple(elements) => {
-                for element in elements { 
-                    self.compile_expression(element);
+            Expr::Tuple(exprs) => {
+                for TupleElement { label, expr } in exprs {
+                    // if label.is_some() { panic!("labels are supposed to be gone :(((") }
+                    self.compile_expression(expr);
                 }
-                self.push_op_with_opnum(OpCode::TupCreate, elements.len());
-                self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
+                self.push_op_with_opnum(OpCode::TupCreate, exprs.len());
+                self.cur_temp_amount = (self.cur_temp_amount + 1) - exprs.len();
             }
 
 
@@ -545,6 +546,11 @@ impl<'a> CompileFunction<'a> {
                 }
             }
 
+            Expr::MemberAccess { left, member: _, resolved_index } => {
+                self.compile_expression(left);
+                self.push_op_with_opnum(OpCode::TupGet, resolved_index.unwrap());
+            }
+
             _ => { panic!("{expr:?} not yet implemented") }
         }
 
@@ -792,7 +798,8 @@ impl<'a> CompileFunction<'a> {
                 self.push_op(OpCode::TupUnpack);
                 self.cur_temp_amount += patterns.len() - 1;
 
-                for pattern in patterns.iter().rev() {
+                for TupleMatchPattern { label, pattern } in patterns.iter().rev() {
+                    // if label.is_some() { panic!("labels are supposed to be gone :(((") }
                     self.compile_binding_pattern(pattern, failure_jumps);
                 }
             }
@@ -962,7 +969,7 @@ impl<'a> CompileFunction<'a> {
                 TypeKind::Arr(_) => match operator {
                     _ => unreachable!("Unsupported operator {} for type arr", operator)
                 }
-                TypeKind::Tup(_) => match operator {
+                TypeKind::Tup { .. } => match operator {
                     _ => unreachable!("Unsupported operator {} for type tup", operator)
                 }
 

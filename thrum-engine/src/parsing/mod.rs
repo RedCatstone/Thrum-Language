@@ -80,6 +80,27 @@ impl Parser {
         Ok(name)
     }
 
+    fn optional_dot_token(&mut self) -> Option<String> {
+        if let TokenType::Dot(text) = &self.peek().token_type {
+            let text = text.clone();
+            self.advance();
+            Some(text)
+        }
+        else { None }
+    }
+
+    fn parse_optional_label(&mut self) -> Option<String> {
+        if self.optional_token(TokenType::Hashtag) {
+            let label = 
+                match &self.peek().token_type {
+                    TokenType::Identifier(s) => s.to_string(),
+                    x => x.to_string()
+                };
+            self.advance();
+            Some(label)
+        } else { None }
+    }
+
     fn optional_token(&mut self, expected: TokenType) -> bool {
         if std::mem::discriminant(&self.peek().token_type) == std::mem::discriminant(&expected) {
             self.advance();
@@ -91,15 +112,16 @@ impl Parser {
     pub(super) fn parse_comma_separated<T>(
         &mut self,
         end_token: TokenType,
-        parse_element: impl Fn(&mut Self) -> Result<T, ParserError>, 
+        parse_element: impl Fn(&mut Self, i32) -> Result<T, ParserError>, 
         err_msg: &str
     ) -> Result<Vec<T>, ParserError>
     {
         let mut list = Vec::new();
         
         // handles empty lists immediately
-        while self.peek().token_type != end_token {
-            list.push(parse_element(self)?);
+        for i in 0.. {
+            if self.peek().token_type == end_token { break }
+            list.push(parse_element(self, i)?);
             if !self.optional_token(TokenType::Comma) { break; }
         }
         self.expect_token(end_token, err_msg)?;

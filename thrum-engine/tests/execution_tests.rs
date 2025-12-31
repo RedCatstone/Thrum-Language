@@ -124,3 +124,20 @@ fn test_labeled_loops() {
         Ok(Value::Num(69.0))
     );
 }
+
+
+#[test]
+fn test_tuples() {
+    assert_eq!(
+        run_code(r#"
+        let status = "ok"
+        let data = (.id = 184, .status)
+
+        if case (.status = "ok", .id) = data {
+            id
+        }
+        else { -1 }
+        "#),
+        Ok(Value::Num(184.0))
+    );
+}

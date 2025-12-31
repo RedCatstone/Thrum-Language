@@ -215,7 +215,14 @@ impl<'a> Lexer<'a> {
                 _ if c.is_ascii_digit() => self.lex_number(c),
 
                 // identifiers and keywords
-                _ if c == '_' || c.is_alphabetic() => { self.lex_identifier(c); }
+                _ if c == '_' || c.is_alphabetic() => {
+                    let text = self.lex_identifier(Some(c));
+                    // Check if the identifier is a reserved keyword
+                    if let Some(keyword_token) = get_keyword(&text) {
+                        self.add_token(keyword_token);
+                    }
+                    else { self.add_token(TokenType::Identifier(text)); }
+                }
 
                 _ => self.add_error(format!("Unexpected character '{}'.", c)),
             }
@@ -311,23 +318,25 @@ impl<'a> Lexer<'a> {
             if self.match_next('.') { TokenType::DotDotDot }
             else if self.match_next('<') { TokenType::DotDotLess }
             else { TokenType::DotDot }
-        } else { TokenType::Dot };
+        }
+        else {
+            // normal dot, parse text afterwards
+            let text = self.lex_identifier(None);
+            TokenType::Dot(text)
+        };
         self.add_token(token);
     }
     
-    fn lex_identifier(&mut self, first_char: char) {
-        let mut text = String::from(first_char);
+    fn lex_identifier(&mut self, first_char: Option<char>) -> String {
+        let mut text = if let Some(c) = first_char { String::from(c) }
+        else { String::new() };
         
         while let Some(&c) = self.source_iter.peek() && (c == '_' || c.is_alphanumeric()) {
             text.push(c);
             self.advance();
         }
-        
-        // Check if the identifier is a reserved keyword
-        if let Some(keyword_token) = get_keyword(&text) {
-            self.add_token(keyword_token);
-        }
-        else { self.add_token(TokenType::Identifier(text)); }
+
+        text
     }
 }
 

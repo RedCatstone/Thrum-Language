@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{MatchPattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value}}};
+use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{Expr, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TupleType, TypeKind, TypedExpr, Value}}};
 
 impl Parser {
     pub(super) fn parse_type_expression(&mut self) -> Result<TypeKind, ParserError> {
@@ -32,7 +32,7 @@ impl Parser {
             "num" => Ok(TypeKind::Num),
             "str" => Ok(TypeKind::Str),
             "bool" => Ok(TypeKind::Bool),
-            "tup" => Ok(TypeKind::Tup(inner_types)),
+            "tup" => Ok(TypeKind::Tup(inner_types.into_iter().enumerate().map(|(i, typ)| TupleType { label: i.to_string(), typ}).collect())),
             "arr" => {
                 if inner_types.len() == 1 { Ok(TypeKind::Arr(Box::new(inner_types.into_iter().next().unwrap()))) }
                 else { Err(self.error("Invalid types for arr. arr needs exactly 1 inner type.")) }
@@ -48,61 +48,11 @@ impl Parser {
     fn parse_type_list(&mut self) -> Result<Vec<TypeKind>, ParserError> {
         self.parse_comma_separated(
             TokenType::Greater,
-            |p| p.parse_type_expression(),
+            |p, _| p.parse_type_expression(),
             "to close the generic types list"
         )
     }
 
-
-
-
-    pub(super) fn convert_param_exprs_into_patterns(&mut self, expr: TypedExpr) -> Result<Vec<MatchPattern>, ParserError> {
-        // this function takes what was to the left of `->` and validates it.
-        let params = match expr.expression {
-            Expr::Tuple(body) => body,
-            Expr::Identifier { .. } | Expr::ParserTempTypeAnnotation(_) | Expr::Array(_) => vec![expr],
-            _ => return Err(self.error(&format!("Invalid parameter list for function. Found {:?}.", expr))),
-        };
-
-        // recursive validation!!!
-        params
-            .into_iter()
-            .map(|p| self.convert_param_expr_into_pattern(p))
-            .collect()
-    }
-
-    fn convert_param_expr_into_pattern(&mut self, param_expr: TypedExpr) -> Result<MatchPattern, ParserError> {
-        match param_expr.expression {
-            // 'x: int'
-            Expr::ParserTempTypeAnnotation(pattern) => Ok(pattern),
-            // 'x'
-            Expr::Identifier { name } => Ok(MatchPattern::Binding { name, typ: TypeKind::ParserUnknown }),
-
-            Expr::Assign { pattern, extra_operator: _, value } if value.is_none() => {
-                Ok(*pattern)
-            }
-
-            // '[x, y]'
-            Expr::Array(elements) => {
-                let mut converted_elements = Vec::new();
-                for element in elements {
-                    converted_elements.push(self.convert_param_expr_into_pattern(element)?);
-                }
-                Ok(MatchPattern::Array(converted_elements))
-            },
-
-            // '(x, y)'
-            Expr::Tuple(elements) => {
-                let mut converted_elements = Vec::new();
-                for element in elements {
-                    converted_elements.push(self.convert_param_expr_into_pattern(element)?);
-                }
-                Ok(MatchPattern::Tuple(converted_elements))
-            }
-
-            _ => Err(self.error(&format!("Invalid syntax in parameter list. Found {:?}.", param_expr))),
-        }
-    }
 
 
 
@@ -125,8 +75,11 @@ impl Parser {
             }
             Expr::Tuple(elements) => {
                 let mut converted_elements = Vec::new();
-                for element in elements {
-                    converted_elements.push(self.convert_lhs_assign_into_pattern(element)?);
+                for TupleElement { label, expr } in elements {
+                    converted_elements.push(TupleMatchPattern {
+                        label,
+                        pattern: self.convert_lhs_assign_into_pattern(expr)?
+                    });
                 }
                 Ok(MatchPattern::Tuple(converted_elements))
             }
@@ -180,19 +133,26 @@ impl Parser {
             }
             TokenType::LeftParen => {
                 self.advance();
-
-                let first_pattern = self.parse_binding_match_pattern(type_annotation_required)?;
+                
+                let first_elem_labeled = matches!(self.peek().token_type, TokenType::Dot(_));
+                let first_pattern = self.parse_tuple_binding_match_pattern("0".to_string(), type_annotation_required)?;
                 if self.optional_token(TokenType::Comma) {
                     // Tuple!
                     let mut tuple_body = vec![first_pattern];
-                    tuple_body.extend(self.parse_binding_pattern_list(
-                        TokenType::RightParen, type_annotation_required, "to close the tuple pattern"
+                    tuple_body.extend(self.parse_comma_separated(
+                        TokenType::RightParen,
+                        |p, i| p.parse_tuple_binding_match_pattern((i+1).to_string(), type_annotation_required),
+                        "to close the tuple pattern"
                     )?);
+                    tuple_body.sort_by(|a, b| a.label.cmp(&b.label));
                     Ok(MatchPattern::Tuple(tuple_body))
                 }
                 else {
                     self.expect_token(TokenType::RightParen, "to close the grouped pattern")?;
-                    Ok(first_pattern)
+                    if first_elem_labeled {
+                        Err(self.error("If this is supposed to be a tuple, use a trailing comma."))
+                    }
+                    else { Ok(first_pattern.pattern) }
                 }
             }
             TokenType::ColonColon => self.parse_binding_path("".to_string(), type_annotation_required),
@@ -206,10 +166,38 @@ impl Parser {
         else { Ok(pattern) }
     }
 
+
+
+
+    fn parse_tuple_binding_match_pattern(&mut self, default_label: String, type_annotation_required: bool) -> Result<TupleMatchPattern, ParserError> {
+        if let Some(label) = self.optional_dot_token() {
+            // named tuple element
+            let pattern = if self.optional_token(TokenType::Equal) {
+                    self.parse_binding_match_pattern(type_annotation_required)?
+                }
+                else {
+                    let typ = if self.optional_token(TokenType::Colon) {
+                        self.parse_type_expression()?
+                    }
+                    else { TypeKind::ParserUnknown };
+                    MatchPattern::Binding { name: label.clone(), typ }
+                };
+            
+            Ok(TupleMatchPattern { label, pattern })
+        }
+        else {
+            let pattern = self.parse_binding_match_pattern(type_annotation_required)?;
+            Ok(TupleMatchPattern { label: default_label, pattern })
+        }
+    }
+
+
+
+
     pub(super) fn parse_binding_pattern_list(&mut self, end_token: TokenType, type_annotation_required: bool, error_msg: &str) -> Result<Vec<MatchPattern>, ParserError> {
         self.parse_comma_separated(
             end_token,
-            |p| p.parse_binding_match_pattern(type_annotation_required),
+            |p, _| p.parse_binding_match_pattern(type_annotation_required),
             error_msg
         )
     }

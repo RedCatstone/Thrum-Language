@@ -1,5 +1,5 @@
 use crate::{
-    lexing::tokens::TokenType, nativelib::{ThrumModule, ThrumType, get_native_lib}, parsing::{ast_structure::{DefinedTypeKind, Expr, MatchPattern, PlaceExpr, TypeKind, TypedExpr, Value}, desugar}, pretty_printing::join_slice_to_string, typing::type_environment::TypecheckEnvironment
+    lexing::tokens::TokenType, nativelib::{ThrumModule, ThrumType, get_native_lib}, parsing::{ast_structure::{DefinedTypeKind, Expr, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TupleType, TypeKind, TypedExpr, Value}, desugar}, pretty_printing::join_slice_to_string, typing::type_environment::TypecheckEnvironment
 };
 use std::{cell::RefCell, collections::{HashMap, HashSet}, fmt, rc::Rc};
 
@@ -138,10 +138,10 @@ impl TypeChecker {
             Expr::Tuple(elements) => {
                 let mut tuple_types = Vec::new();
 
-                for element in elements {
-                    self.check_expression(element, &ctx);
-                    if self.prune(&element.typ).is_never() { is_never = true }
-                    tuple_types.push(element.typ.clone());
+                for TupleElement { label, expr } in elements {
+                    self.check_expression(expr, &ctx);
+                    if self.prune(&expr.typ).is_never() { is_never = true }
+                    tuple_types.push(TupleType { label: label.clone(), typ: expr.typ.clone() });
                 }
 
                 TypeKind::Tup(tuple_types)
@@ -386,6 +386,21 @@ impl TypeChecker {
                 }
             },
 
+            
+            Expr::MemberAccess { left, member, resolved_index } => {
+                self.check_expression(left, &ctx);
+                if let TypeKind::Tup(elements) = self.prune(&left.typ) {
+                    let member_index = elements.iter().position(|elem| elem.label == *member);
+                    *resolved_index = member_index;
+
+                    match member_index {
+                        Some(i) => elements[i].typ.clone(),
+                        None => self.error(format!("member .{member} does not exist on tuple: {}", TypeKind::Tup(elements)))
+                    }
+                }
+                else { todo!() }
+            }
+
             Expr::TypePath(segments) => self.check_path_expression(segments),
 
             Expr::EnumDefinition { name, enums } => {
@@ -407,12 +422,12 @@ impl TypeChecker {
             Expr::While { .. } | Expr::Ensure { .. } => unreachable!("should be desugared already..."),
 
 
-            Expr::MemberAccess { .. } => todo!()
         };
 
         if inferred_type.is_never() { is_never = true }
 
-        if !is_never && (expr.typ.is_never() || matches!(old_ctx.expected_type, Some(TypeKind::Never))) {
+        // special case just for ensure expressions
+        if !is_never && (expr.typ.is_never()) {
             self.type_mismatch(&TypeKind::Never, &inferred_type);
         }
 
@@ -486,9 +501,9 @@ impl TypeChecker {
                 let mut can_fail = false;
                 let mut vars = Vec::new();
 
-                for element in elements {
-                    let pattern_type = self.check_binding_pattern(element, define_pattern_vars);
-                    tuple_types.push(pattern_type.typ);
+                for TupleMatchPattern { label, pattern } in elements {
+                    let pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
+                    tuple_types.push(TupleType { label: label.clone(), typ: pattern_type.typ });
                     vars.extend(pattern_type.vars);
                     if pattern_type.has_place { has_place = true; }
                     if pattern_type.can_fail { can_fail = true; }
@@ -686,7 +701,7 @@ impl TypeChecker {
                 self.unify_types(left_type, right_type);
                 let unified_type = self.prune(left_type);
                 match unified_type {
-                    TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup(_) | TypeKind::Void => TypeKind::Bool,
+                    TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup {.. } | TypeKind::Void => TypeKind::Bool,
                     // TypeKind::Inference(_) => TypeKind::Bool,
                     _ => self.error(format!("Cannot compare types {}.", unified_type))
                 }
@@ -841,7 +856,12 @@ impl TypeChecker {
                 self.error(format!("Cannot infer type {}.", pruned))
             }
             TypeKind::Arr(inner) => TypeKind::Arr(Box::new(self.finalize_type(inner))),
-            TypeKind::Tup(inners) => TypeKind::Tup(inners.iter_mut().map(|t| self.finalize_type(t)).collect()),
+            TypeKind::Tup(elements) => TypeKind::Tup(
+                elements
+                .iter_mut()
+                .map(|TupleType { label, typ }| TupleType { label: label.clone(), typ: self.finalize_type(typ) })
+                .collect()
+            ),
             TypeKind::Fn { param_types, return_type } => TypeKind::Fn {
                 param_types: param_types.iter_mut().map(|t| self.finalize_type(t)).collect(),
                 return_type: Box::new(self.finalize_type(return_type)),

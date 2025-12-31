@@ -4,7 +4,7 @@ pub enum TokenType {
     LeftParen, RightParen,      // ( )
     LeftBracket, RightBracket,  // [ ]
     LeftBrace, RightBrace,      // { }
-    Comma, Dot, Semicolon,      // , . ;
+    Comma, Semicolon,           // , ;
     Colon, ColonColon,          // : ::
 
     // Operators
@@ -38,6 +38,7 @@ pub enum TokenType {
     DotDot, DotDotLess,         // .. ..<
     DotDotDot,                  // ...
     Hashtag,
+    Dot(String),                //
 
     // Literals
     Identifier(String),

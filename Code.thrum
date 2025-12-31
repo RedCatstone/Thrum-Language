@@ -1,8 +1,5 @@
+let data = (.id = 1, .status = "ok");
 
-let x = 5
-
-ensure x == 2 else {
-    panic("noo!!")
+if case (.status = "ok", .id) = data {
+    print("{id}")
 }
-
-x

@@ -23,9 +23,11 @@ pub fn loop_over_every_ast_node(
             match &mut expr.expression {
                 Expr::Block(x)
                 | Expr::Array(x)
-                | Expr::Tuple(x)
                 | Expr::TemplateString(x) => {
                     exprs.extend(x);
+                }
+                Expr::Tuple(elements) => {
+                    for elem in elements { exprs.push(&mut elem.expr) }
                 }
                 Expr::Prefix { right: expr, operator: _ }
                 | Expr::Loop { body: expr, label: _ }
@@ -33,7 +35,7 @@ pub fn loop_over_every_ast_node(
                 | Expr::MutRef { expr }
                 | Expr::Return(expr)
                 | Expr::Break { expr, label: _ }
-                | Expr::MemberAccess { left: expr, member: _ } => {
+                | Expr::MemberAccess { left: expr, member: _, resolved_index: _ } => {
                     exprs.push(expr);
                 }
                 Expr::Infix { left: expr1, right: expr2, operator: _ }
@@ -89,10 +91,12 @@ pub fn loop_over_every_ast_node(
 
             match pattern {
                 MatchPattern::Array(elements)
-                | MatchPattern::Tuple(elements)
                 | MatchPattern::Or(elements)
                 | MatchPattern::EnumVariant { inner_patterns: elements, path: _, name: _ } => {
                     patterns.extend(elements);
+                }
+                MatchPattern::Tuple(elements) => {
+                    for elem in elements { patterns.push(&mut elem.pattern) }
                 }
                 MatchPattern::Binding { name: _, typ: _ }
                 | MatchPattern::Wildcard
@@ -142,12 +146,12 @@ pub fn desugar(program: &mut Vec<TypedExpr>) {
                 }
 
                 // turn 1 segment long template strings into literals
-                Expr::TemplateString(ref segments)
+                Expr::TemplateString(segments)
                 if segments.len() == 1 => {
                     if let Expr::Literal(Value::Str(string)) = &segments.first().unwrap().expression {
                         Expr::Literal(Value::Str(string.clone()))
                     }
-                    else { unreachable!() }
+                    else { Expr::TemplateString(segments) }
                 }
 
                 Expr::Infix { operator, left, right }
@@ -184,12 +188,12 @@ fn desugar_ensure(exprs: &mut Vec<TypedExpr>) {
     // {
     //     ensure case ?y = x else { return }
     //     print(y)
-    //     return true
+    //     ...
     // }
     // {
     //     if case ?y = x {
     //         print(y)
-    //         return true
+    //         ...
     //     }
     //     else { return }
     // }

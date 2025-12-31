@@ -9,10 +9,7 @@ pub struct TypedExpr {
 }
 impl From<Expr> for TypedExpr {
     fn from(expression: Expr) -> Self {
-        TypedExpr {
-            typ: TypeKind::ParserUnknown,
-            expression,
-        }
+        expression.into_with_type(TypeKind::ParserUnknown)
     }
 }
 impl Expr {
@@ -67,7 +64,7 @@ pub enum Expr {
 
     // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
     TemplateString(Vec<TypedExpr>),
-    Tuple(Vec<TypedExpr>),  // (1, 2)
+    Tuple(Vec<TupleElement>),  // (1, 2)
     Array(Vec<TypedExpr>),  // [1, 2]
 
     // x^
@@ -82,6 +79,7 @@ pub enum Expr {
     MemberAccess {
         left: Box<TypedExpr>,
         member: String,
+        resolved_index: Option<usize>,
     },
     // Option::Some
     TypePath(Vec<String>),
@@ -206,7 +204,7 @@ pub enum MatchPattern {
     Wildcard,  // _
     Or(Vec<MatchPattern>),
     Array(Vec<MatchPattern>),  // [...]
-    Tuple(Vec<MatchPattern>),  // (...)
+    Tuple(Vec<TupleMatchPattern>),  // (...)
     EnumVariant {
         path: Vec<String>, // std::Option
         name: String,   // Some
@@ -219,6 +217,21 @@ pub enum MatchPattern {
     },
 
     Place(PlaceExpr),
+}
+#[derive(Debug)]
+pub struct TupleElement {
+    pub label: String,
+    pub expr: TypedExpr,
+}
+#[derive(Debug, Clone)]
+pub struct TupleMatchPattern {
+    pub label: String,
+    pub pattern: MatchPattern,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleType {
+    pub label: String,
+    pub typ: TypeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -255,7 +268,7 @@ pub enum TypeKind {
     Bool,
 
     Arr(Box<TypeKind>),
-    Tup(Vec<TypeKind>),
+    Tup(Vec<TupleType>),
     Fn {
         param_types: Vec<TypeKind>,
         return_type: Box<TypeKind>,

@@ -1,12 +1,16 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{MatchPattern, EnumExpression, Expr, MatchArm, TypeKind, TypedExpr, Value}}};
+use crate::{lexing::tokens::TokenType, parsing::{Parser, ParserError, Precedence, ast_structure::{EnumExpression, Expr, MatchArm, MatchPattern, TupleElement, TypeKind, TypedExpr, Value}}};
 
 impl Parser {
     pub(super) fn parse_expression(&mut self, precedence: Precedence) -> Result<TypedExpr, ParserError> {
         // could be number, identifier, '-', 'let', ...
-        let mut left_expr = self.parse_prefix()?;
+        let left_expr = self.parse_prefix()?;
 
+        self.parse_expression_with_prefix(left_expr, precedence)
+    }
+
+    fn parse_expression_with_prefix(&mut self, mut left_expr: TypedExpr, precedence: Precedence) -> Result<TypedExpr, ParserError> {
         // core Pratt parser loop
         // it continues as long as the next token is an infix operator with a higher precedence than the current level.
         while precedence < self.peek_precedence() {
@@ -48,15 +52,9 @@ impl Parser {
                 Ok(Expr::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) }.into())
             },
 
-            TokenType::RightArrow => {
-                let params = self.convert_param_exprs_into_patterns(left_expr)?;
-                let body = self.parse_expression(Precedence::Lowest)?.into();
-                Ok(Expr::Closure { params, return_type: TypeKind::ParserUnknown, body }.into())
-            },
-
-            TokenType::Dot => {
-                let member = self.expect_identifier(&format!("after '{}'", TokenType::Dot))?;
-                Ok(Expr::MemberAccess { left: Box::new(left_expr), member }.into())
+            TokenType::Dot(member) => {
+                // support both expr.member and expr.3
+                Ok(Expr::MemberAccess { left: Box::new(left_expr), member, resolved_index: None }.into())
             },
 
             TokenType::Colon => {
@@ -136,19 +134,36 @@ impl Parser {
 
             TokenType::LeftParen => {
                 // empty tuple case '()'
-                if self.optional_token(TokenType::RightParen) { return Ok(Expr::Tuple(Vec::new()).into()); }
+                if self.optional_token(TokenType::RightParen) {
+                    return Ok(Expr::Tuple(vec![]).into());
+                }
 
-                let first_expr = self.parse_expression(Precedence::Lowest)?;
+                let first_elem_labeled = matches!(self.peek().token_type, TokenType::Dot(_));
+                let first_elem = self.parse_tuple_element("0".to_string())?;
+
                 if self.optional_token(TokenType::Comma) {
-                    // , => Tuple!
-                    let mut tuple_body = vec![first_expr];
-                    tuple_body.extend(self.parse_comma_seperated_expressions(TokenType::RightParen, "to close the tuple")?);
+                    // , means its a tuple!
+                    // e.g. (1, 2) (1,) (.x = 1,)
+                    let mut tuple_body = vec![first_elem];
+                    tuple_body.extend(
+                        self.parse_comma_separated(
+                            TokenType::RightParen,
+                            |p, i| {
+                                p.parse_tuple_element((i+1).to_string())
+                            },
+                            "to close the tuple"
+                        )?
+                    );
+                    tuple_body.sort_by(|a, b| a.label.cmp(&b.label));
                     Ok(Expr::Tuple(tuple_body).into())
                 }
                 else {
                     // normal grouped expression
                     self.expect_token(TokenType::RightParen, "to close the grouped expression")?;
-                    Ok(first_expr)
+                    if first_elem_labeled {
+                        Err(self.error("If this is supposed to be a tuple, use a trailing comma."))
+                    }
+                    else { Ok(first_elem.expr) }
                 }
             },
 
@@ -219,9 +234,7 @@ impl Parser {
             },
 
             TokenType::While => {
-                let label = if self.optional_token(TokenType::Hashtag) {
-                    self.expect_identifier("to name the break label.")?
-                } else { "while".to_string() };
+                let label = self.parse_optional_label().unwrap_or("while".to_string());
 
                 let condition = Box::new(self.parse_expression(Precedence::Lowest)?);
 
@@ -232,9 +245,7 @@ impl Parser {
             },
 
             TokenType::Loop => {
-                let label = if self.optional_token(TokenType::Hashtag) {
-                    self.expect_identifier("to name the break label.")?
-                } else { "loop".to_string() };
+                let label = self.parse_optional_label().unwrap_or("loop".to_string());
 
                 self.expect_token( TokenType::LeftBrace, "to open the loop block")?;
                 let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
@@ -267,7 +278,7 @@ impl Parser {
                 self.expect_token( TokenType::LeftBrace, "to open the enum definition block")?;
                 let enums = self.parse_comma_separated(
                     TokenType::RightBrace,
-                    |p| p.parse_enum_definition_variant(),
+                    |p, _| p.parse_enum_definition_variant(),
                     "to close the enum definition block"
                 )?;
                 Ok(Expr::EnumDefinition { name, enums }.into())     
@@ -292,6 +303,23 @@ impl Parser {
                 Ok(Expr::FnDefinition { name, params, return_type, body }.into())
             },
 
+            TokenType::Pipe => {
+                // Closure!
+                let params = self.parse_binding_pattern_list(
+                    TokenType::RightArrow,
+                    true, "to close the fn definition parameter list"
+                )?;
+
+                let return_type = if self.optional_token(TokenType::Colon) {
+                    self.parse_type_expression()?
+                }
+                else { TypeKind::ParserUnknown };
+                
+                let body = Rc::new(self.parse_expression(Precedence::Lowest)?);
+
+                Ok(Expr::Closure { params, return_type, body }.into())
+            }
+
             TokenType::Return => {
                 let return_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
                     Box::new(self.parse_expression(Precedence::Lowest)?)
@@ -301,9 +329,7 @@ impl Parser {
             },
 
             TokenType::Break => {
-                let label = if self.optional_token(TokenType::Hashtag) {
-                    Some(self.expect_identifier("to name the break label.")?)
-                } else { None };
+                let label = self.parse_optional_label();
 
                 let break_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
                     Box::new(self.parse_expression(Precedence::Lowest)?)
@@ -356,7 +382,7 @@ impl Parser {
             TokenType::StarStar => Precedence::Power,
             TokenType::Exclamation | TokenType::BitNot | TokenType::DotDotDot => Precedence::Prefix,
             TokenType::Caret => Precedence::Postfix,
-            TokenType::LeftParen | TokenType::LeftBracket | TokenType::Dot | TokenType::ColonColon | TokenType::QuestDot => Precedence::CallIndex,
+            TokenType::LeftParen | TokenType::LeftBracket | TokenType::Dot(_) | TokenType::ColonColon | TokenType::QuestDot => Precedence::CallIndex,
             _ => Precedence::Lowest,
         }
     }
@@ -415,7 +441,7 @@ impl Parser {
         let inner_types = if self.optional_token(TokenType::LeftParen) {
             self.parse_comma_separated(
                 TokenType::RightParen,
-                |p| p.parse_binding_match_pattern(true),
+                |p, _| p.parse_binding_match_pattern(true),
                 "to close the enum variant tuple"
             )?
         }
@@ -432,9 +458,27 @@ impl Parser {
         // '[1, 2, 3]',   '(1, 2)',   dict { 1, 2 }
         self.parse_comma_separated(
             end_token,
-            |p| p.parse_expression(Precedence::Lowest),
+            |p, _| p.parse_expression(Precedence::Lowest),
             error_msg
         )
+    }
+
+    fn parse_tuple_element(&mut self, default_label: String) -> Result<TupleElement, ParserError> {
+        if let Some(label) = self.optional_dot_token() {
+            // named tuple element
+            let expr = if self.optional_token(TokenType::Equal) {
+                    self.parse_expression(Precedence::Lowest)?
+                }
+                else {
+                    Expr::Identifier { name: label.clone() }.into()
+                };
+            
+            Ok(TupleElement { label, expr })
+        }
+        else {
+            let expr = self.parse_expression(Precedence::Lowest)?;
+            Ok(TupleElement { label: default_label, expr })
+        }
     }
 
 

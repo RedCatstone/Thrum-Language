@@ -258,6 +258,16 @@ impl VM {
                 }
 
 
+                OpCode::TupGet => {
+                    let index = VM::read_next_opnum(frame, chunk);
+
+                    let Value::Tup(tup) = self.value_stack.pop().unwrap()
+                    else { unreachable!() };
+
+                    let indexed = tup[index].clone();
+                    self.value_stack.push(indexed);
+                }
+
                 OpCode::ArrGet => {
                     let index = self.value_stack.pop().unwrap();
                     let arr = self.value_stack.pop().unwrap();

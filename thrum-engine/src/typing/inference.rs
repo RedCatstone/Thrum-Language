@@ -38,10 +38,15 @@ impl TypeChecker {
             | (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
                 self.unify_types(inner_a, inner_b);
             }
-            (TypeKind::Tup(inners_a), TypeKind::Tup(inners_b)) => {
-                if inners_a.len() == inners_b.len() {
-                    for (ia, ib) in inners_a.iter().zip(inners_b.iter()) {
-                        self.unify_types(ia, ib);
+            (TypeKind::Tup(elements_a), TypeKind::Tup(elements_b)) => {
+                if elements_a.len() == elements_b.len() {
+                    for (ia, ib) in elements_a.iter().zip(elements_b.iter()) {
+                        // types have to match
+                        self.unify_types(&ia.typ, &ib.typ);
+                        // labels can't mismatch (if both labels are non number labels)
+                        if ia.label != ib.label && [ia, ib].iter().all(|x| x.label.chars().any(|c| !c.is_ascii_digit())) {
+                                self.type_mismatch(&type_a, &type_b);
+                            } 
                     }
                 }
                 else { self.type_mismatch(&type_a, &type_b); }

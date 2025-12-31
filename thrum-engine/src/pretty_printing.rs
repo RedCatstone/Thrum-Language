@@ -1,7 +1,7 @@
 use std::fmt;
 use crate::{
     lexing::tokens::{LexerToken, TokenType},
-    parsing::ast_structure::{MatchPattern, Expr, PlaceExpr, TypeKind, TypedExpr, Value},
+    parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TupleType, TypeKind, TypedExpr, Value},
     vm_compiling::{BytecodeChunk, OpCode}, vm_evaluating::{CallFrame, VM}
 };
 
@@ -15,6 +15,7 @@ impl fmt::Display for TokenType {
             TokenType::Identifier(s) => write!(f, "ident<{}>", s),
             TokenType::Number(n) => write!(f, "{}", n),
             TokenType::StringFrag(s) => write!(f, "\"{}\"", s),
+            TokenType::Dot(s) => write!(f, ".{}", s),
             TokenType::Bool(b) => write!(f, "{}", b),
             TokenType::Null => write!(f, "null"),
 
@@ -26,7 +27,6 @@ impl fmt::Display for TokenType {
             TokenType::LeftBrace => write!(f, "{{"),
             TokenType::RightBrace => write!(f, "}}"),
             TokenType::Comma => write!(f, ","),
-            TokenType::Dot => write!(f, "."),
             TokenType::Semicolon => write!(f, ";"),
             TokenType::Colon => write!(f, ":"),
             TokenType::ColonColon => write!(f, "::"),
@@ -136,7 +136,7 @@ impl fmt::Display for TypeKind {
             TypeKind::ParserUnknown => write!(f, "unknown"),
             TypeKind::TypeError => write!(f, "error"),
             TypeKind::Arr(typ) => write!(f, "arr<{}>", typ),
-            TypeKind::Tup(types) => write!(f, "({})", join_slice_to_string(types, ", ")),
+            TypeKind::Tup(elements) => write!(f, "({})", join_slice_to_string(elements, ", ")),
             TypeKind::Fn { param_types, return_type } => {
                 write!(f, "fn<({}) -> {}>", join_slice_to_string(param_types, ", "), return_type)
             }
@@ -152,6 +152,22 @@ impl fmt::Display for TypeKind {
             TypeKind::Inference(id) => write!(f, "?{}", id),
             TypeKind::Never => write!(f, "never"),
         }
+    }
+}
+
+impl fmt::Display for TupleElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".{} = {:?}", self.label, self.expr)
+    }
+}
+impl fmt::Display for TupleType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".{} = {:?}", self.label, self.typ)
+    }
+}
+impl fmt::Display for TupleMatchPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, ".{} = {:?}", self.label, self.pattern)
     }
 }
 
@@ -221,12 +237,18 @@ fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, pref
                 format_recursive(&arm.body, f, indent + 1, &format!("pattern: {:?} arm: ", arm.pattern), i == arms.len() - 1)?;
             }
         }
-        Expr::Array(elements) | Expr::Tuple(elements) => {
-            let name = if let Expr::Array(_) = eat.expression { "Array" } else { "Tuple" };
-            writeln!(f, "{i}{branch}{prefix}{name} {type_info}")?;
+        Expr::Array(elements) => {
+            writeln!(f, "{i}{branch}{prefix}Array {type_info}")?;
             let len = elements.len();
             for (idx, el) in elements.iter().enumerate() {
                 format_recursive(el, f, indent + 1, "", idx == len - 1)?;
+            }
+        }
+        Expr::Tuple(elements) => {
+            writeln!(f, "{i}{branch}{prefix}Tuple {type_info}")?;
+            let len = elements.len();
+            for (idx, el) in elements.iter().enumerate() {
+                format_recursive(&el.expr, f, indent + 1, &format!("{} = ", el.label), idx == len - 1)?;
             }
         }
         Expr::Loop { body, label } => {
@@ -311,7 +333,7 @@ impl fmt::Display for BytecodeChunk {
         fn how_many_operands_for_op_code(op: &OpCode) -> usize {
             match op {
                 OpCode::ArrUnpackCheckJump | OpCode::LocalsFree => 2,
-                OpCode::ConstGet | OpCode::LocalGet | OpCode::LocalSet | OpCode::StrTemplate | OpCode::ArrCreate
+                OpCode::ConstGet | OpCode::LocalGet | OpCode::LocalSet | OpCode::StrTemplate | OpCode::ArrCreate | OpCode::ArrGet | OpCode::TupGet
                 | OpCode::TupCreate | OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpBack | OpCode::CallFn
                 | OpCode::MakePointer => 1,
                 _ => 0,
