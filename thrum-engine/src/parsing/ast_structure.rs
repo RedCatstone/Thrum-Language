@@ -1,35 +1,57 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cmp::{self, min}, collections::HashMap, rc::Rc};
 
-use crate::{lexing::tokens::TokenType, nativelib::NativeFn};
+use strum_macros::IntoStaticStr;
 
+use crate::{lexing::tokens::TokenType, nativelib::NativeFn, typing::TypeID};
 
-pub struct TypedExpr {
-    pub typ: TypeKind,
+pub struct ExprInfo {
     pub expression: Expr,
-}
-impl From<Expr> for TypedExpr {
-    fn from(expression: Expr) -> Self {
-        expression.into_with_type(TypeKind::ParserUnknown)
-    }
+    pub typ: TypeKind,
+
+    // where its located in the file, for errors
+    pub span: Span,
 }
 impl Expr {
-    pub fn into_with_type(self, typ: TypeKind) -> TypedExpr {
-        TypedExpr {
-            typ,
-            expression: self,
-        }
+    pub fn to_info(self, span: Span) -> ExprInfo {
+        self.to_info_with_type(span, TypeKind::ParserUnknown)
+    }
+    pub fn to_info_with_type(self, span: Span, typ: TypeKind) -> ExprInfo {
+        ExprInfo { expression: self, span, typ }
     }
 }
-impl From<Expr> for Box<TypedExpr> {
-    fn from(expr: Expr) -> Self {
-        Box::new(expr.into())
+
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Span {
+    pub line: usize,
+    pub byte_offset: usize,
+    pub length: usize,
+}
+impl Span {
+    pub fn merge(self, other: Span) -> Span {
+        match self.byte_offset.cmp(&other.byte_offset) {
+            cmp::Ordering::Less => Span {
+                line: self.line,
+                byte_offset: self.byte_offset,
+                length: (other.byte_offset + other.length) - self.byte_offset
+            },
+            cmp::Ordering::Greater => other.merge(self),
+            cmp::Ordering::Equal => unreachable!("tried to merge 2 spans with the same byte_offset")
+        }
+    }
+    pub fn to_0_width_right(self) -> Span {
+        Span {
+            line: self.line,
+            byte_offset: self.byte_offset + self.length,
+            length: 0
+        }
     }
 }
 
 
 
 // Everything is an expression.
-#[derive(Debug)]
+#[derive(Debug, IntoStaticStr)]
 pub enum Expr {
     // Primary expressions
     Literal(Value),
@@ -40,44 +62,44 @@ pub enum Expr {
     Assign {  // x = 2  or  let x = 2
         pattern: Box<MatchPattern>,
         extra_operator: TokenType,
-        value: Option<Box<TypedExpr>>,
+        value: Option<Box<ExprInfo>>,
     },
 
     Case {
         pattern: Box<MatchPattern>,
-        value: Box<TypedExpr>,
+        value: Box<ExprInfo>,
     },
 
     // { ... }
-    Block(Vec<TypedExpr>),
+    Block(Vec<ExprInfo>),
 
     // Operator expressions
     Prefix {  // !a
         operator: TokenType,
-        right: Box<TypedExpr>,
+        right: Box<ExprInfo>,
     },
     Infix {  // a + b
         operator: TokenType,
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
+        left: Box<ExprInfo>,
+        right: Box<ExprInfo>,
     },
 
     // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
-    TemplateString(Vec<TypedExpr>),
+    TemplateString(Vec<ExprInfo>),
     Tuple(Vec<TupleElement>),  // (1, 2)
-    Array(Vec<TypedExpr>),  // [1, 2]
+    Array(Vec<ExprInfo>),  // [1, 2]
 
     // x^
     MutRef {
-        expr: Box<TypedExpr>,
+        expr: Box<ExprInfo>,
     },
     Deref {
-        expr: Box<TypedExpr>,
+        expr: Box<ExprInfo>,
     },
     
     // arr.len
     MemberAccess {
-        left: Box<TypedExpr>,
+        left: Box<ExprInfo>,
         member: String,
         resolved_index: Option<usize>,
     },
@@ -85,40 +107,41 @@ pub enum Expr {
     TypePath(Vec<String>),
 
     Call {  // x(1, 2)
-        callee: Box<TypedExpr>,
-        arguments: Vec<TypedExpr>,
+        callee: Box<ExprInfo>,
+        arguments: Vec<ExprInfo>,
     },
 
     Index {  // arr[1]
-        left: Box<TypedExpr>,
-        index: Box<TypedExpr>,
+        left: Box<ExprInfo>,
+        index: Box<ExprInfo>,
     },
 
     If {  // if true { ... } else ...
-        condition: Box<TypedExpr>,
-        consequence: Box<TypedExpr>,
-        alternative: Box<TypedExpr>,  // void if not present
+        condition: Box<ExprInfo>,
+        then: Box<ExprInfo>,
+        alt: Box<ExprInfo>,  // void if not present
     },
     
     Ensure {  // ensure true else { ... }
-        condition: Box<TypedExpr>,
-        alternative: Box<TypedExpr>,
+        condition: Box<ExprInfo>,
+        alt: Box<ExprInfo>,
+        then: Box<ExprInfo>
     },
     
     Match {  // match response { 2 -> "success", _ -> "nope." }
-        match_value: Box<TypedExpr>,
+        match_value: Box<ExprInfo>,
         arms: Vec<MatchArm>,
     },
 
     // sugar
     While {
-        condition: Box<TypedExpr>,
-        body: Box<TypedExpr>,
+        condition: Box<ExprInfo>,
+        body: Box<ExprInfo>,
         label: String,
     },
 
     Loop {
-        body: Box<TypedExpr>,
+        body: Box<ExprInfo>,
         label: String,
     },
 
@@ -131,19 +154,19 @@ pub enum Expr {
         name: String,
         params: Vec<MatchPattern>,
         return_type: TypeKind,
-        body: Rc<TypedExpr>,
+        body: Rc<ExprInfo>,
     },
 
     Closure {  // x -> x**2
         params: Vec<MatchPattern>,
         return_type: TypeKind,
-        body: Rc<TypedExpr>,
+        body: Rc<ExprInfo>,
     },
 
-    Return(Box<TypedExpr>),
+    Return(Box<ExprInfo>),
     Break {
         label: Option<String>,
-        expr: Box<TypedExpr>,
+        expr: Box<ExprInfo>,
     },
     Continue {
         label: Option<String>,
@@ -151,8 +174,6 @@ pub enum Expr {
 
     // Semicolons are void expressions.
     Void,
-
-    ParserTempTypeAnnotation(MatchPattern),
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +234,7 @@ pub enum MatchPattern {
     Literal(Value),
     Conditional {
         pattern: Box<MatchPattern>,
-        body: Rc<TypedExpr>,
+        body: Rc<ExprInfo>,
     },
 
     Place(PlaceExpr),
@@ -221,7 +242,7 @@ pub enum MatchPattern {
 #[derive(Debug)]
 pub struct TupleElement {
     pub label: String,
-    pub expr: TypedExpr,
+    pub expr: ExprInfo,
 }
 #[derive(Debug, Clone)]
 pub struct TupleMatchPattern {
@@ -238,7 +259,7 @@ pub struct TupleType {
 pub enum PlaceExpr {
     Identifier(String),
     Deref(String),
-    Index { left: Rc<TypedExpr>, index: Rc<TypedExpr> },
+    Index { left: Rc<ExprInfo>, index: Rc<ExprInfo> },
 }
 
 
@@ -246,7 +267,7 @@ pub enum PlaceExpr {
 #[derive(Debug)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
-    pub body: TypedExpr,
+    pub body: ExprInfo,
 }
 
 #[derive(Debug)]
@@ -283,7 +304,7 @@ pub enum TypeKind {
 
     MutPointer(Box<TypeKind>),
 
-    Inference(usize),
+    Inference(TypeID),
     TypeError,
     
     // 'let', 'FnDefinition', empty block, sometimes if statement
@@ -298,6 +319,16 @@ pub enum TypeKind {
 impl TypeKind {
     pub fn is_never(&self) -> bool {
         *self == Self::Never
+    }
+
+    pub fn prune(&self, type_lookup: &HashMap<TypeID, TypeKind>) -> TypeKind {
+        if let TypeKind::Inference(id) = self
+            && let Some(entry) = type_lookup.get(id) {
+                let pruned = entry.prune(&type_lookup);
+                // type_lookup.insert(*id, pruned.clone());
+                pruned
+            }
+        else { self.clone() }
     }
 }
 

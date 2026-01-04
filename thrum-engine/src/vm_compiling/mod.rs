@@ -1,6 +1,6 @@
 use num_enum::TryFromPrimitive;
 
-use crate::{lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{Expr, MatchArm, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TypeKind, TypedExpr, Value}};
+use crate::{Program, lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{Expr, ExprInfo, MatchArm, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TypeKind, Value}};
 
 
 #[repr(u8)]
@@ -58,7 +58,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn compile_program(program: &[TypedExpr]) -> Vec<BytecodeChunk> {
+    pub fn compile_program(program: &mut Program) {
         let mut bytecode_chunks = Vec::new();
 
         let library = get_native_lib();
@@ -67,13 +67,14 @@ impl Compiler {
 
         CompileFunction::compile_function(
             "<main>".to_string(),
-            program,
+            // the ast will be gone after compilation!!!
+            &std::mem::take(&mut program.ast),
             &[],
             &mut bytecode_chunks,
             &mut locals,
             &library,
         );
-        bytecode_chunks
+        program.compiled_bytecode = bytecode_chunks;
     }
 
     fn load_prelude_into_locals_vec(module: &ThrumModule, locals: &mut Vec<Local>) {
@@ -138,7 +139,7 @@ struct LoopInfo {
 impl<'a> CompileFunction<'a> {
     fn compile_function(
         name: String,
-        program: &[TypedExpr],
+        program: &[ExprInfo],
         params: &[MatchPattern],
         bytecode_chunks: &mut Vec<BytecodeChunk>,
         locals: &mut Vec<Vec<Local>>,
@@ -173,7 +174,7 @@ impl<'a> CompileFunction<'a> {
         compile_function.curr_bytecode_index
     }
 
-    fn compile_expression(&mut self, expr: &TypedExpr) {
+    fn compile_expression(&mut self, expr: &ExprInfo) {
         let start_temps = self.cur_temp_amount;
 
         match &expr.expression {
@@ -195,8 +196,7 @@ impl<'a> CompileFunction<'a> {
                 self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
             }
             Expr::Tuple(exprs) => {
-                for TupleElement { label, expr } in exprs {
-                    // if label.is_some() { panic!("labels are supposed to be gone :(((") }
+                for TupleElement { label: _, expr } in exprs {
                     self.compile_expression(expr);
                 }
                 self.push_op_with_opnum(OpCode::TupCreate, exprs.len());
@@ -307,7 +307,7 @@ impl<'a> CompileFunction<'a> {
             }
 
 
-            Expr::If { condition, consequence, alternative } => {
+            Expr::If { condition, then: consequence, alt: alternative } => {
                 // what it should look like:
                 // ...condition...
                 // JumpIfFalse 2
@@ -738,7 +738,7 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_block_expression(&mut self, body: &[TypedExpr]) {
+    fn compile_block_expression(&mut self, body: &[ExprInfo]) {
         // define FnDefinitions first
         // they will actually be globals, so that another CompileFunction can also call it
         for expr in body {
@@ -798,8 +798,7 @@ impl<'a> CompileFunction<'a> {
                 self.push_op(OpCode::TupUnpack);
                 self.cur_temp_amount += patterns.len() - 1;
 
-                for TupleMatchPattern { label, pattern } in patterns.iter().rev() {
-                    // if label.is_some() { panic!("labels are supposed to be gone :(((") }
+                for TupleMatchPattern { label: _, pattern } in patterns.iter().rev() {
                     self.compile_binding_pattern(pattern, failure_jumps);
                 }
             }
@@ -908,7 +907,7 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right: &TypedExpr) {
+    fn compile_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right: &ExprInfo) {
         if TokenType::EqualEqual == *operator {
             self.compile_expression(right);
             self.push_op(OpCode::CmpEqual);

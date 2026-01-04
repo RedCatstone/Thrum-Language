@@ -20,7 +20,7 @@ impl RuntimeError {
 macro_rules! run_infix_op {
     ($self:expr, $left_pattern:pat, $right_pattern:pat => $result_expr:expr) => {
         {
-            if $self.value_stack.len() < 2 { unreachable!("Stack underflow for infix operation.") }
+            // if $self.value_stack.len() < 2 { unreachable!("Stack underflow for infix operation.") }
             let right = $self.value_stack.pop().unwrap();
             let left = $self.value_stack.pop().unwrap();
             match (left, right) {
@@ -34,7 +34,7 @@ macro_rules! run_infix_op {
 macro_rules! run_prefix_op {
     ($self:expr, $operand_pattern:pat => $result_expr:expr) => {
         {
-            if $self.value_stack.is_empty() { unreachable!("Stack underflow for prefix operation.") }
+            // if $self.value_stack.is_empty() { unreachable!("Stack underflow for prefix operation.") }
             let operand = $self.value_stack.pop().unwrap();
             match operand {
                 // Value::Num(n) => $self.value_stack.push(Value::Num(-n))

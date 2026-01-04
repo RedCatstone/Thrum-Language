@@ -1,3 +1,5 @@
+use crate::parsing::ast_structure::Span;
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum TokenType {
     // Basic
@@ -64,9 +66,19 @@ pub enum TokenType {
 #[derive(Clone, Debug)]
 pub struct LexerToken {
     pub token_type: TokenType,
-    pub byte_start: usize,
-    pub line: usize,
-    pub length: usize,
+
+    // where its located in the file, for errors
+    pub span: Span,
+}
+impl LexerToken {
+    pub const END_TOKEN: LexerToken = LexerToken {
+        token_type: TokenType::EndOfFile,
+        span: Span {
+            line: usize::MAX,
+            byte_offset: usize::MAX,
+            length: 0,
+        }
+    };
 }
 
 

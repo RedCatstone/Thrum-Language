@@ -1,17 +1,17 @@
 use std::rc::Rc;
 
-use crate::{lexing::tokens::TokenType, parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, TypeKind, TypedExpr, Value}};
+use crate::{Program, lexing::tokens::TokenType, parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, ExprInfo, Value}};
 
 
 
 
 
 pub fn loop_over_every_ast_node(
-    program: &mut [TypedExpr],
-    expr_closure: impl Fn(TypedExpr) -> TypedExpr,
+    program: &mut [ExprInfo],
+    expr_closure: impl Fn(ExprInfo) -> ExprInfo,
     pattern_closure: impl Fn(MatchPattern) -> MatchPattern,
 ) {
-    let mut exprs: Vec<&mut TypedExpr> = program.iter_mut().collect();
+    let mut exprs: Vec<&mut ExprInfo> = program.iter_mut().collect();
     let mut patterns: Vec<&mut MatchPattern> = Vec::new();
     loop {
         if let Some(expr) = exprs.pop() {
@@ -48,7 +48,7 @@ pub fn loop_over_every_ast_node(
                     patterns.push(pattern);
                     if let Some(val) = value { exprs.push(val); }
                 }
-                Expr::If { condition, consequence, alternative } => {
+                Expr::If { condition, then: consequence, alt: alternative } => {
                     exprs.push(condition);
                     exprs.push(consequence);
                     exprs.push(alternative);
@@ -79,7 +79,7 @@ pub fn loop_over_every_ast_node(
 
                 // types should already be finalized
                 Expr::Literal(_) | Expr::Identifier { name: _ } | Expr::TypePath(_) | Expr::EnumDefinition{ name: _, enums: _ } | Expr::Continue { label: _ }
-                | Expr::Void | Expr::ParserTempTypeAnnotation(_) => { /* already finalized */ }
+                | Expr::Void => { /* already finalized */ }
             }
         }
 
@@ -125,11 +125,11 @@ pub fn loop_over_every_ast_node(
 
 
 
-pub fn desugar(program: &mut Vec<TypedExpr>) {
-    desugar_ensure(program);
+pub fn desugar_after_parsing(program: &mut Program) {
+    desugar_ensure(&mut program.ast);
 
     loop_over_every_ast_node(
-        program,
+        &mut program.ast,
         |expr| {
             match expr.expression {
                 // turn while loops into normal loops with a conditional break
@@ -139,8 +139,8 @@ pub fn desugar(program: &mut Vec<TypedExpr>) {
                         label: while_label,
                         body: Expr::If {
                             condition: while_condition,
-                            consequence: while_body,
-                            alternative: Expr::Break { expr: Expr::Void.into(), label: None }.into()
+                            then: while_body,
+                            alt: Expr::Break { expr: Expr::Void.into(), label: None }.into()
                         }.into()
                     }
                 }
@@ -177,14 +177,21 @@ pub fn desugar(program: &mut Vec<TypedExpr>) {
                 // Do nothing to other nodes
                 other => other
             }
-            .into_with_type(expr.typ)
+            .to_info_with_type(expr.typ)
         },
         |pattern| { pattern }
     );
 }
 
 
-fn desugar_ensure(exprs: &mut Vec<TypedExpr>) {
+
+// fn desugar_after_typing(program: &mut [ExprInfo]) {
+
+// }
+
+
+
+fn desugar_ensure(exprs: &mut Vec<ExprInfo>) {
     // {
     //     ensure case ?y = x else { return }
     //     print(y)
@@ -200,15 +207,9 @@ fn desugar_ensure(exprs: &mut Vec<TypedExpr>) {
     if let Some(ensure_index) = exprs.iter().position(|x| matches!(x.expression, Expr::Ensure { .. })) {
         let exprs_after_ensure = exprs.split_off(ensure_index + 1);
 
-        let Expr::Ensure { condition, mut alternative } = exprs.pop().unwrap().expression
+        let Expr::Ensure { mut then, .. } = exprs.pop().unwrap().expression
         else { unreachable!() };
 
-        alternative.typ = TypeKind::Never;
-
-        exprs.push(Expr::If {
-            condition,
-            consequence: Box::new(Expr::Block(exprs_after_ensure).into()),
-            alternative
-        }.into());
+        then.expression = Expr::Block(exprs_after_ensure).into();
     }
 }

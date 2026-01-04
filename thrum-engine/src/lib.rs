@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
-use crate::{parsing::ast_structure::Value, pretty_printing::join_slice_to_string, vm_compiling::Compiler, vm_evaluating::VM};
+use crate::{lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{ExprInfo, TypeKind, Value}, pretty_printing::{format_program_error, join_slice_to_string}, typing::TypeID, vm_compiling::{BytecodeChunk, Compiler}, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod parsing;
@@ -13,67 +13,125 @@ pub mod vm_evaluating;
 
 
 
+#[derive(Debug, PartialEq)]
+pub enum CodeResultError {
+    LexerError,
+    ParserError,
+    TypecheckError,
+    RuntimeError,
+}
 
-pub fn run_code(source: &str) -> Result<Value, ()> {
-    // tokenizing
-    let (tokens, lexer_errors) = lexing::Lexer::tokenize_code(source);
-    println!("\n--- Lexer Tokens --- \n{:?}", tokens);
-    if !lexer_errors.is_empty() {
-        println!("\n--- Lexer Errors ---\n{}", join_slice_to_string(&lexer_errors, "\n"));
-        return Err(());
+
+pub struct ProgramError {
+    pub line: usize,
+    pub byte_offset: usize,
+    pub typ: ErrType,
+}
+
+
+pub enum ErrType {
+    LexerTilda,
+    LexerUnexpectedCharacter(char),
+    LexerUnterminatedString,
+    LexerNumberParseError(String),
+
+    ParserExpectToken(TokenType, String, TokenType),
+    ParserUnexpectedExpression,
+    ParserExpectedAnExpression,
+    ParserUnexpectedPathToken,
+    ParserPatternInvalidSyntax,
+    ParserPatternTemplateString,
+
+    TyperMismatch(TypeKind, TypeKind),
+    TyperNameAlreadyDefined(String),
+    TyperUndefinedIdentifier(String),
+    TyperCantInferType(TypeKind),
+    TyperPatternDoesntCoverAllCases(Vec<String>),
+    TyperFailableLetPattern,
+    TyperFailableFnParamPatterns,
+    TyperFnParamPlacePatterns,
+    TyperInvalidBindingCaseExpr,
+    TyperBreakOutsideLoop,
+    TyperUndefinedLoopLabel(String, Vec<String>),
+    TyperTooManyArguments(usize, usize),
+    TyperCantCallNonFnType(TypeKind),
+    TyperTupleDoesntHaveMember(TypeKind, String),
+    TyperInvalidOperatorOnType(TokenType, TypeKind),
+    TyperPatternNeverType,
+    TyperOrPatternBindsVarsTooMuch(Vec<String>),
+    TyperOrPatternDoesntBindVars(Vec<String>),
+    TyperPatternVarBoundTwice(Vec<String>),
+
+    DefaultString(String),
+}
+
+
+#[derive(Default)]
+pub struct Program<'a> {
+    source_code: &'a str,
+    lexer_tokens: Vec<LexerToken>,
+    ast: Vec<ExprInfo>,
+    type_lookup: HashMap<TypeID, TypeKind>,
+    compiled_bytecode: Vec<BytecodeChunk>,
+
+    errors: Vec<ProgramError>,
+}
+impl<'a> Program<'a> {
+    pub fn stage_complete(&mut self, stage: &str) -> bool {
+        println!("--- {stage} Stage Complete! ---");
+
+        let print_stages = vec!["Lexing", "Parsing", /* "Desugar after Parsing", */ "Typechecking", /* "Compiling" */];
+
+        if print_stages.contains(&stage) {
+            println!("{}\n", self);
+        }
+
+        if !self.errors.is_empty() {
+            println!("--- {stage} Errors ---\n{}", self.errors.iter().map(|e| format_program_error(e, self) + "\n").collect::<String>());
+            false
+        }
+        else { true }
+    }
+}
+
+
+
+
+
+
+
+
+
+pub fn run_code(source_code: &str) -> Result<Value, CodeResultError> {
+    let mut program = Program { source_code, ..Default::default() };
+
+    lexing::tokenize_code(&mut program);
+    if !program.stage_complete("Lexing") {
+        return Err(CodeResultError::LexerError)
     }
 
-    // AST parsing
-    let (mut program, parser_errors) = parsing::Parser::parse_program(tokens);
-    println!("\n--- Parsed Program ---{:#?}", program);
-    if !parser_errors.is_empty() {
-        println!("\n--- Parser Errors ---\n{}", join_slice_to_string(&parser_errors, "\n"));
-        return Err(());
+    parsing::parse_program(&mut program);
+    if !program.stage_complete("Parsing") {
+        return Err(CodeResultError::ParserError)
     }
 
-
-    parsing::desugar::desugar(&mut program);
-    println!("\n--- Desugared ---{:#?}", program);
-
-
-    // Type checking!
-    println!("--- Typed AST ---");
-    let type_errors = typing::TypeChecker::typecheck_program(&mut program);
-    println!("{:#?}", program);
-    if !type_errors.is_empty() {
-        println!("--- Type Errors ---\n{}", join_slice_to_string(&type_errors, "\n"));
-        return Err(());
+    parsing::desugar::desugar_after_parsing(&mut program);
+    if !program.stage_complete("Desugar after Parsing") {
+        unreachable!()
     }
-    else { println!("\n--- Type Check Passed ---"); }
+
+    typing::typecheck_program(&mut program);
+    if !program.stage_complete("Typechecking") {
+        return Err(CodeResultError::TypecheckError)
+    }
+
+    Compiler::compile_program(&mut program);
+    program.stage_complete("Compiling");
 
 
-
-    // evaluating!
-    // println!("--- Executing Program ---");
-    // let mut evaluator = ast_walker::Executor::new();
-    // match evaluator.execute_program(&program) {
-    //     Ok(result) => {
-    //         println!("--- Execution Successfull ---");
-    //         println!("{:?}", result);
-    //     }
-    //     Err(err) => {
-    //         println!("--- Runtime Errors ---");
-    //         println!("{}", err);
-    //     }
-    // }
-
-
-    // to bytecode
-    let bytecode_chunks = Compiler::compile_program(&program);
-    println!("\n--- Compiled to Bytecode ---");
-    println!("{:?}", bytecode_chunks);
-    println!("{}", join_slice_to_string(&bytecode_chunks, "\n\n"));
-
-
-    // execute bytecode!
     println!("\n--- Execution ---");
     let mut vm = VM::new();
-    vm.load_bytecodes(bytecode_chunks);
+    vm.load_bytecodes(program.compiled_bytecode);
     let time_took = Instant::now();
     match vm.run(cfg!(debug_assertions)) {
         Ok(()) => {
@@ -83,7 +141,7 @@ pub fn run_code(source: &str) -> Result<Value, ()> {
         Err(err) => {
             println!("\n--- Runtime Error ({:?}) ---", time_took.elapsed());
             println!("{}", err);
-            return Err(());
+            return Err(CodeResultError::RuntimeError);
         }
     }
 

@@ -1,11 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{nativelib::ThrumType, parsing::ast_structure::TypeKind};
-
-
-
-
-
+use crate::{nativelib::{ThrumModule, ThrumType}, parsing::ast_structure::TypeKind};
 
 
 
@@ -18,8 +13,13 @@ pub struct TypecheckScope {
 }
 
 pub struct TypecheckValue {
-    typ: TypeKind,
-    pub mut_borrowed_by: Option<String>,
+    // Source code location - for error messages
+    pub typ: TypeKind,
+
+    pub declared_at: usize,
+    pub is_declared_mut: bool,
+    pub is_used: bool,
+    pub is_mutated: bool,
 }
 #[derive(Default)]
 pub struct TypecheckEnvironment {
@@ -34,7 +34,15 @@ impl TypecheckEnvironment {
 
     pub fn define_variable(&mut self, name: String, typ: TypeKind) -> bool {
         let already_exists = self.name_exists_already(&name);
-        self.scopes.last_mut().unwrap().vars.insert(name, TypecheckValue { typ, mut_borrowed_by: None });
+        self.scopes
+            .last_mut().unwrap()
+            .vars.insert(name, TypecheckValue {
+                typ,
+                declared_at: 0,
+                is_declared_mut: false,
+                is_used: false,
+                is_mutated: false,
+            });
         already_exists
     }
     pub fn lookup_variable(&self, name: &str) -> Option<TypeKind> {
@@ -62,5 +70,18 @@ impl TypecheckEnvironment {
 
     pub fn name_exists_already(&mut self, name: &str) -> bool {
         self.lookup_variable(name).is_some() || self.lookup_type(name).is_some()
+    }
+
+
+    pub fn load_prelude_from_lib(&mut self, module: &ThrumModule) {
+        for (name, value) in &module.values {
+            if value.is_prelude {
+                self.define_variable(name.clone(), value.typ.clone());
+            }
+        }
+        // Recursion
+        for sub_module in module.sub_modules.values() {
+            self.load_prelude_from_lib(sub_module);
+        }
     }
 }

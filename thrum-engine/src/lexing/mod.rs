@@ -1,47 +1,37 @@
 use core::fmt;
 use std::{str::Chars, iter::Peekable};
-// use memmap2::Mmap;
 
-use crate::lexing::tokens::{LexerToken, TokenType, get_keyword};
+use crate::{ErrType, Program, ProgramError, lexing::tokens::{LexerToken, TokenType, get_keyword}, parsing::ast_structure::Span};
 
 pub mod tokens;
 
 
-
-// pub fn tokenize_file(path: &str) -> Result<(Vec<LexerToken>, Vec<LexerError>), Box<dyn std::error::Error>> {
-//     let file = File::open(path)?;
-//     // memory-map the file. (unsafe because it could be modified by another process)
-//     let mmap = unsafe { Mmap::map(&file)? };
-//     // treat the memory-mapped bytes as a UTF-8 string slice. (zero-copy)
-//     let source_code = std::str::from_utf8(&mmap)?;
-
-//     Ok(tokenize_code(source_code))
-// }
+pub fn tokenize_code(program: &mut Program) {
+    let mut lexer = Lexer::new(program);
+    lexer.tokenize(None);
+    program.lexer_tokens = lexer.tokens;
+}
 
 
 pub struct Lexer<'a> {
+    errors: &'a mut Vec<ProgramError>,
     source_iter: Peekable<Chars<'a>>,
     tokens: Vec<LexerToken>,
     byte_offset: usize,
+    curr_token_start_byte_offset: usize,
     line: usize,
-    errors: Vec<LexerError>
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source_code: &'a str) -> Self {
+    fn new(program: &'a mut Program) -> Self {
         Lexer {
-            source_iter: source_code.chars().peekable(),
+            errors: &mut program.errors,
+            source_iter: program.source_code.chars().peekable(),
             tokens: Vec::new(),
             byte_offset: 0,
+            curr_token_start_byte_offset: 0,
             line: 1,
-            errors: Vec::new()
         }
-    }
-
-    pub fn tokenize_code(source_code: &str) -> (Vec<LexerToken>, Vec<LexerError>) {
-        let mut lexer = Lexer::new(source_code);
-        lexer.tokenize(None);
-        (lexer.tokens, lexer.errors)
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -65,16 +55,24 @@ impl<'a> Lexer<'a> {
     }
 
     fn add_token(&mut self, token_type: TokenType) {
-        self.tokens.push(LexerToken {
+        let new_token = LexerToken {
             token_type,
-            line: self.line,
-            byte_start: self.byte_offset,
-            length: 0,
-        });
+            span: Span {
+                line: self.line,
+                byte_offset: self.byte_offset,
+                length: self.byte_offset - self.curr_token_start_byte_offset,
+            }
+        };
+        self.tokens.push(new_token);
+        self.curr_token_start_byte_offset = self.byte_offset
     }
 
-    fn add_error(&mut self, error_msg: String) {
-        self.errors.push(LexerError { line: self.line, message: error_msg });
+    fn error(&mut self, err_type: ErrType) {
+        self.errors.push(ProgramError {
+            line: self.line,
+            byte_offset: self.byte_offset,
+            typ: err_type
+        });
     }
 
 
@@ -168,7 +166,7 @@ impl<'a> Lexer<'a> {
                     } else if self.match_next('<') {
                         if self.match_next('=') { TokenType::LeftShiftEqual } else { TokenType::LeftShift }
                     } else {
-                        self.add_error("Unexpected character '~'. Did you mean '~!' (Bitwise Not)?".to_string());
+                        self.error(ErrType::LexerTilda);
                         continue;
                     };
                     self.add_token(token);
@@ -205,7 +203,14 @@ impl<'a> Lexer<'a> {
 
                 
                 // Ignore whitespace/new lines
-                ' ' | '\r' | '\t' | '\n' => (),
+                ' ' | '\r' | '\t' | '\n' => {
+                    // spaces should be properly skipped if they are not inside tokens.
+                    // example: 1 + 2
+                    // should tokenize to: Token(1), Token(+), Token(2) where each token has len 1.
+                    if self.byte_offset == self.curr_token_start_byte_offset + c.len_utf8() {
+                        self.curr_token_start_byte_offset += c.len_utf8(); // should just be 1 for these chars
+                    }
+                },
 
                 // Handle string literals
                 '"' => self.lex_string('"'),
@@ -224,7 +229,7 @@ impl<'a> Lexer<'a> {
                     else { self.add_token(TokenType::Identifier(text)); }
                 }
 
-                _ => self.add_error(format!("Unexpected character '{}'.", c)),
+                _ => self.error(ErrType::LexerUnexpectedCharacter(c)),
             }
         }
     }
@@ -270,7 +275,7 @@ impl<'a> Lexer<'a> {
                 any => string.push(any),
             }
         }
-        self.add_error("Unterminated string.".to_string());
+        self.error(ErrType::LexerUnterminatedString);
     }
 
     fn lex_number(&mut self, first_char: char) {
@@ -307,7 +312,7 @@ impl<'a> Lexer<'a> {
         }
         match text.parse::<f64>() {
             Ok(num) => self.add_token(TokenType::Number(num)),
-            Err(_) => self.add_error( format!("Could not parse number '{}'.", text)),
+            Err(_) => self.error( ErrType::LexerNumberParseError(text)),
         }
         if process_dot_later { self.process_dot_token(); }
     }

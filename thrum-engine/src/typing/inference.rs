@@ -4,19 +4,14 @@ use crate::{parsing::ast_structure::TypeKind, typing::TypeChecker};
 
 
 
-impl TypeChecker {
+impl<'a> TypeChecker<'a> {
     pub fn new_inference_type(&mut self) -> TypeKind {
         self.next_inference_id += 1;
-        TypeKind::Inference(self.next_inference_id)
+        TypeKind::Inference(super::TypeID(self.next_inference_id))
     }
 
     pub fn prune(&mut self, typ: &TypeKind) -> TypeKind {
-        if let TypeKind::Inference(id) = typ
-            && let Some(entry) = self.inference_id_lookup.get(id) {
-                let pruned = self.prune(&entry.clone());
-                return pruned;
-            }
-        typ.clone()
+        typ.prune(&self.type_lookup)
     }
 
 
@@ -24,19 +19,19 @@ impl TypeChecker {
         let type_a = self.prune(a);
         let type_b = self.prune(b);
         
-        match (&type_a, &type_b) {
+        match (type_a.clone(), type_b.clone()) {
             _ if type_a == type_b => { /* Do nothing */ }
 
             // if one is an inference variable, bind it to the other type.
-            (TypeKind::Inference(id), _) => { self.inference_id_lookup.insert(*id, type_b.clone()); }
-            (_, TypeKind::Inference(id)) => { self.inference_id_lookup.insert(*id, type_a.clone()); }
+            (TypeKind::Inference(id), _) => { self.type_lookup.insert(id, type_b.clone()); }
+            (_, TypeKind::Inference(id)) => { self.type_lookup.insert(id, type_a.clone()); }
             
             (TypeKind::Never, _) => { /* Do nothing */ }
             (_, TypeKind::Never) => { /* Do nothing */ }
 
             (TypeKind::MutPointer(inner_a), TypeKind::MutPointer(inner_b))
             | (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
-                self.unify_types(inner_a, inner_b);
+                self.unify_types(&inner_a, &inner_b);
             }
             (TypeKind::Tup(elements_a), TypeKind::Tup(elements_b)) => {
                 if elements_a.len() == elements_b.len() {
@@ -45,11 +40,12 @@ impl TypeChecker {
                         self.unify_types(&ia.typ, &ib.typ);
                         // labels can't mismatch (if both labels are non number labels)
                         if ia.label != ib.label && [ia, ib].iter().all(|x| x.label.chars().any(|c| !c.is_ascii_digit())) {
-                                self.type_mismatch(&type_a, &type_b);
-                            } 
+                            self.type_mismatch(type_a, type_b);
+                            break;
+                        } 
                     }
                 }
-                else { self.type_mismatch(&type_a, &type_b); }
+                else { self.type_mismatch(type_a, type_b); }
             }
             (TypeKind::Fn { param_types: params_a, return_type: return_a },
             TypeKind::Fn { param_types: params_b, return_type: return_b }) => {
@@ -58,11 +54,11 @@ impl TypeChecker {
                         self.unify_types(ia, ib);
                     }
                 }
-                else { self.type_mismatch(&type_a, &type_b); }
-                self.unify_types(return_a, return_b);
+                else { self.type_mismatch(type_a, type_b); }
+                self.unify_types(&return_a, &return_b);
             }
 
-            _ => { self.type_mismatch(&type_a, &type_b); }
+            _ => { self.type_mismatch(type_a, type_b); }
         }
     }
 

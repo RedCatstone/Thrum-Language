@@ -1,8 +1,6 @@
 use std::fmt;
 use crate::{
-    lexing::tokens::{LexerToken, TokenType},
-    parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TupleType, TypeKind, TypedExpr, Value},
-    vm_compiling::{BytecodeChunk, OpCode}, vm_evaluating::{CallFrame, VM}
+    ErrType, Program, ProgramError, lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{Expr, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TupleType, TypeKind, ExprInfo, Value}, typing::TypeID, vm_compiling::{BytecodeChunk, OpCode}, vm_evaluating::{CallFrame, VM}
 };
 
 
@@ -117,7 +115,7 @@ impl fmt::Display for TokenType {
 
 impl fmt::Display for LexerToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}:{}]", self.line, self.token_type)
+        write!(f, "{}:{}[{}]", self.span.line, self.span.length, self.token_type)
     }
 }
 
@@ -126,6 +124,92 @@ impl fmt::Display for LexerToken {
 
 
 
+pub fn format_program_error(err: &ProgramError, program: &Program) -> String {
+    let err_type_msg = match &err.typ {
+        ErrType::LexerTilda => format!("Unexpected character '~'. Did you mean '~!' (Bitwise Not)?"),
+        ErrType::LexerUnexpectedCharacter(c) => format!("Unexpected character '{}'.", c),
+        ErrType::LexerUnterminatedString => format!("Unterminated string."),
+        ErrType::LexerNumberParseError(text) => format!("Could not parse number '{}'.", text),
+
+        ErrType::ParserExpectToken(expected, err_msg, found) => format!(
+            "Expected '{expected}' {err_msg}. Found '{found}' instead."
+        ),
+        ErrType::ParserUnexpectedExpression => format!("Unexpected expression start."),
+        ErrType::ParserExpectedAnExpression => format!("Expected an expression."),
+        ErrType::ParserUnexpectedPathToken => format!("Incorrect '::'-path Syntax."),
+        ErrType::ParserPatternTemplateString => format!("Template strings are not allowed in match patterns."),
+        ErrType::ParserPatternInvalidSyntax => format!("Invalid syntax in match pattern."),
+
+        ErrType::TyperMismatch(expected, found) => format!("Expected type: {}, found: {}",
+            expected.prune(&program.type_lookup), found.prune(&program.type_lookup)
+        ),
+        ErrType::TyperNameAlreadyDefined(name) => format!("Name {name} is already defined in this scope."),
+        ErrType::TyperUndefinedIdentifier(name) => format!("Undefined identifier: {name}"),
+        ErrType::TyperCantInferType(typ) => format!("Can't infer type {}", typ.prune(&program.type_lookup)),
+        ErrType::TyperPatternDoesntCoverAllCases(remaining) => format!("Pattern doesn't cover all cases. Remaining cases: {}",
+            join_slice_to_string(&remaining, ", ")
+        ),
+        ErrType::TyperFailableLetPattern => format!("Failable pattern in let-expression. Use 'if case ...' or 'ensure case ...' instead."),
+        ErrType::TyperFnParamPlacePatterns => format!("Place patterns are not allowed in function parameters."),
+        ErrType::TyperFailableFnParamPatterns => format!("Failable patterns are not allowed in function parameters."),
+        ErrType::TyperInvalidBindingCaseExpr => format!("Case-expressions that bind variables aren't allowed here."),
+        ErrType::TyperBreakOutsideLoop => format!("break is not allowed outside of loops."),
+        ErrType::TyperUndefinedLoopLabel(label, available) => format!("could not find the label #{label}. Current labels in scope: {}",
+            available.iter().map(|x| x.to_string() + ", ").collect::<String>()
+        ),
+        ErrType::TyperTooManyArguments(expected, found) => format!("Expected {} arguments, found {}.", expected, found),
+        ErrType::TyperCantCallNonFnType(typ) => format!("Can't call a non-function type: {}", typ.prune(&program.type_lookup)),
+        ErrType::TyperTupleDoesntHaveMember(tup, member) => format!("member .{member} does not exist on tuple: {}", tup.prune(&program.type_lookup)),
+        ErrType::TyperInvalidOperatorOnType(op, typ) => format!("The operator {op} is not defined on type {typ}"),
+        ErrType::TyperPatternNeverType => format!("{} is not allowed in patterns.", TypeKind::Never),
+        ErrType::TyperOrPatternBindsVarsTooMuch(vars) => format!("All or-patterns must bind the same variables. This pattern binds {}",
+            join_slice_to_string(vars, ", ")
+        ),
+        ErrType::TyperOrPatternDoesntBindVars(vars) => format!("All or-patterns must bind the same variables. This pattern doesn't bind {}",
+            join_slice_to_string(vars, ", ")
+        ),
+        ErrType::TyperPatternVarBoundTwice(vars) => format!("Pattern binds {} twice.", join_slice_to_string(vars, ", ")),
+
+
+        // this case should not be used, every error should have its own entry in this enum!
+        ErrType::DefaultString(s) => format!("{}", s),
+    };
+
+    format!("[{}:{}] {}", err.line, err.byte_offset, err_type_msg)
+}
+
+
+
+
+impl<'a> fmt::Display for Program<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.lexer_tokens.is_empty() {
+            write!(f, "LEXER TOKENS: [\n{}\n]", join_slice_to_string(&self.lexer_tokens, ", "))?;
+        }
+        if !self.ast.is_empty() {
+            write!(f, "AST: \n")?;
+            for expr in &self.ast {
+                expr.format_recursive(f, 0, "", true)?
+            }
+        }
+        if !self.type_lookup.is_empty() {
+            write!(f, "TYPE LOOKUP \n{:?}", self.type_lookup)?;
+        }
+
+
+        Ok(())
+    }
+}
+
+
+
+
+
+impl fmt::Display for TypeID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
 impl fmt::Display for TypeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -171,101 +255,188 @@ impl fmt::Display for TupleMatchPattern {
     }
 }
 
-impl fmt::Debug for TypedExpr {
+
+impl fmt::Debug for ExprInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if f.alternate() {
-            format_recursive(self, f, 0, "", true)
-        } else {
-            write!(f, "{:?}[{}]", self.expression, self.typ) // Compact format for `{:?}`
+        writeln!(f, "[{}] {:#}", self.typ, self.expression)
+    }
+}
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Literal(val) => write!(f, "Literal({val})"),
+            Expr::Identifier { name } => write!(f, "Identifier(\"{name}\")"),
+            Expr::Assign { pattern, extra_operator, value } => write!(f, "Assign({extra_operator} {pattern} {:?})", value),
+            Expr::Case { pattern, value } => write!(f, "Case({pattern}, {:?})", value),
+            Expr::Block(body) => write!(f, "Block({})", join_slice_to_debug_string(body, "; ")),
+            Expr::Infix { operator, left, right } => write!(f, "Infix({operator}, {:?}, {:?})", left, right),
+            Expr::Prefix { operator, right } => write!(f, "Prefix({operator}, {:?})", right),
+            Expr::Call { callee: function, arguments } => write!(f, "Call({:?}, {})", function, join_slice_to_debug_string(arguments, ", ")),
+            Expr::If { condition, then: consequence, alt: alternative } => write!(f, "If({:?}, {:?}, {:?})", condition, consequence, alternative),
+            Expr::Match { match_value, arms } => write!(f, "Match({:?}, {} arms)", match_value, arms.len()),
+            Expr::Array(elements) => write!(f, "Array({})", join_slice_to_debug_string(elements, ", ")),
+            Expr::Tuple(elements) => write!(f, "Tuple({})", join_slice_to_string(elements, ", ")),
+            Expr::Loop { body, label } => write!(f, "Loop(#{label}, {:?})", body),
+            Expr::FnDefinition { name, params, return_type, body } => write!(f, "FnDefinition({name}, {} params, -> {}, {:?})", params.len(), return_type, body),
+            _ => write!(f, "{:?}", self),
         }
     }
 }
 
-// The recursive workhorse for pretty-printing.
-fn format_recursive(eat: &TypedExpr, f: &mut fmt::Formatter, indent: usize, prefix: &str, is_last: bool) -> fmt::Result {
-    let i = "  ".repeat(indent);
-    let branch = if indent > 0 { if is_last { "└─ " } else { "├─ " } } else { "" };
-    let type_info = format!("[{}]", eat.typ);
 
-    match &eat.expression {
-        Expr::Literal(val) => writeln!(f, "{i}{branch}{prefix}Literal({val:?}) {type_info}")?,
-        Expr::Identifier { name } => writeln!(f, "{i}{branch}{prefix}Identifier(\"{name}\") {type_info}")?,
-        
-        Expr::Assign { pattern, extra_operator, value } => {
-            writeln!(f, "{i}{branch}{prefix}Assign: {pattern} ({extra_operator}) {type_info}")?;
-            if let Some(val) = value {
-                format_recursive(val, f, indent + 1, "value: ", true)?;
+
+
+
+
+
+impl ExprInfo {
+    fn format_recursive(&self, f: &mut fmt::Formatter, ind: usize, prefix: &str, is_last: bool) -> fmt::Result {
+        write!(f, "{}{} {}{} [{}]",
+            "  ".repeat(ind),
+            if ind == 0 { "" } else if is_last { "└─" } else { "├─" },
+            if prefix.is_empty() { "".to_string() } else { format!("{prefix}: ") },
+            Into::<&str>::into(&self.expression),
+            self.typ,
+        )?;
+
+        match &self.expression {
+            Expr::Literal(val) => writeln!(f, " - {val:?}")?,
+            Expr::Identifier { name } => writeln!(f, " - \"{name}\"")?,
+
+            Expr::Assign { pattern, extra_operator, value } => {
+                writeln!(f, " - {extra_operator} (pattern: {pattern})")?;
+                if let Some(val) = value {
+                    val.format_recursive(f, ind + 1, "value", true)?;
+                }
             }
-        }
-        Expr::Case { pattern, value } => {
-            writeln!(f, "{i}{branch}{prefix}Case: {pattern} {type_info}")?;
-            format_recursive(value, f, indent + 1, "value: ", false)?;
-        }
-        Expr::Block(body) => {
-            writeln!(f, "{i}{branch}{prefix}Block {type_info}")?;
-            let len = body.len();
-            for (idx, expr) in body.iter().enumerate() {
-                format_recursive(expr, f, indent + 1, "", idx == len - 1)?;
+            Expr::Case { pattern, value } => {
+                writeln!(f, " - {pattern}")?;
+                value.format_recursive(f, ind + 1, "value", true)?;
             }
-        }
-        Expr::Infix { operator, left, right } => {
-            writeln!(f, "{i}{branch}{prefix}Infix({operator}) {type_info}")?;
-            format_recursive(left, f, indent + 1, "left: ", false)?;
-            format_recursive(right, f, indent + 1, "right: ", true)?;
-        }
-        Expr::Prefix { operator, right } => {
-            writeln!(f, "{i}{branch}{prefix}Prefix({operator}) {type_info}")?;
-            format_recursive(right, f, indent + 1, "right: ", true)?;
-        }
-        Expr::Call { callee: function, arguments } => {
-            writeln!(f, "{i}{branch}{prefix}Call {type_info}")?;
-            format_recursive(function, f, indent + 1, "func: ", arguments.is_empty())?;
-            for (i, arg) in arguments.iter().enumerate() {
-                format_recursive(arg, f, indent + 1, "arg: ", i == arguments.len() - 1)?;
+            Expr::Block(body) => {
+                writeln!(f, "")?;
+                for (i, expr) in body.iter().enumerate() {
+                    expr.format_recursive(f, ind + 1, "", i == body.len()-1)?;
+                }
             }
-        }
-        Expr::If { condition, consequence, alternative } => {
-            writeln!(f, "{i}{branch}{prefix}If {type_info}")?;
-            format_recursive(condition, f, indent + 1, "cond: ", false)?;
-            format_recursive(consequence, f, indent + 1, "then: ", false)?;
-            format_recursive(alternative, f, indent + 1, "else: ", true)?;
-        }
-        Expr::Match { match_value, arms } => {
-            writeln!(f, "{i}{branch}{prefix}Match {type_info}")?;
-            format_recursive(match_value, f, indent + 1, "match value: ", false)?;
-            for (i, arm) in arms.iter().enumerate() {
-                format_recursive(&arm.body, f, indent + 1, &format!("pattern: {:?} arm: ", arm.pattern), i == arms.len() - 1)?;
+            Expr::Infix { operator, left, right } => {
+                writeln!(f, " - {operator}")?;
+                left.format_recursive(f, ind + 1, "left", false)?;
+                right.format_recursive(f, ind + 1, "right", true)?;
             }
-        }
-        Expr::Array(elements) => {
-            writeln!(f, "{i}{branch}{prefix}Array {type_info}")?;
-            let len = elements.len();
-            for (idx, el) in elements.iter().enumerate() {
-                format_recursive(el, f, indent + 1, "", idx == len - 1)?;
+            Expr::Prefix { operator, right } => {
+                writeln!(f, " - {operator}")?;
+                right.format_recursive(f, ind + 1, "right", true)?;
             }
-        }
-        Expr::Tuple(elements) => {
-            writeln!(f, "{i}{branch}{prefix}Tuple {type_info}")?;
-            let len = elements.len();
-            for (idx, el) in elements.iter().enumerate() {
-                format_recursive(&el.expr, f, indent + 1, &format!("{} = ", el.label), idx == len - 1)?;
+            Expr::Call { callee, arguments } => {
+                writeln!(f, "")?;
+                callee.format_recursive(f, ind + 1, "func", false)?;
+                for (i, arg) in arguments.iter().enumerate() {
+                    arg.format_recursive(f, ind + 1, "arg", i == arguments.len()-1)?;
+                }
             }
-        }
-        Expr::Loop { body, label } => {
-            writeln!(f, "{i}{branch}{prefix}Loop (#{label}) {type_info}")?;
-            format_recursive(body, f, indent + 1, "body: ", true)?;
-        }
-        Expr::FnDefinition { name, params, return_type, body } => {
-            writeln!(f, "{i}{branch}{prefix}FnDefintion({name}) -> {return_type} {type_info}")?;
-            for param in params {
-                writeln!(f, "{i}{branch}{prefix}param: {param}")?;
+            Expr::If { condition, then, alt } => {
+                writeln!(f, "")?;
+                condition.format_recursive(f, ind + 1, "cond", false)?;
+                then.format_recursive(f, ind + 1, "then", false)?;
+                alt.format_recursive(f, ind + 1, "else", true)?;
             }
-            format_recursive(body, f, indent + 1, "body: ", true)?;
+            Expr::Match { match_value, arms } => {
+                writeln!(f, "")?;
+                match_value.format_recursive(f, ind + 1, "match value", false)?;
+                for (i, arm) in arms.iter().enumerate() {
+                    arm.body.format_recursive(f, ind + 1, &format!("pattern: {:?} arm", arm.pattern), i == arms.len()-1)?;
+                }
+            }
+            Expr::Array(elements) => {
+                writeln!(f, "")?;
+                for (i, el) in elements.iter().enumerate() {
+                    el.format_recursive(f, ind + 1, "", i == elements.len()-1)?;
+                }
+            }
+            Expr::Tuple(elements) => {
+                writeln!(f, "")?;
+                for (i, el) in elements.iter().enumerate() {
+                    el.expr.format_recursive(f, ind + 1, &format!(".{}", el.label), i == elements.len()-1)?;
+                }
+            }
+            Expr::Loop { body, label } => {
+                writeln!(f, " - #{label}")?;
+                body.format_recursive(f, ind + 1, "body", true)?;
+            }
+            Expr::FnDefinition { name, params, return_type, body } => {
+                writeln!(f, " - {name} {return_type}")?;
+                for param in params {
+                    writeln!(f, " - {param}")?;
+                }
+                body.format_recursive(f, ind + 1, "body", true)?;
+            }
+            Expr::Closure { params, return_type, body } => {
+                writeln!(f, " -> {return_type}")?;
+                for param in params {
+                    writeln!(f, " - {param}")?;
+                }
+                body.format_recursive(f, ind + 1, "body", true)?;
+            }
+            Expr::TemplateString(elements) => {
+                writeln!(f, "")?;
+                for (i, el) in elements.iter().enumerate() {
+                    el.format_recursive(f, ind + 1, "", i == elements.len() - 1)?;
+                }
+            }
+            Expr::MutRef { expr } | Expr::Deref { expr } => {
+                writeln!(f, "")?;
+                expr.format_recursive(f, ind + 1, "expr", true)?;
+            }
+            Expr::MemberAccess { left, member, resolved_index } => {
+                writeln!(f, " - .{member} (idx: {})", resolved_index.map_or("".to_string(), |x| x.to_string()))?;
+                left.format_recursive(f, ind + 1, "object", true)?;
+            }
+            Expr::TypePath(segments) => {
+                writeln!(f, " - {}", segments.join("::"))?;
+            }
+            Expr::Index { left, index } => {
+                writeln!(f, "")?;
+                left.format_recursive(f, ind + 1, "arr", false)?;
+                index.format_recursive(f, ind + 1, "idx", true)?;
+            }
+            Expr::Ensure { condition, alt, then } => {
+                writeln!(f, "")?;
+                condition.format_recursive(f, ind + 1, "cond", false)?;
+                alt.format_recursive(f, ind + 1, "else", false)?;
+                then.format_recursive(f, ind + 1, "then", true)?;
+            }
+            Expr::While { condition, body, label } => {
+                writeln!(f, " - #{label}")?;
+                condition.format_recursive(f, ind + 1, "cond", false)?;
+                body.format_recursive(f, ind + 1, "body", true)?;
+            }
+            Expr::EnumDefinition { name, enums } => {
+                writeln!(f, " - {name}")?;
+                for (i, e) in enums.iter().enumerate() {
+                    write!(f, "{}{}", 
+                        "  ".repeat(ind + 1),
+                        if i == enums.len() - 1 { "└─" } else { "├─" }
+                    )?;
+                    writeln!(f, " {e:?}")?; 
+                }
+            }
+            Expr::Return(expr) => {
+                writeln!(f, "")?;
+                expr.format_recursive(f, ind + 1, "val", true)?;
+            }
+            Expr::Break { label, expr } => {
+                writeln!(f, " - #{}", label.clone().map_or("none".to_string(), |x| x))?;
+                expr.format_recursive(f, ind + 1, "val", true)?;
+            }
+            Expr::Continue { label } => {
+                writeln!(f, " - #{}", label.clone().map_or("none".to_string(), |x| x))?;
+            }
+
+            Expr::Void => writeln!(f, "")?,
         }
-        // Fallback for any other expression types
-        _ => writeln!(f, "{i}{branch}{prefix}{:?} {type_info}", eat.expression)?,
+        Ok(())
     }
-    Ok(())
 }
 
 // Custom Debug impl for patterns to make them print cleanly
@@ -375,6 +546,9 @@ impl fmt::Display for BytecodeChunk {
 
 
 
-pub fn join_slice_to_string<T: ToString>(vec: &[T], join: &str) -> String {
+pub fn join_slice_to_string<T: fmt::Display>(vec: &[T], join: &str) -> String {
     vec.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(join)
+}
+pub fn join_slice_to_debug_string<T: fmt::Debug>(vec: &[T], join: &str) -> String {
+    vec.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(join)
 }

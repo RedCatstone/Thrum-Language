@@ -1,60 +1,60 @@
 use core::fmt;
+use std::{iter::Peekable, vec::IntoIter};
 
-use crate::{lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{Expr, TypedExpr}};
+use crate::{ErrType, Program, ProgramError, lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{Expr, Span}};
 
 mod parse_expressions;
-mod parse_patterns_types;
+mod parse_pattern_types;
 pub mod ast_structure;
 pub mod desugar;
 
 
 
-#[derive(Default)]
-pub struct Parser {
-    tokens: Vec<LexerToken>,
-    position: usize,
-    errors: Vec<ParserError>,
+pub fn parse_program(program: &mut Program) {
+    let mut parser = Parser::new(program);
+
+    let Expr::Block(body) = parser.parse_block_expression(TokenType::EndOfFile, Span::default()).expression
+    else { unreachable!() };
+
+    program.ast = body;
+}
+
+
+
+pub struct Parser<'a> {
+    errors: &'a mut Vec<ProgramError>,
+    tokens: Peekable<IntoIter<LexerToken>>,
     prev_token_line: usize,
     pipe_operators_active: usize,
 }
 
-impl Parser {
-    fn new(tokens: Vec<LexerToken>) -> Self {
-        Parser { tokens, ..Default::default() }
+impl<'a> Parser<'a> {
+    fn new(program: &'a mut Program) -> Self {
+        Parser {
+            errors: &mut program.errors,
+            // lexer tokens will be gone after parsing!!!
+            tokens: std::mem::take(&mut program.lexer_tokens).into_iter().peekable(),
+
+            prev_token_line: 0,
+            pipe_operators_active: 0,
+        }
     }
 
-    pub fn parse_program(tokens: Vec<LexerToken>) -> (Vec<TypedExpr>, Vec<ParserError>) {
-        let mut parser = Self::new(tokens);
-
-        let Expr::Block(body) = parser.parse_block_expression(TokenType::EndOfFile).expression
-        else { unreachable!() };
-        (body, parser.errors)
+    fn peek(&mut self) -> &LexerToken {
+        self.tokens.peek().unwrap_or(&LexerToken::END_TOKEN)
     }
 
-
-    fn peek(&self) -> &LexerToken {
-        self.tokens.get(self.position).unwrap_or(&LexerToken {
-            token_type: TokenType::EndOfFile,
-            line: usize::MAX,
-            byte_start: usize::MAX,
-            length: 0,
-        })
+    fn next(&mut self) -> LexerToken {
+        let next = self.tokens.next().unwrap_or(LexerToken::END_TOKEN);
+        self.prev_token_line = next.span.line;
+        next
     }
 
-    fn advance(&mut self) {
-        self.prev_token_line = self.peek().line;
-        self.position += 1;
+    fn peek_is_on_same_line(&mut self) -> bool {
+        self.peek().span.line == self.prev_token_line
     }
 
-    fn peek_is_on_same_line(&self) -> bool {
-        self.peek().line == self.prev_token_line
-    }
-
-    fn peek_precedence(&self) -> Precedence {
-        self.get_precedence(&self.peek().token_type)
-    }
-
-    fn peek_is_expression_start(&self) -> bool {
+    fn peek_is_expression_start(&mut self) -> bool {
         match self.peek().token_type {
             // these should match parse_prefix function
             TokenType::Identifier(_) | TokenType::Number(_) | TokenType::StringFrag(_) | TokenType::StringStart | TokenType::Bool(_) | TokenType::Null
@@ -65,125 +65,124 @@ impl Parser {
         }
     }
 
-    fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Result<LexerToken, ParserError> {
-        let token = self.peek();
-        if std::mem::discriminant(&token.token_type) == std::mem::discriminant(&expected) {
-            let cloned_token = token.clone();
-            self.advance();
-            Ok(cloned_token)
-        } else {
-            Err(self.error(&format!("Expected '{}' {}. Found '{}' instead.", expected, error_msg, self.peek())))
-        }
-    }
-    fn expect_identifier(&mut self, error_msg: &str) -> Result<String, ParserError> {
-        let TokenType::Identifier(name) = self.expect_token(TokenType::Identifier(String::new()), error_msg)?.token_type else { unreachable!() };
-        Ok(name)
+    fn error(&mut self, err_type: ErrType) {
+        let err = ProgramError {
+            line: self.peek().span.line,
+            byte_offset: self.peek().span.byte_offset,
+            typ: err_type
+        };
+        self.errors.push(err);
     }
 
-    fn optional_dot_token(&mut self) -> Option<String> {
+    fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Span {
+        let token = self.peek();
+        if std::mem::discriminant(&token.token_type) == std::mem::discriminant(&expected) {
+            self.next().span
+        }
+        else {
+            let found_instead = self.peek().clone();
+            self.error(ErrType::ParserExpectToken(expected, error_msg.to_string(), found_instead.token_type));
+            found_instead.span
+        }
+    }
+    fn expect_identifier(&mut self, error_msg: &str) -> String {
+        if let TokenType::Identifier(text) = &self.peek().token_type {
+            let text = text.clone();
+            self.next();
+            text
+        }
+        else {
+            let found_instead = self.peek().token_type.clone();
+            self.error(ErrType::ParserExpectToken(TokenType::Identifier(String::new()), error_msg.to_string(), found_instead));
+            String::new()
+        }
+    }
+
+    fn optional_dot_token(&mut self) -> Option<(Span, String)> {
         if let TokenType::Dot(text) = &self.peek().token_type {
             let text = text.clone();
-            self.advance();
-            Some(text)
+            let dot_token = self.next();
+            Some((dot_token.span, text))
         }
         else { None }
     }
 
-    fn parse_optional_label(&mut self) -> Option<String> {
-        if self.optional_token(TokenType::Hashtag) {
+    fn parse_optional_label(&mut self) -> Option<(Span, String)> {
+        if self.optional_token(TokenType::Hashtag).is_some() {
+            let next_token = self.next();
             let label = 
-                match &self.peek().token_type {
-                    TokenType::Identifier(s) => s.to_string(),
+                match next_token.token_type {
+                    TokenType::Identifier(s) => s,
                     x => x.to_string()
                 };
-            self.advance();
-            Some(label)
+            Some((next_token.span, label))
         } else { None }
     }
 
-    fn optional_token(&mut self, expected: TokenType) -> bool {
+    fn optional_token(&mut self, expected: TokenType) -> Option<Span> {
         if std::mem::discriminant(&self.peek().token_type) == std::mem::discriminant(&expected) {
-            self.advance();
-            return true;
+            Some(self.next().span)
         }
-        false
+        else { None }
     }
 
     pub(super) fn parse_comma_separated<T>(
         &mut self,
         end_token: TokenType,
-        parse_element: impl Fn(&mut Self, i32) -> Result<T, ParserError>, 
+        parse_element: impl Fn(&mut Self, i32) -> T,
         err_msg: &str
-    ) -> Result<Vec<T>, ParserError>
+    ) -> (Span, Vec<T>)
     {
         let mut list = Vec::new();
         
         // handles empty lists immediately
         for i in 0.. {
             if self.peek().token_type == end_token { break }
-            list.push(parse_element(self, i)?);
-            if !self.optional_token(TokenType::Comma) { break; }
+            list.push(parse_element(self, i));
+            if self.optional_token(TokenType::Comma).is_none() { break; }
         }
-        self.expect_token(end_token, err_msg)?;
-        Ok(list)
+        let span = self.expect_token(end_token, err_msg);
+        (span, list)
     }
 
     pub(super) fn parse_line_seperated<T>(
         &mut self,
         end_token: TokenType,
-        parse_element: impl Fn(&mut Self) -> Result<T, ParserError>,
-        on_semicolon: impl Fn() -> Option<T>,
-    ) -> Vec<T>
+        parse_element: impl Fn(&mut Self) -> T,
+        on_semicolon: impl Fn(Span) -> Option<T>,
+    ) -> (Span, Vec<T>)
     {
         let mut list = Vec::new();
 
         // handles empty lists immediately
         while self.peek().token_type != end_token && self.peek().token_type != TokenType::EndOfFile {
-            println!("parsing expression: {} - endtoken: {} - errors: {}", self.peek(), end_token, self.errors.len());
-            match parse_element(self) {
-                Ok(elem) => {
-                    list.push(elem);
-                    if self.optional_token(TokenType::Semicolon) {
-                        if let Some(semicolon_elem) = on_semicolon() {
-                            list.push(semicolon_elem);
-                        }
-                    }
-                    else {
-                        // no semicolon -> next expression can't be on the same line.
-                        if self.peek_is_on_same_line() && self.peek_is_expression_start() {
-                            self.errors.push(self.error(&format!("2 expressions cannot be on the same line without a ';'. Found '{}'.", self.peek())));
-                        }
-                    }
+            list.push(parse_element(self));
+            if let Some(semi_span) = self.optional_token(TokenType::Semicolon) {
+                if let Some(semicolon_elem) = on_semicolon(semi_span) {
+                    list.push(semicolon_elem);
                 }
-                Err(parser_error) => {
-                    self.errors.push(parser_error);
-                    self.recover(&[end_token.clone(), TokenType::Semicolon]);
+            }
+            else {
+                // no semicolon -> next expression can't be on the same line.
+                if self.peek_is_on_same_line() && self.peek_is_expression_start() {
+                    self.error(ErrType::ParserUnexpectedExpression);
                 }
             }
         }
-        if let Err(msg) = self.expect_token(end_token.clone(), "to close the block") {
-            self.errors.push(msg);
-        }
-        list
-    }
-
-    pub(super) fn error(&self, msg: &str) -> ParserError {
-        ParserError {
-            msg: msg.to_string(),
-            token: self.peek().clone(),
-        }
+        let span = self.expect_token(end_token.clone(), "to close the block");
+        (span, list)
     }
 
     fn recover(&mut self, recover_tokens: &[TokenType]) {
         while self.peek().token_type != TokenType::EndOfFile {
             if recover_tokens.contains(&self.peek().token_type) {
-                self.advance();
+                self.next();
                 return;
             }
             if self.peek_is_expression_start() {
                 return;
             }
-            else { self.advance(); }
+            else { self.next(); }
         }
     }
 }
