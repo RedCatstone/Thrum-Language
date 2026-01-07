@@ -2,11 +2,11 @@ use std::{collections::{HashMap, HashSet}, rc::Rc};
 
 use crate::{
     ErrType,
-    lexing::tokens::TokenType,
+    lexing::tokens::{TokenSpan, TokenType},
     nativelib::ThrumType,
-    parsing::ast_structure::{DefinedTypeKind, Expr, ExprInfo, MatchPattern, TupleElement, TupleType, TypeKind, Value}
+    parsing::ast_structure::{DefinedTypeKind, Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TupleElement, TupleType, TypeKind, Value}
 };
-use crate::typing::TypeChecker;
+use crate::typing::Typechecker;
 
 
 
@@ -31,7 +31,7 @@ impl ExprContext {
 
 
 
-impl<'a> TypeChecker<'a> {
+impl<'a> Typechecker<'a> {
     pub(super) fn check_expression(&mut self, expr: &mut ExprInfo, old_ctx: &ExprContext) {
         let mut ctx = ExprContext::default();
         let mut is_never = false;
@@ -39,7 +39,9 @@ impl<'a> TypeChecker<'a> {
         let inferred_type = match &mut expr.expression {
             Expr::Literal(val) => self.check_literal(val),
 
-            Expr::Identifier { name } => self.check_identifier(name),
+            Expr::Identifier { name, var_id } => {
+                self.use_variable(name, false, expr.span, var_id)
+            }
 
             Expr::TemplateString(parts) => {
                 for part in parts {
@@ -69,7 +71,7 @@ impl<'a> TypeChecker<'a> {
                     arr_types.push(element.typ.clone());
                 }
 
-                let arr_type = self.unify_type_vec(&arr_types);
+                let arr_type = self.unify_type_vec(&arr_types, expr.span);
                 if arr_type.is_never() { is_never = true }
                 TypeKind::Arr(Box::new(arr_type))
             }
@@ -83,7 +85,38 @@ impl<'a> TypeChecker<'a> {
                 arr_element_type
             }
 
-            Expr::Block(body) => self.check_block(body, &ctx),
+            Expr::Block { exprs, drops_vars } => {
+                self.enter_scope();
+
+                // 1. define FnDefinitions
+                for expr in exprs.iter_mut() {
+                    if let Expr::FnDefinition { name, params, return_type, var_id, .. } = &mut expr.expression {
+                        let fn_typ = self.get_fn_type(params, return_type, false);
+                        let var = self.define_variable(name.clone(), false, fn_typ, expr.span);
+                        *var_id = Some(var.var_id);
+                    }
+                }
+
+                // normal pass
+                let mut is_never = false;
+                let block_drop_type = if let Some((last_expr, other_exprs)) = exprs.split_last_mut() {
+                    for expr in other_exprs {
+                        self.check_expression(expr, &ctx);
+                        if expr.typ.is_never() { is_never = true }
+                    }
+                    // conditional bindings are allowed in the last expression of a block, because the current scope is gonna end after this expression anyways.
+                    // this isn't reeeaally needed, but it definitely can't hurt to allow.
+                    // let x = { case ?x = ... and x > 3 }
+                    self.check_expression(last_expr, &ctx.allow_conditional_bindings());
+                    if is_never { TypeKind::Never } else { last_expr.typ.clone() }
+                } else {
+                    // Empty block returns Void
+                    TypeKind::Void
+                };
+
+                *drops_vars = self.exit_scope();
+                block_drop_type
+            },
 
             Expr::Prefix { operator, right } => {
                 match operator {
@@ -100,7 +133,7 @@ impl<'a> TypeChecker<'a> {
             }
 
             Expr::Infix { operator, left, right } => {
-                if *operator == TokenType::Ampersand && old_ctx.allow_conditional_bindings {
+                if let TokenType::Ampersand = operator.token && old_ctx.allow_conditional_bindings {
                     ctx.allow_conditional_bindings = true;
                 }
                 self.check_expression(left, &ctx);
@@ -120,10 +153,12 @@ impl<'a> TypeChecker<'a> {
             Expr::Ensure { condition, alt, then } => {
                 self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
     
-                self.check_expression(alt, &ctx.expect(TypeKind::Never));
+                self.check_expression(alt, &ctx);
+                if !alt.typ.is_never() {
+                    self.type_mismatch(TypeKind::Never, alt.typ.clone(), alt.span);
+                }
                 self.check_expression(then, &ctx);
-
-                TypeKind::Void
+                then.typ.clone()
             }
 
             Expr::Match { match_value, arms: cases } => {
@@ -138,31 +173,33 @@ impl<'a> TypeChecker<'a> {
                 let mut arm_types = Vec::new();
     
                 for arm in cases {
-                    self.env.enter_scope();
-                    match arm.pattern {
+                    self.enter_scope();
+                    match arm.pattern.pattern {
                         MatchPattern::Literal(Value::Bool(bool)) => {
                             cases_to_cover.as_mut().unwrap().remove(&bool.to_string());
                         }
                         _ => { }
                     }
-                    let pattern_type = self.check_binding_pattern(&mut arm.pattern, true);
-                    self.unify_types(&match_value.typ, &pattern_type.typ);
+                    self.check_binding_pattern(&mut arm.pattern, &mut None, true);
+                    self.unify_types(&match_value.typ, &arm.pattern.typ, arm.pattern.span);
 
-                    if !pattern_type.can_fail { has_unfailable_arm = true; }
+                    if !arm.pattern.can_fail { has_unfailable_arm = true; }
 
                     self.check_expression(&mut arm.body, &ctx);
                     arm_types.push(arm.body.typ.clone());
-                    self.env.exit_scope();
+
+                    // ignoring dropped vars because patterns store what vars they define themselves.
+                    self.exit_scope();
                 }
 
                 if !has_unfailable_arm && match &cases_to_cover {
                     None => false,
                     Some(remaining_cases) => !remaining_cases.is_empty()
                 } {
-                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases(cases_to_cover.unwrap().iter().cloned().collect()));
+                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases(cases_to_cover.unwrap().iter().cloned().collect()), expr.span);
                 }
 
-                self.unify_type_vec(&arm_types)
+                self.unify_type_vec(&arm_types, match_value.span)
             },
 
             Expr::Loop { body, label } => {
@@ -172,33 +209,32 @@ impl<'a> TypeChecker<'a> {
                 self.current_break_types.pop().unwrap();
                 if loop_break_type == self.prune(&loop_break_type) {
                     // loop doesn't have any breaks -> infinite loop
-                    self.unify_types(&loop_break_type, &TypeKind::Never);
+                    self.unify_types(&loop_break_type, &TypeKind::Never, expr.span);
                 }
                 loop_break_type
             },
             
             Expr::Assign { pattern, extra_operator, value } => {
-                let pattern_type = self.check_binding_pattern(pattern, true);
-                if pattern_type.can_fail {
-                    self.error(ErrType::TyperFailableLetPattern);
+                self.check_binding_pattern(pattern, &mut None, true);
+                if pattern.can_fail {
+                    self.error(ErrType::TyperFailableLetPattern, expr.span);
                 }
-                // TODO
                 if let Some(val) = value {
-                    self.check_expression(val, &ctx.expect(pattern_type.typ.clone()));
+                    self.check_expression(val, &ctx.expect(pattern.typ.clone()));
                     if val.typ.is_never() { is_never = true }
-                    if *extra_operator != TokenType::Equal {
-                        self.check_infix(extra_operator, &pattern_type.typ, &val.typ);
+                    if extra_operator.token != TokenType::Equal {
+                        self.check_infix(extra_operator, &pattern.typ, &val.typ);
                     }
                 }
                 TypeKind::Void
             },
 
             Expr::Case { pattern, value } => {
-                let pattern_type = self.check_binding_pattern(pattern, true);
-                self.check_expression(value, &ctx.expect(pattern_type.typ));
+                self.check_binding_pattern(pattern, &mut None, true);
+                self.check_expression(value, &ctx.expect(pattern.typ.clone()));
                 if value.typ.is_never() { is_never = true }
-                else if !pattern_type.vars.is_empty() && !old_ctx.allow_conditional_bindings {
-                    self.error(ErrType::TyperInvalidBindingCaseExpr);
+                else if !pattern.vars_defined.is_empty() && !old_ctx.allow_conditional_bindings {
+                    self.error(ErrType::TyperInvalidBindingCaseExpr, expr.span);
                 }
                 TypeKind::Bool
             },
@@ -209,7 +245,7 @@ impl<'a> TypeChecker<'a> {
                     Expr::Identifier { .. } => {
                         TypeKind::MutPointer(Box::new(expr.typ.clone()))
                     }
-                    _ => self.error(ErrType::DefaultString("Cannot borrow non identifier as mut.".to_string()))
+                    _ => self.error(ErrType::DefaultString("Cannot borrow non identifier as mut.".to_string()), expr.span)
                 }
             }
 
@@ -239,7 +275,7 @@ impl<'a> TypeChecker<'a> {
 
             Expr::Break { expr, label } => {
                 let curr_break_type = if self.current_break_types.is_empty() {
-                    self.error(ErrType::TyperBreakOutsideLoop)
+                    self.error(ErrType::TyperBreakOutsideLoop, expr.span)
                 }
                 else if let Some(break_label) = label {
                     // break with a label -> find the closest loop with that label
@@ -247,7 +283,10 @@ impl<'a> TypeChecker<'a> {
                         .iter().rev()
                         .find(|(x_label, _typ)| x_label == break_label) {
                             Some((_label, typ)) => typ.clone(),
-                            None => self.error(ErrType::TyperUndefinedLoopLabel(break_label.to_string(), self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()))
+                            None => self.error(ErrType::TyperUndefinedLoopLabel(
+                                break_label.to_string(),
+                                self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()
+                            ), expr.span)
                         }
                 } else {
                     // break without a label -> just break to the current loop
@@ -264,7 +303,10 @@ impl<'a> TypeChecker<'a> {
                     && !self.current_break_types
                         .iter().rev()
                         .any(|(x_label, _typ)| x_label == continue_label) {
-                            self.error(ErrType::TyperUndefinedLoopLabel(continue_label.to_string(), self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()));
+                            self.error(ErrType::TyperUndefinedLoopLabel(
+                                continue_label.to_string(),
+                                self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()
+                            ), expr.span);
                         }
                 TypeKind::Never
             }
@@ -281,11 +323,11 @@ impl<'a> TypeChecker<'a> {
                 match &mut callee.typ {
                     TypeKind::Fn { param_types, return_type } => {
                         if param_types.len() != call_param_types.len() {
-                            self.error(ErrType::TyperTooManyArguments(param_types.len(), call_param_types.len()))
+                            self.error(ErrType::TyperTooManyArguments(param_types.len(), call_param_types.len()), expr.span)
                         }
                         else {
                             for (param_type, arg_type) in param_types.iter().zip(call_param_types.iter()) {
-                                self.unify_types(param_type, arg_type);
+                                self.unify_types(param_type, arg_type, callee.span);
                             }
                             *return_type.clone()
                         }
@@ -294,10 +336,10 @@ impl<'a> TypeChecker<'a> {
                         // TODO not the best code, but works for now
                         let return_type = self.new_inference_type();
                         let fn_type = TypeKind::Fn { param_types: call_param_types, return_type: Box::new(return_type.clone()) };
-                        self.unify_types(&fn_type, &TypeKind::Inference(*id));
+                        self.unify_types(&fn_type, &TypeKind::Inference(*id), callee.span);
                         return_type
                     }
-                    _ => self.error(ErrType::TyperCantCallNonFnType(callee.typ.clone()))
+                    _ => self.error(ErrType::TyperCantCallNonFnType(callee.typ.clone()), callee.span)
                 }
             },
 
@@ -310,16 +352,16 @@ impl<'a> TypeChecker<'a> {
 
                     match member_index {
                         Some(i) => elements[i].typ.clone(),
-                        None => self.error(ErrType::TyperTupleDoesntHaveMember(TypeKind::Tup(elements), member.to_string()))
+                        None => self.error(ErrType::TyperTupleDoesntHaveMember(TypeKind::Tup(elements), member.to_string()), expr.span)
                     }
                 }
                 else { todo!() }
             }
 
-            Expr::TypePath(segments) => self.check_path_expression(segments),
+            Expr::TypePath(segments) => self.check_path_expression(segments, expr.span),
 
             Expr::EnumDefinition { name, enums } => {
-                self.checked_define_type(name.clone(), ThrumType {
+                self.define_type(name.clone(), ThrumType {
                     typ: DefinedTypeKind::Enum {
                         name: name.to_string(),
                         inner_types: enums.iter_mut()
@@ -327,7 +369,7 @@ impl<'a> TypeChecker<'a> {
                             .collect()
                     },
                     values: HashMap::new()
-                });
+                }, expr.span);
                 TypeKind::Void
             },
 
@@ -344,7 +386,7 @@ impl<'a> TypeChecker<'a> {
             else { self.prune(&inferred_type) };
         
         if let Some(expected) = &old_ctx.expected_type {
-            self.unify_types(expected, &expr.typ);
+            self.unify_types(expected, &expr.typ, expr.span);
         }
     }
 
@@ -360,84 +402,46 @@ impl<'a> TypeChecker<'a> {
     }
 
 
-    pub(super) fn check_identifier(&mut self, name: &str) -> TypeKind {
-        match self.env.lookup_variable(name) {
-            Some(x) => x,
-            None => return self.error(ErrType::TyperUndefinedIdentifier(name.to_string()))
-        }
-    }
+    
 
 
-    pub(super) fn check_block(&mut self, body: &mut [ExprInfo], ctx: &ExprContext) -> TypeKind {
-        self.env.enter_scope();
-
-        // 1. define FnDefinitions
-        for expr in body.iter_mut() {
-            if let Expr::FnDefinition { name, params, return_type, .. } = &mut expr.expression {
-                let fn_typ = self.get_fn_type(params, return_type, false);
-                self.checked_define_variable(name.clone(), fn_typ);
-            }
-        }
-
-        // normal pass
-        let mut is_never = false;
-        let block_drop_type = if let Some((last_expr, other_exprs)) = body.split_last_mut() {
-            for expr in other_exprs {
-                self.check_expression(expr, ctx);
-                if expr.typ.is_never() { is_never = true }
-            }
-            // conditional bindings are allowed in the last expression of a block, because the current scope is gonna end after this expression anyways.
-            // this isn't reeeaally needed, but it definitely can't hurt to allow.
-            // let x = { case ?x = ... and x > 3 }
-            self.check_expression(last_expr, &ctx.allow_conditional_bindings());
-            if is_never { TypeKind::Never } else { last_expr.typ.clone() }
-        } else {
-            // Empty block returns Void
-            TypeKind::Void
-        };
-
-        self.env.exit_scope();
-        block_drop_type
-    }
-
-
-    fn check_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right_type: &TypeKind) -> TypeKind {
-        match operator {
+    fn check_infix(&mut self, operator: &TokenSpan, left_type: &TypeKind, right_type: &TypeKind) -> TypeKind {
+        match operator.token {
             // num/str operators
             TokenType::Plus | TokenType::Greater | TokenType::Less /* | TokenType::GreaterEqual | TokenType::LessEqual */ => {
-                self.unify_types(left_type, right_type);
+                self.unify_types(left_type, right_type, operator.span);
                 let unified_type = self.prune(left_type);
-                let returned_type = if *operator == TokenType::Plus { unified_type.clone() } else { TypeKind::Bool };
+                let returned_type = if let TokenType::Plus = operator.token { unified_type.clone() } else { TypeKind::Bool };
                 match unified_type {
                     TypeKind::Num | TypeKind::Str => returned_type,
                     // let it propagate, it will be solved later.
                     TypeKind::Inference(_) => returned_type,
-                    _ => self.error(ErrType::TyperInvalidOperatorOnType(operator.clone(), unified_type))
+                    _ => self.error(ErrType::TyperInvalidOperatorOnType(operator.token.clone(), unified_type), operator.span)
                 }
             }
 
             // num operators
             TokenType::Minus | TokenType::Star | TokenType::Slash | TokenType::Percent | TokenType::StarStar => {
-                self.unify_types(left_type, &TypeKind::Num);
-                self.unify_types(right_type, &TypeKind::Num);
+                self.unify_types(left_type, &TypeKind::Num, operator.span);
+                self.unify_types(right_type, &TypeKind::Num, operator.span);
                 TypeKind::Num
             }
 
             // comparison operators
             TokenType::EqualEqual /* | TokenType::NotEqual */ => {
-                self.unify_types(left_type, right_type);
+                self.unify_types(left_type, right_type, operator.span);
                 let unified_type = self.prune(left_type);
                 match unified_type {
                     TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup {.. } | TypeKind::Void => TypeKind::Bool,
                     // TypeKind::Inference(_) => TypeKind::Bool,
-                    _ => self.error(ErrType::TyperInvalidOperatorOnType(TokenType::EqualEqual, unified_type))
+                    _ => self.error(ErrType::TyperInvalidOperatorOnType(TokenType::EqualEqual, unified_type), operator.span)
                 }
             }
 
             // boolean operators
             TokenType::Ampersand | TokenType::Pipe => {
-                self.unify_types(&TypeKind::Bool, left_type);
-                self.unify_types(&TypeKind::Bool, right_type);
+                self.unify_types(&TypeKind::Bool, left_type, operator.span);
+                self.unify_types(&TypeKind::Bool, right_type, operator.span);
                 TypeKind::Bool
             }
             _ => unreachable!("Unsupported infix operator: {:?}", operator)
@@ -445,15 +449,15 @@ impl<'a> TypeChecker<'a> {
     }
 
 
-    fn get_fn_type(&mut self, params: &mut [MatchPattern], return_type: &mut TypeKind, define_params: bool) -> TypeKind {
+    fn get_fn_type(&mut self, params: &mut [MatchPatternInfo], return_type: &mut TypeKind, define_params: bool) -> TypeKind {
         let mut param_types = Vec::new();
         for param_pattern in params.iter_mut() {
-            let pattern_type = self.check_binding_pattern(param_pattern, define_params);
+            self.check_binding_pattern(param_pattern, &mut None, define_params);
 
-            if pattern_type.has_place { self.error(ErrType::TyperFnParamPlacePatterns); }
-            if pattern_type.can_fail { self.error(ErrType::TyperFailableFnParamPatterns); }
+            if param_pattern.has_place { self.error(ErrType::TyperFnParamPlacePatterns, param_pattern.span); }
+            if param_pattern.can_fail { self.error(ErrType::TyperFailableFnParamPatterns, param_pattern.span); }
 
-            param_types.push(pattern_type.typ);
+            param_types.push(param_pattern.typ.clone());
         }
         if *return_type == TypeKind::ParserUnknown {
             *return_type = self.new_inference_type();
@@ -465,8 +469,9 @@ impl<'a> TypeChecker<'a> {
     }
 
 
-    fn check_fn_expression(&mut self, params: &mut [MatchPattern], return_type: &mut TypeKind, body: &mut Rc<ExprInfo>, ctx: &ExprContext) -> TypeKind {
-        self.env.enter_scope();
+    fn check_fn_expression(&mut self, params: &mut [MatchPatternInfo], return_type: &mut TypeKind, body: &mut Rc<ExprInfo>, ctx: &ExprContext) -> TypeKind {
+        self.enter_scope();
+
         // check the fn_type in a new scope to also define the function parameters
         let fn_type = self.get_fn_type(params, return_type, true);
 
@@ -477,16 +482,18 @@ impl<'a> TypeChecker<'a> {
         let body_mut = Rc::get_mut(body).unwrap();
         self.check_expression(body_mut, &ctx.expect(return_type.clone()));
 
+        // drop all param vars
+        self.exit_scope();
+
         // reset return context
         self.current_function_return_type = previous_function_return_type;
-        self.env.exit_scope();
 
         if body_mut.typ.is_never() { TypeKind::Never }
         else { fn_type }
     }
 
 
-    fn check_path_expression(&mut self, segments: &[String]) -> TypeKind {
+    fn check_path_expression(&mut self, segments: &[String], span: Span) -> TypeKind {
         let mut curr_module = &self.library;
 
         for (i, segment) in segments.iter().enumerate() {
@@ -509,7 +516,7 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     // 2 or more remaining segments
-                    _ => return self.error(ErrType::DefaultString("type path had 2 or more remaining segments.".to_string()))
+                    _ => return self.error(ErrType::DefaultString("type path had 2 or more remaining segments.".to_string()), span)
                 }
             }
 
@@ -519,13 +526,13 @@ impl<'a> TypeChecker<'a> {
                     return module_val.typ.clone()
                 }
                 else {
-                    return self.error(ErrType::DefaultString("value path too long.".to_string()))
+                    return self.error(ErrType::DefaultString("value path too long.".to_string()), span)
                 }
             }
 
-            return self.error(ErrType::DefaultString(format!("segment {segment} could not be found...")));
+            return self.error(ErrType::DefaultString(format!("segment {segment} could not be found...")), span);
         }
 
-        self.error(ErrType::DefaultString(format!("'{}' could not be found...", segments.join("::"))))
+        self.error(ErrType::DefaultString(format!("'{}' could not be found...", segments.join("::"))), span)
     }
 }

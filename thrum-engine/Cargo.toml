@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-num_enum = "0.7.5"
-strum_macros = "0.27.2"
+strum_macros = "0.27.2"  # using EnumString for pretty_printing and FromRepr for OpCode conversions
 
 [lib]
 name = "thrum_engine"

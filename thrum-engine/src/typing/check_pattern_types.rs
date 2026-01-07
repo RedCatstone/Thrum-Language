@@ -1,108 +1,136 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::{HashMap, hash_map::Entry}, rc::Rc};
 
 use crate::{
-    ErrType, parsing::ast_structure::{MatchPattern, PlaceExpr, TupleMatchPattern, TupleType, TypeKind}, typing::{AssignablePatternType, TypeChecker, check_expressions::ExprContext}
+    ErrType, parsing::ast_structure::{MatchPattern, MatchPatternInfo, TupleMatchPattern, TupleType, TypeKind}, typing::{Typechecker, VarID, check_expressions::ExprContext}
 };
 
-impl<'a> TypeChecker<'a> {
-    pub(super) fn check_binding_pattern(&mut self, pattern: &mut MatchPattern, define_pattern_vars: bool) -> AssignablePatternType {
-        match pattern {
+impl<'a> Typechecker<'a> {
+    pub(super) fn check_binding_pattern(
+        &mut self,
+        pattern: &mut MatchPatternInfo,
+
+        // every piece of an Or-pattern needs to define the exact same variables.
+        // the HashMap has the expected vars from the first Or-pattern in there.
+        // if this pattern binds a variable that is not in the hashmap, its name gets added to the Vec<String> for a combined error message.
+        expect_vars_defined: &mut Option<(&mut HashMap<String, VarID>, &mut Vec<String>)>,
+        define_pattern_vars: bool
+    ) {
+        let mut merge_pattern = |other: &mut MatchPatternInfo| {
+            if other.has_place { pattern.has_place = true }
+            if other.can_fail { pattern.can_fail = true }
+    
+            pattern.vars_defined.extend(std::mem::take(&mut other.vars_defined));
+        };
+
+
+        match &mut pattern.pattern {
             MatchPattern::Literal(lit) => {
-                AssignablePatternType { typ: self.check_literal(lit), has_place: false, can_fail: true, vars: Vec::new() }
+                pattern.typ = self.check_literal(lit);
+                pattern.can_fail = true;
             }
 
-            MatchPattern::Binding { name, typ } => {
+            MatchPattern::Binding { name, mutable, typ, var_id } => {
                 if *typ == TypeKind::ParserUnknown {
                     // if no type is annotated create a new inference var
                     *typ = self.new_inference_type();
                 }
                 else if *typ == TypeKind::Never {
-                    self.error(crate::ErrType::TyperPatternNeverType);
+                    self.error(crate::ErrType::TyperPatternNeverType, pattern.span);
                 }
-                if define_pattern_vars { self.checked_define_variable(name.clone(), typ.clone()); }
-                AssignablePatternType { typ: typ.clone(), has_place: false, can_fail: false, vars: vec![(name.clone(), typ.clone())] }
+                if define_pattern_vars {
+                    // if an Or-pattern expects vars to be defined,
+                    // then it needs to make sure that the exact same variables with the same VarIDs are defined.
+                    if let Some((expect_map, err_vec)) = expect_vars_defined {
+                        match expect_map.entry(name.to_string()) {
+                            Entry::Occupied(occ) => {
+                                let removed_occ = occ.remove();
+                                let occ_var = self.var_lookup.get(&removed_occ).unwrap();
+                                *var_id = Some(occ_var.var_id);
+                                self.unify_types(&occ_var.typ.clone(), typ, pattern.span);
+                            }
+                            Entry::Vacant(_) => {
+                                err_vec.push(name.clone());
+                            }
+                        }
+                    }
+                    else {
+                        // if it isn't in an or-pattern, just define it normally
+                        let var = self.define_variable(name.clone(), *mutable, typ.clone(), pattern.span);
+                        *var_id = Some(var.var_id);
+                        pattern.vars_defined.push((var.name, var.var_id));
+                    }
+                }
+                pattern.typ = typ.clone();
             }
 
-            MatchPattern::Array(elements) => {
+            MatchPattern::Array(inner_patterns) => {
                 let mut arr_types = Vec::new();
-                let mut has_place = false;
-                let mut vars = Vec::new();
                 
-                for element in elements {
-                    let pattern_type = self.check_binding_pattern(element, define_pattern_vars);
-                    arr_types.push(pattern_type.typ);
-                    vars.extend(pattern_type.vars);
-                    if pattern_type.has_place { has_place = true; }
+                for p in inner_patterns {
+                    self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                    merge_pattern(p);
+                    arr_types.push(p.typ.clone());
                 }
-                let arr_type = self.unify_type_vec(&arr_types);
-                AssignablePatternType { typ: TypeKind::Arr(Box::new(arr_type)), has_place, can_fail: true, vars }
+                let arr_type = self.unify_type_vec(&arr_types, pattern.span);
+                pattern.typ = TypeKind::Arr(Box::new(arr_type));
             }
 
-            MatchPattern::Tuple(elements) => {
+            MatchPattern::Tuple(inner_patterns) => {
                 let mut tuple_types = Vec::new();
-                let mut has_place = false;
-                let mut can_fail = false;
-                let mut vars = Vec::new();
 
-                for TupleMatchPattern { label, pattern } in elements {
-                    let pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
-                    tuple_types.push(TupleType { label: label.clone(), typ: pattern_type.typ });
-                    vars.extend(pattern_type.vars);
-                    if pattern_type.has_place { has_place = true; }
-                    if pattern_type.can_fail { can_fail = true; }
+                for TupleMatchPattern { label, pattern: p } in inner_patterns {
+                    self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                    merge_pattern(p);
+                    tuple_types.push(TupleType { label: label.clone(), typ: p.typ.clone() });
                 }
-                AssignablePatternType { typ: TypeKind::Tup(tuple_types), has_place, can_fail, vars }
+                pattern.typ = TypeKind::Tup(tuple_types);
             }
 
             MatchPattern::Wildcard => {
-                AssignablePatternType { typ: self.new_inference_type(), has_place: false, can_fail: false, vars: Vec::new() }
+                pattern.typ = self.new_inference_type();
             }
 
-            MatchPattern::Or(patterns) => {
+            MatchPattern::Or(inner_patterns) => {
                 let mut or_types = Vec::new();
-                let mut has_place = false;
-                let mut can_fail = false;
-                let mut vars = HashMap::new();
 
-                for (i, pattern) in patterns.iter_mut().enumerate() {
-                    let pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
+                let Some((first_pattern, other_patterns)) = inner_patterns.split_first_mut() else {
+                    unreachable!("Parser makes sure that this is impossible.")
+                };
 
-                    // make sure that all or patterns define the same variables.
-                    if i == 0 { vars = pattern_type.vars.into_iter().collect(); }
-                    else {
-                        // check if both or-match-patterns define the exact same variables.
-                        if pattern_type.vars.len() != vars.len() {
-                            let mut vars_not_bound = Vec::new();
-                            for var in vars.keys() {
-                                if pattern_type.vars.iter().all(|(pv_str, _)| pv_str != var) {
-                                    vars_not_bound.push(var.to_string());
-                                }
-                            }
-                            if !vars_not_bound.is_empty() { self.error(ErrType::TyperOrPatternDoesntBindVars(vars_not_bound)); }
-                        }
-                        let mut vars_bound_too_much = Vec::new();
-                        for (pattern_var_str, pattern_var_type) in pattern_type.vars {
-                            match vars.get(&pattern_var_str) {
-                                Some(x) => self.unify_types(x, &pattern_var_type),
-                                None => vars_bound_too_much.push(pattern_var_str)
-                            }
-                        }
-                        if !vars_bound_too_much.is_empty() { self.error(ErrType::TyperOrPatternBindsVarsTooMuch(vars_bound_too_much)); }
+                // check the first pattern normal
+                self.check_binding_pattern(first_pattern, expect_vars_defined, define_pattern_vars);
+                let first_pattern_vars: HashMap<String, VarID> = std::mem::take(&mut first_pattern.vars_defined).into_iter().collect();
+                merge_pattern(first_pattern);
+                or_types.push(first_pattern.typ.clone());
+
+                
+                for p in other_patterns {
+                    let mut vars_bound_too_much = Vec::new();
+
+                    let mut first_pattern_vars_clone = first_pattern_vars.clone();
+                    self.check_binding_pattern(p, &mut Some((&mut first_pattern_vars_clone, &mut vars_bound_too_much)), define_pattern_vars);
+                    merge_pattern(p);
+                    or_types.push(p.typ.clone());
+
+                    let vars_not_bound: Vec<String> = first_pattern_vars_clone.into_keys().collect();
+                    if !vars_not_bound.is_empty() {
+                        self.error(ErrType::TyperOrPatternDoesntBindVars(vars_not_bound), p.span);
                     }
-                    or_types.push(pattern_type.typ);
-                    if pattern_type.has_place { has_place = true; }
-                    if pattern_type.can_fail { can_fail = true; }
+                    if !vars_bound_too_much.is_empty() {
+                        self.error(ErrType::TyperOrPatternBindsVarsTooMuch(vars_bound_too_much), p.span);
+                    }
                 }
-                let typ = self.unify_type_vec(&or_types);
-                AssignablePatternType { typ, has_place, can_fail, vars: vars.into_iter().collect() }
+
+                pattern.typ = self.unify_type_vec(&or_types, pattern.span);
             }
 
-            MatchPattern::Conditional { pattern, body } => {
-                let mut pattern_type = self.check_binding_pattern(pattern, define_pattern_vars);
+            MatchPattern::Conditional { pattern: p, body } => {
+                self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                merge_pattern(p);
                 self.check_expression(Rc::get_mut(body).unwrap(), &ExprContext::default());
-                self.unify_types(&TypeKind::Bool, &body.typ);
-                pattern_type.can_fail = true;
-                pattern_type
+                self.unify_types(&TypeKind::Bool, &body.typ, p.span);
+                pattern.can_fail = true;
+                pattern.typ = p.typ.clone();
             }
 
             MatchPattern::EnumVariant { .. } => {
@@ -140,24 +168,26 @@ impl<'a> TypeChecker<'a> {
                 // expected_enum_type
             }
 
-            MatchPattern::Place(PlaceExpr::Identifier(name)) => {
-                AssignablePatternType { typ: self.check_identifier(name).clone(), has_place: true, can_fail: false, vars: Vec::new() }
+            MatchPattern::PlaceIdentifier { name, var_id } => {
+                pattern.typ = self.use_variable(name, false, pattern.span, var_id);
+                pattern.has_place = true;
             }
 
-            MatchPattern::Place(PlaceExpr::Deref(name)) => {
-                let typ = self.check_identifier(name);
-                let inner_type = self.new_inference_type();
-                self.unify_types(&TypeKind::MutPointer(Box::new(inner_type.clone())), &typ);
-                AssignablePatternType { typ: inner_type, has_place: true, can_fail: false, vars: Vec::new() }
+            MatchPattern::PlaceDeref { name, var_id } => {
+                let typ = self.use_variable(name, false, pattern.span, var_id);
+                pattern.typ = self.new_inference_type();
+                self.unify_types(&TypeKind::MutPointer(Box::new(pattern.typ.clone())), &typ, pattern.span);
+                pattern.has_place = true;
             }
 
-            MatchPattern::Place(PlaceExpr::Index { left, index }) => {
+            MatchPattern::PlaceIndex { left, index } => {
                 self.check_expression(Rc::get_mut(left).unwrap(), &ExprContext::default());
-                let arr_type = self.new_inference_type();
-                self.unify_types(&TypeKind::Arr(Box::new(arr_type.clone())), &left.typ);
+                pattern.typ = self.new_inference_type();
+                self.unify_types(&TypeKind::Arr(Box::new(pattern.typ.clone())), &left.typ, pattern.span);
                 self.check_expression(Rc::get_mut(index).unwrap(), &ExprContext::default());
-                self.unify_types(&TypeKind::Num, &index.typ);
-                AssignablePatternType { typ: arr_type, has_place: true, can_fail: true, vars: Vec::new() }
+                self.unify_types(&TypeKind::Num, &index.typ, pattern.span);
+                pattern.has_place = true;
+                pattern.can_fail = true;
             }
         }
     }

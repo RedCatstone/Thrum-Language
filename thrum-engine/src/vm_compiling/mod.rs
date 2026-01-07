@@ -1,10 +1,12 @@
-use num_enum::TryFromPrimitive;
+use std::collections::HashMap;
 
-use crate::{Program, lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{Expr, ExprInfo, MatchArm, MatchPattern, PlaceExpr, TupleElement, TupleMatchPattern, TypeKind, Value}};
+use strum_macros::FromRepr;
+
+use crate::{Program, lexing::tokens::TokenType, nativelib::{ThrumModule, get_native_lib}, parsing::ast_structure::{Expr, ExprInfo, MatchArm, MatchPattern, MatchPatternInfo, TupleElement, TupleMatchPattern, TypeKind, Value}, typing::VarID};
 
 
 #[repr(u8)]
-#[derive(Debug, TryFromPrimitive)]
+#[derive(Debug, FromRepr)]
 pub enum OpCode {
     ConstGet,  // ConstantIndex
     PushVoid,
@@ -54,38 +56,38 @@ pub struct BytecodeChunk {
 
 
 
-pub struct Compiler {
-}
+pub struct Compiler;
 
 impl Compiler {
     pub fn compile_program(program: &mut Program) {
         let mut bytecode_chunks = Vec::new();
+        let mut variables = HashMap::new();
 
         let library = get_native_lib();
-        let mut locals = vec![Vec::new()];
-        Self::load_prelude_into_locals_vec(&library, &mut locals[0]);
+        Self::load_prelude_into_variables(&library, &mut variables, &mut 1);
 
         CompileFunction::compile_function(
             "<main>".to_string(),
             // the ast will be gone after compilation!!!
-            &std::mem::take(&mut program.ast),
+            &std::mem::take(&mut program.ast).unwrap(),
             &[],
             &mut bytecode_chunks,
-            &mut locals,
+            &mut variables,
             &library,
         );
         program.compiled_bytecode = bytecode_chunks;
     }
 
-    fn load_prelude_into_locals_vec(module: &ThrumModule, locals: &mut Vec<Local>) {
-        for (name, value) in &module.values {
+    fn load_prelude_into_variables(module: &ThrumModule, variables: &mut HashMap<VarID, CompilerVar>, next_var_id: &mut usize /* incredibly ugly but just for now */) {
+        for value in module.values.values() {
             if value.is_prelude {
-                locals.push(Local { name: name.clone(), scope_depth: 0, const_value: Some(value.val.clone()) });
+                variables.insert(VarID(*next_var_id), CompilerVar::ConstValue(value.val.clone()));
+                *next_var_id += 1;
             }
         }
         // Recursion
         for sub_module in module.sub_modules.values() {
-            Self::load_prelude_into_locals_vec(sub_module, locals);
+            Self::load_prelude_into_variables(sub_module, variables, next_var_id);
         }
     }
 }
@@ -101,6 +103,10 @@ struct FailureJump {
 
 
 
+enum CompilerVar {
+    AtSlot(usize),
+    ConstValue(Value)
+}
 
 
 struct CompileFunction<'a> {
@@ -109,22 +115,24 @@ struct CompileFunction<'a> {
     bytecode_chunks: &'a mut Vec<BytecodeChunk>,
     curr_bytecode_index: usize,
 
-    // locals: vec![localvec_from_previous_compile_function, this_locals_vec]
-    // if this CompileFunction needs to push/pop locals, its local vec is always .last()
-    locals: &'a mut Vec<Vec<Local>>,
-    curr_scope_depth: usize,
-
+    // shared across all CompileFunctions.
     library: &'a ThrumModule,
+    variables: &'a mut HashMap<VarID, CompilerVar>,
+
+
+    // only for this CompileFunction:
+    cur_var_amount: usize,
+
+    // compiling `let x = 2 + 2`
+    // - 2 temps (2, 2)
+    // -> 1 temp (4)
+    // -> 0 temps, because 4 got moved into a var slot (+1 var)
+    // -> 1 temp, because the let-expr pushed void
+    cur_temp_amount: usize,
     
     // break / continue
     loop_infos: Vec<LoopInfo>,
-    // compiling `let x = 2 + 2` first has 2 temps (2, 2) then goes to 1 temp (4) then goes to 0.
-    cur_temp_amount: usize,
-}
-struct Local {
-    name: String,
-    scope_depth: usize,
-    const_value: Option<Value>,
+
 }
 
 struct LoopInfo {
@@ -139,26 +147,26 @@ struct LoopInfo {
 impl<'a> CompileFunction<'a> {
     fn compile_function(
         name: String,
-        program: &[ExprInfo],
-        params: &[MatchPattern],
+        program: &ExprInfo,
+        params: &[MatchPatternInfo],
         bytecode_chunks: &mut Vec<BytecodeChunk>,
-        locals: &mut Vec<Vec<Local>>,
+        variables: &mut HashMap<VarID, CompilerVar>,
         library: &ThrumModule,
     ) -> usize
         {
         let mut compile_function = CompileFunction {
             curr_bytecode_index: bytecode_chunks.len(),
             bytecode_chunks,
-            locals,
-            curr_scope_depth: 0,
             library,
+            variables,
 
+            cur_var_amount: 0,
             cur_temp_amount: params.len(),
+
             loop_infos: Vec::new(),
         };
         // push the new bytecode_chunk and localsvec for this function
         compile_function.bytecode_chunks.push(BytecodeChunk { name, ..Default::default() });
-        compile_function.locals.push(Vec::new());
 
         // compile the params first
         for param in params.iter().rev() {
@@ -166,11 +174,18 @@ impl<'a> CompileFunction<'a> {
         }
 
         // then compile the body!!
-        compile_function.compile_block_expression(program);
+        compile_function.compile_expression(program);
+
+        // drop all param variables (not neccessary, but good practice)
+        for param in params {
+            compile_function.drop_vars(
+                &param.vars_defined.iter().map(|(_, x)| *x).collect::<Vec<_>>(),
+                false
+            );
+        }
 
         // finally, return
         compile_function.push_op(OpCode::Return);
-        compile_function.locals.pop();
         compile_function.curr_bytecode_index
     }
 
@@ -206,57 +221,95 @@ impl<'a> CompileFunction<'a> {
 
             Expr::Infix { operator, left, right } => {
                 self.compile_expression(left);
-                self.compile_infix(operator, &left.typ, right);
+                self.compile_infix(&operator.token, &left.typ, right);
             }
             Expr::Prefix { operator, right } => {
                 self.compile_expression(right);
                 self.compile_prefix(operator, &right.typ)
             }
 
-            Expr::Block(body) => self.compile_block_expression(body),
+            Expr::Block { exprs, drops_vars } => {
+                let drops_vars: &[VarID] = drops_vars;
+                // define FnDefinitions first
+                for expr in exprs {
+                    match &expr.expression {
+                        Expr::FnDefinition { name, var_id, params, body, ..  } => {
+                            let chunk_index = self.bytecode_chunks.len();
+                            let function_value = Value::Closure { chunk_index };
+                            self.push_get_constant_op(function_value.clone());
+                            self.push_define_local(var_id.unwrap(), Some(function_value));
 
-            Expr::Identifier { name } => {
-                self.push_get_identifier(name);
+                            CompileFunction::compile_function(
+                                name.to_string(),
+                                body,
+                                params,
+                                self.bytecode_chunks,
+                                self.variables,
+                                self.library,
+                            );
+                        }
+                        _ => { /* Do nothing */}
+                    }
+                }
+
+                // process all other expressions
+                if let Some((last_expr, preceding_exprs)) = exprs.split_last() {
+                    for expr in preceding_exprs {
+                        self.compile_expression(expr);
+                        // if it is not the last expression of the block, the return value is discarded, so pop it.
+                        self.push_pop_value();
+                    }
+                    self.compile_expression(last_expr);
+                }
+                else {
+                    // if block is empty, just push void
+                    self.push_void();
+                };
+
+                self.drop_vars(drops_vars, true);
+            }
+
+            Expr::Identifier { var_id, .. } => {
+                self.push_get_identifier(var_id.as_ref().unwrap());
             }
 
             Expr::Assign { pattern, extra_operator, value } => {
-                // TODO
-                let val = value.as_ref().unwrap();
-
-                // push value to the stack
-                if *extra_operator == TokenType::Equal {
-                    self.compile_expression(val);
+                for (_, var) in &pattern.vars_defined {
+                    self.define_local(*var);
                 }
-                else {
-                    match *pattern.clone() {
-                        MatchPattern::Place(place) => {
-                            self.push_place_expr_value(place);
-                            self.compile_infix(extra_operator, &val.typ, val);
-                        }
-                        _ => unreachable!("Infix assignments are only allowed for place patterns.")
+
+                if let Some(val) = value {
+                    if extra_operator.token == TokenType::Equal {
+                        // push value to the stack
+                        self.compile_expression(val);
                     }
-                }
-                // compile the binding pattern
-                let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(pattern, &mut failure_jumps);
+                    else {
+                        // example: x += 2
+                        // it needs to first push the value of x, compute x + 2, then set x to that result
+                        match &pattern.pattern {
+                            MatchPattern::PlaceIdentifier { var_id, .. } => self.push_get_identifier(var_id.as_ref().unwrap()),
+                            MatchPattern::PlaceIndex { left, index } => {
+                                self.compile_expression(left);
+                                self.compile_expression(index);
+                                self.push_op(OpCode::ArrGet);
+                            }
+                            MatchPattern::PlaceDeref { var_id, .. } => {
+                                self.push_get_identifier(var_id.as_ref().unwrap());
+                                self.push_op(OpCode::FollowPointer);
+                            }
+                            _ => unreachable!("Infix assignments are only allowed for place patterns.")
+                        }
+                        self.compile_infix(&extra_operator.token, &val.typ, val);
+                    }
 
-                // if AssignablePattern can fail, use the else block or panic
-                if !failure_jumps.is_empty() {
-                    unreachable!("assign pattern didn't match.")
-                    // self.push_op(OpCode::Jump);
-                    // let success_jump = self.push_opnum_for_patching();
+                    // compile the binding pattern
+                    let mut failure_jumps = Vec::new();
+                    self.compile_binding_pattern(pattern, &mut failure_jumps);
 
-                    // self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
-                    
-                    // if let Some(alt) = alternative {
-                    //     self.compile_expression(alt);
-                    // }
-                    // else {
-                    //     self.push_get_constant_op(Value::Str("Assignment-pattern did not match.".to_string()));
-                    //     self.push_op(OpCode::Panic);
-                    // }
-
-                    // self.patch_jump_op(success_jump);
+                    // if AssignablePattern can fail, use the else block or panic
+                    if !failure_jumps.is_empty() {
+                        unreachable!("assign pattern didn't match in let expression, this should not be possible.")
+                    }
                 }
 
                 self.push_void();
@@ -289,8 +342,8 @@ impl<'a> CompileFunction<'a> {
 
             Expr::MutRef { expr } => {
                 match &expr.expression {
-                    Expr::Identifier { name } => {
-                        self.push_get_local_mut(name);
+                    Expr::Identifier { var_id, .. } => {
+                        self.push_get_local_mut(var_id.as_ref().unwrap());
                     }
                     _ => todo!()
                 }
@@ -298,8 +351,8 @@ impl<'a> CompileFunction<'a> {
 
             Expr::Deref { expr } => {
                 match &expr.expression {
-                    Expr::Identifier { name } => {
-                        self.push_get_identifier(name);
+                    Expr::Identifier { var_id, .. } => {
+                        self.push_get_identifier(var_id.as_ref().unwrap());
                         self.push_op(OpCode::FollowPointer);
                     }
                     _ => todo!()
@@ -431,7 +484,6 @@ impl<'a> CompileFunction<'a> {
                 let mut jumps_to_end_of_match = Vec::new();
 
                 for (i, MatchArm { pattern, body }) in arms.iter().enumerate() {
-                    self.enter_scope();
                     let is_last_arm = i == arms.len() - 1;
 
                     // if not the last arm, duplicate the to match value
@@ -452,7 +504,6 @@ impl<'a> CompileFunction<'a> {
                         // all failure jumps from this pattern match attempt should point towards the next arm
                         self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
                     }
-                    self.exit_scope();
                 }
 
                 // end of match statement, point all the success jumps here
@@ -479,10 +530,10 @@ impl<'a> CompileFunction<'a> {
             Expr::Closure { params, body, .. } => {
                 let fn_index = CompileFunction::compile_function(
                     "<closure>".to_string(),
-                    std::slice::from_ref(body),
+                    body,
                     params,
                     self.bytecode_chunks,
-                    self.locals,
+                    self.variables,
                     self.library
                 );
                 self.push_get_constant_op(Value::Closure { chunk_index: fn_index });
@@ -565,7 +616,6 @@ impl<'a> CompileFunction<'a> {
 
 
     fn push_op(&mut self, op: OpCode) { self.bytecode_chunks[self.curr_bytecode_index].codes.push(op as u8); }
-    fn push_codes(&mut self, codes: &[u8]) { self.bytecode_chunks[self.curr_bytecode_index].codes.extend(codes); }
     fn push_opnum(&mut self, opnum: usize) {
         if opnum < u8::MAX as usize {
             self.bytecode_chunks[self.curr_bytecode_index].codes.push(opnum as u8);
@@ -623,83 +673,73 @@ impl<'a> CompileFunction<'a> {
         self.cur_temp_amount += 1;
     }
 
-    fn enter_scope(&mut self) { self.curr_scope_depth += 1; }
-    fn exit_scope(&mut self) -> Vec<u8> {
-        self.curr_scope_depth -= 1;
+    fn define_local(&mut self, var_id: VarID) -> usize {
+        if let Some(var) = self.variables.get(&var_id) {
+            match var {
+                CompilerVar::AtSlot(slot) => *slot,
+                CompilerVar::ConstValue(a) => unreachable!("Cannot get the slot of a constant {a}")
+            }
+        } else {
+            self.variables.insert(var_id, CompilerVar::AtSlot(self.cur_var_amount));
+            let slot = self.cur_var_amount;
 
-        // update the max locals needed variable
-        let before_cleanup = self.get_curr_locals().len();
-        if before_cleanup > self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed {
-            self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = before_cleanup
-        }
+            self.cur_var_amount += 1;
+            // if this is the highest amount of vars needed so far, store that
+            if self.cur_var_amount > self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed {
+                self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = self.cur_var_amount
+            }
 
-        // trash locals that are now out of scope
-        while !self.get_curr_locals().is_empty() && self.get_curr_locals().last().unwrap().scope_depth > self.curr_scope_depth {
-            self.get_curr_locals().pop();
+            slot
         }
-
-        let mut cleanup_code = Vec::new();
-        let cleanup_amount = before_cleanup - self.get_curr_locals().len();
-        if cleanup_amount > 0 {
-            cleanup_code.push(OpCode::LocalsFree as u8);
-            cleanup_code.push(self.get_curr_locals().len() as u8);
-            cleanup_code.push(cleanup_amount as u8);
-        }
-        cleanup_code
     }
 
-    fn get_curr_locals(&mut self) -> &mut Vec<Local> {
-        self.locals.last_mut().unwrap()
-    }
+    fn push_define_local(&mut self, var_id: VarID, const_value: Option<Value>) {
+        if let Some(val) = const_value {
+            self.variables.insert(var_id, CompilerVar::ConstValue(val));
+            self.cur_var_amount += 1;
+        }
+        else {
+            let slot = self.define_local(var_id);
+            self.push_op_with_opnum(OpCode::LocalSet, slot);
+        };
 
-    fn push_define_local(&mut self, name: String, const_value: Option<Value>) {
-        let curr_locals_len = self.get_curr_locals().len();
-        self.push_op_with_opnum(OpCode::LocalSet, curr_locals_len);
-        let new_local = Local { name, scope_depth: self.curr_scope_depth, const_value };
-        self.get_curr_locals().push(new_local);
-        
+
         self.cur_temp_amount -= 1;
     }
-    fn get_local_index(&mut self, name: &str) -> Option<usize> {
-        for (i, local) in self.get_curr_locals().iter().enumerate().rev() {
-            if local.name == name {
-                return Some(i);
+
+    fn push_get_identifier(&mut self, var_id: &VarID) {
+        match self.variables.get(var_id) {
+            None => {
+                unreachable!("{var_id:?} is not in the current variables...")
+            }
+            Some(CompilerVar::ConstValue(val)) => {
+                self.push_get_constant_op(val.clone());
+            }
+            Some(CompilerVar::AtSlot(slot)) => {
+                self.push_op_with_opnum(OpCode::LocalGet, *slot);
+                self.cur_temp_amount += 1;
             }
         }
-        None
     }
-    fn push_get_identifier(&mut self, name: &str) {
-        for (curr_compiler_i, local_locals) in self.locals.iter().rev().enumerate() {
-            for (index, local) in local_locals.iter().enumerate().rev() {
-                if local.name == name {
-                    // if it has a known value, just push it as a const
-                    if let Some(val) = &local.const_value {
-                        self.push_get_constant_op(val.clone());
-                        return;
-                    }
 
-                    // if it is found within this CompileFunction's stack
-                    else if curr_compiler_i == 0 {
-                        self.push_op_with_opnum(OpCode::LocalGet, index);
-                        self.cur_temp_amount += 1;
-                        return;
-                    }
-                    else { panic!("capturing isn't implemented yet :((") }
-                }
+    fn push_set_local(&mut self, var_id: &VarID) {
+        match self.variables.get(var_id) {
+            None => unreachable!("{var_id:?} is not in the current variables..."),
+            Some(CompilerVar::ConstValue(val)) => unreachable!("tried to set to a constant value {var_id:?}, {val}"),
+            Some(CompilerVar::AtSlot(slot)) => {
+                self.push_op_with_opnum(OpCode::LocalSet, *slot);
             }
         }
-        unreachable!("could not find {name} in locals vec or globals...")
-    }
-
-
-    fn push_set_local(&mut self, name: &str) {
-        let i = self.get_local_index(name).unwrap_or_else(|| panic!("could not find {name} in the locals vec..."));
-        self.push_op_with_opnum(OpCode::LocalSet, i);
         self.cur_temp_amount -= 1;
     }
-    fn push_get_local_mut(&mut self, name: &str) {
-        let i = self.get_local_index(name).unwrap_or_else(|| panic!("could not find {name} in the locals vec..."));
-        self.push_op_with_opnum(OpCode::MakePointer, i);
+    fn push_get_local_mut(&mut self, var_id: &VarID) {
+        match self.variables.get(var_id) {
+            None => unreachable!("{var_id:?} is not in the current variables..."),
+            Some(CompilerVar::ConstValue(val)) => unreachable!("tried to set to a constant value {var_id:?}, {val}"),
+            Some(CompilerVar::AtSlot(slot)) => {
+                self.push_op_with_opnum(OpCode::MakePointer, *slot);
+            }
+        }
         self.cur_temp_amount += 1;
     }
 
@@ -734,51 +774,15 @@ impl<'a> CompileFunction<'a> {
 
 
 
-
-
-
-
-    fn compile_block_expression(&mut self, body: &[ExprInfo]) {
-        // define FnDefinitions first
-        // they will actually be globals, so that another CompileFunction can also call it
-        for expr in body {
-            match &expr.expression {
-                Expr::FnDefinition { name, params, body, .. } => {
-                    let fn_index = self.bytecode_chunks.len();
-                    let function_value = Value::Closure { chunk_index: fn_index };
-                    self.push_get_constant_op(function_value.clone());
-                    self.push_define_local(name.clone(), Some(function_value));
-    
-                    CompileFunction::compile_function(
-                        name.to_string(),
-                        std::slice::from_ref(body),
-                        params,
-                        self.bytecode_chunks,
-                        self.locals,
-                        self.library,
-                    );
-                }
-                _ => { /* Do nothing */}
-            }
+    fn drop_vars(&mut self, vars: &[VarID], push_code: bool) {
+        for var in vars {
+            self.variables.remove(var);
+            self.cur_var_amount -= 1;
         }
-
-        // process all other expressions
-        if let Some((last_expr, preceding_exprs)) = body.split_last() {
-            self.enter_scope();
-
-            for expr in preceding_exprs {
-                self.compile_expression(expr);
-                // if it is not the last expression of the block, the return value is always useless, so pop it.
-                self.push_pop_value();
-            }
-            self.compile_expression(last_expr);
-
-            let cleanup_code = self.exit_scope();
-            self.push_codes(&cleanup_code);
-        }
-        else {
-            // if block is empty, just push void
-            self.push_void();
+        if push_code {
+            self.push_op(OpCode::LocalsFree);
+            self.push_opnum(self.cur_var_amount);
+            self.push_opnum(vars.len());
         }
     }
 
@@ -788,10 +792,10 @@ impl<'a> CompileFunction<'a> {
 
 
 
-    fn compile_binding_pattern(&mut self, pattern: &MatchPattern, failure_jumps: &mut Vec<FailureJump>) {
-        match pattern {
+    fn compile_binding_pattern(&mut self, pattern: &MatchPatternInfo, failure_jumps: &mut Vec<FailureJump>) {
+        match &pattern.pattern {
             // the value is already on the stack, just the compiler just needs a variable that points to it.
-            MatchPattern::Binding { name, .. } => self.push_define_local(name.clone(), None),
+            MatchPattern::Binding { var_id, .. } => self.push_define_local(var_id.unwrap(), None),
             MatchPattern::Wildcard => self.push_pop_value(),
 
             MatchPattern::Tuple(patterns) => {
@@ -802,10 +806,10 @@ impl<'a> CompileFunction<'a> {
                     self.compile_binding_pattern(pattern, failure_jumps);
                 }
             }
-            MatchPattern::Place(PlaceExpr::Identifier(name)) => self.push_set_local(name),
+            MatchPattern::PlaceIdentifier { var_id, .. } => self.push_set_local(var_id.as_ref().unwrap()),
 
-            MatchPattern::Place(PlaceExpr::Deref(name)) => {
-                self.push_get_identifier(name);
+            MatchPattern::PlaceDeref { var_id, .. } => {
+                self.push_get_identifier(var_id.as_ref().unwrap());
                 self.push_value_ref_set();
             }
 
@@ -834,10 +838,10 @@ impl<'a> CompileFunction<'a> {
                 failure_jumps.push(FailureJump { temps: self.cur_temp_amount, jump_loc: self.push_opnum_for_patching() });
             }
 
-            MatchPattern::Place(PlaceExpr::Index { left, index }) => {
+            MatchPattern::PlaceIndex { left, index } => {
                 self.compile_expression(index);
                 match &left.expression {
-                    Expr::Identifier { name } => self.push_get_local_mut(name),
+                    Expr::Identifier { var_id, .. } => self.push_get_local_mut(var_id.as_ref().unwrap()),
                     _ => todo!("{:?}", left.expression)
                 }
                 self.push_arr_ref_set();
@@ -885,28 +889,6 @@ impl<'a> CompileFunction<'a> {
 
 
 
-
-    fn push_place_expr_value(&mut self, place_expr: PlaceExpr) {
-        match place_expr {
-            PlaceExpr::Identifier(name) => self.push_get_identifier(&name),
-            PlaceExpr::Index { left, index } => {
-                self.compile_expression(&left);
-                self.compile_expression(&index);
-                self.push_op(OpCode::ArrGet);
-            }
-            PlaceExpr::Deref(name) => {
-                self.push_get_identifier(&name);
-                self.push_op(OpCode::FollowPointer);
-            }
-        }
-    }
-
-
-
-
-
-
-
     fn compile_infix(&mut self, operator: &TokenType, left_type: &TypeKind, right: &ExprInfo) {
         if TokenType::EqualEqual == *operator {
             self.compile_expression(right);
@@ -923,10 +905,10 @@ impl<'a> CompileFunction<'a> {
                     let jump_over_right_expression = self.push_opnum_for_patching();
                     self.compile_expression(right);
                     self.push_op(OpCode::Jump);
-                    let right_expression_jump_over_push_true = self.push_opnum_for_patching();
+                    let jump_to_end = self.push_opnum_for_patching();
                     self.patch_jump_op(jump_over_right_expression);
                     self.push_get_constant_op(Value::Bool(false));
-                    self.patch_jump_op(right_expression_jump_over_push_true);
+                    self.patch_jump_op(jump_to_end);
                 }
                 TokenType::Pipe => {
                     // evaluate left
@@ -937,10 +919,10 @@ impl<'a> CompileFunction<'a> {
                     let jump_over_right_expression = self.push_opnum_for_patching();
                     self.compile_expression(right);
                     self.push_op(OpCode::Jump);
-                    let right_expression_jump_over_push_true = self.push_opnum_for_patching();
+                    let jump_to_end = self.push_opnum_for_patching();
                     self.patch_jump_op(jump_over_right_expression);
                     self.push_get_constant_op(Value::Bool(true));
-                    self.patch_jump_op(right_expression_jump_over_push_true);
+                    self.patch_jump_op(jump_to_end);
                 }
                 _ => unreachable!("Unsupported operator {} for type bool", operator)
             }
@@ -965,12 +947,8 @@ impl<'a> CompileFunction<'a> {
                     TokenType::Greater => self.push_op(OpCode::CmpGreater),
                     _ => unreachable!("Unsupported operator {} for type str", operator)
                 }
-                TypeKind::Arr(_) => match operator {
-                    _ => unreachable!("Unsupported operator {} for type arr", operator)
-                }
-                TypeKind::Tup { .. } => match operator {
-                    _ => unreachable!("Unsupported operator {} for type tup", operator)
-                }
+                TypeKind::Arr(_) => unreachable!("Unsupported operator {} for type arr", operator),
+                TypeKind::Tup { .. } => unreachable!("Unsupported operator {} for type tup", operator),
 
                 TypeKind::Never => {
                     /* Do nothing */

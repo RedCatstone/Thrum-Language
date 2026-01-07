@@ -1,7 +1,6 @@
-use core::fmt;
 use std::{iter::Peekable, vec::IntoIter};
 
-use crate::{ErrType, Program, ProgramError, lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{Expr, Span}};
+use crate::{ErrType, Program, ProgramError, lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::Span};
 
 mod parse_expressions;
 mod parse_pattern_types;
@@ -13,17 +12,14 @@ pub mod desugar;
 pub fn parse_program(program: &mut Program) {
     let mut parser = Parser::new(program);
 
-    let Expr::Block(body) = parser.parse_block_expression(TokenType::EndOfFile, Span::default()).expression
-    else { unreachable!() };
-
-    program.ast = body;
+    program.ast = Some(parser.parse_block_expression(TokenType::EndOfFile, Span::default()));
 }
 
 
 
 pub struct Parser<'a> {
     errors: &'a mut Vec<ProgramError>,
-    tokens: Peekable<IntoIter<LexerToken>>,
+    tokens: Peekable<IntoIter<TokenSpan>>,
     prev_token_line: usize,
     pipe_operators_active: usize,
 }
@@ -40,12 +36,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn peek(&mut self) -> &LexerToken {
-        self.tokens.peek().unwrap_or(&LexerToken::END_TOKEN)
+    fn peek(&mut self) -> &TokenSpan {
+        self.tokens.peek().unwrap_or(&TokenSpan::END_TOKEN)
     }
 
-    fn next(&mut self) -> LexerToken {
-        let next = self.tokens.next().unwrap_or(LexerToken::END_TOKEN);
+    fn next(&mut self) -> TokenSpan {
+        let next = self.tokens.next().unwrap_or(TokenSpan::END_TOKEN);
         self.prev_token_line = next.span.line;
         next
     }
@@ -55,7 +51,7 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_is_expression_start(&mut self) -> bool {
-        match self.peek().token_type {
+        match self.peek().token {
             // these should match parse_prefix function
             TokenType::Identifier(_) | TokenType::Number(_) | TokenType::StringFrag(_) | TokenType::StringStart | TokenType::Bool(_) | TokenType::Null
             | TokenType::Minus | TokenType::Exclamation | TokenType::BitNot
@@ -66,40 +62,40 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&mut self, err_type: ErrType) {
-        let err = ProgramError {
-            line: self.peek().span.line,
-            byte_offset: self.peek().span.byte_offset,
+        let span = self.peek().span;
+        self.errors.push(ProgramError {
+            line: span.line,
+            byte_offset: span.byte_offset,
+            length: span.length,
             typ: err_type
-        };
-        self.errors.push(err);
+        });
     }
 
     fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Span {
         let token = self.peek();
-        if std::mem::discriminant(&token.token_type) == std::mem::discriminant(&expected) {
+        if std::mem::discriminant(&token.token) == std::mem::discriminant(&expected) {
             self.next().span
         }
         else {
             let found_instead = self.peek().clone();
-            self.error(ErrType::ParserExpectToken(expected, error_msg.to_string(), found_instead.token_type));
+            self.error(ErrType::ParserExpectToken(expected, error_msg.to_string(), found_instead.token));
             found_instead.span
         }
     }
-    fn expect_identifier(&mut self, error_msg: &str) -> String {
-        if let TokenType::Identifier(text) = &self.peek().token_type {
+    fn expect_identifier(&mut self, error_msg: &str) -> (Span, String) {
+        if let TokenType::Identifier(text) = &self.peek().token {
             let text = text.clone();
-            self.next();
-            text
+            (self.next().span, text)
         }
         else {
-            let found_instead = self.peek().token_type.clone();
-            self.error(ErrType::ParserExpectToken(TokenType::Identifier(String::new()), error_msg.to_string(), found_instead));
-            String::new()
+            let found_instead = self.peek().clone();
+            self.error(ErrType::ParserExpectToken(TokenType::Identifier(String::new()), error_msg.to_string(), found_instead.token));
+            (found_instead.span, String::new())
         }
     }
 
     fn optional_dot_token(&mut self) -> Option<(Span, String)> {
-        if let TokenType::Dot(text) = &self.peek().token_type {
+        if let TokenType::Dot(text) = &self.peek().token {
             let text = text.clone();
             let dot_token = self.next();
             Some((dot_token.span, text))
@@ -111,7 +107,7 @@ impl<'a> Parser<'a> {
         if self.optional_token(TokenType::Hashtag).is_some() {
             let next_token = self.next();
             let label = 
-                match next_token.token_type {
+                match next_token.token {
                     TokenType::Identifier(s) => s,
                     x => x.to_string()
                 };
@@ -120,7 +116,7 @@ impl<'a> Parser<'a> {
     }
 
     fn optional_token(&mut self, expected: TokenType) -> Option<Span> {
-        if std::mem::discriminant(&self.peek().token_type) == std::mem::discriminant(&expected) {
+        if std::mem::discriminant(&self.peek().token) == std::mem::discriminant(&expected) {
             Some(self.next().span)
         }
         else { None }
@@ -137,7 +133,7 @@ impl<'a> Parser<'a> {
         
         // handles empty lists immediately
         for i in 0.. {
-            if self.peek().token_type == end_token { break }
+            if self.peek().token == end_token { break }
             list.push(parse_element(self, i));
             if self.optional_token(TokenType::Comma).is_none() { break; }
         }
@@ -155,7 +151,7 @@ impl<'a> Parser<'a> {
         let mut list = Vec::new();
 
         // handles empty lists immediately
-        while self.peek().token_type != end_token && self.peek().token_type != TokenType::EndOfFile {
+        while self.peek().token != end_token && self.peek().token != TokenType::EndOfFile {
             list.push(parse_element(self));
             if let Some(semi_span) = self.optional_token(TokenType::Semicolon) {
                 if let Some(semicolon_elem) = on_semicolon(semi_span) {
@@ -174,8 +170,8 @@ impl<'a> Parser<'a> {
     }
 
     fn recover(&mut self, recover_tokens: &[TokenType]) {
-        while self.peek().token_type != TokenType::EndOfFile {
-            if recover_tokens.contains(&self.peek().token_type) {
+        while self.peek().token != TokenType::EndOfFile {
+            if recover_tokens.contains(&self.peek().token) {
                 self.next();
                 return;
             }
@@ -184,19 +180,6 @@ impl<'a> Parser<'a> {
             }
             else { self.next(); }
         }
-    }
-}
-
-
-
-
-pub struct ParserError {
-    pub msg: String,
-    pub token: LexerToken,
-}
-impl fmt::Display for ParserError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}]:{}", self.msg, self.token)
     }
 }
 

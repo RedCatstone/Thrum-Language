@@ -1,1 +1,6 @@
-(1, 2) + 3
+fn factorial(n: num) -> num {
+    ensure n > 1 else return 1
+    factorial(n - 1) * n
+}
+
+factorial(3)

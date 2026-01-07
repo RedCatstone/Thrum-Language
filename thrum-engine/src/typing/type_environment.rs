@@ -1,6 +1,14 @@
 use std::collections::HashMap;
 
-use crate::{nativelib::{ThrumModule, ThrumType}, parsing::ast_structure::TypeKind};
+use crate::{ErrType, nativelib::{ThrumModule, ThrumType}, parsing::ast_structure::{Span, TypeKind}, typing::{Typechecker, VarID}};
+
+
+
+
+
+
+
+
 
 
 
@@ -8,56 +16,96 @@ use crate::{nativelib::{ThrumModule, ThrumType}, parsing::ast_structure::TypeKin
 
 #[derive(Default)]
 pub struct TypecheckScope {
-    pub vars: HashMap<String, TypecheckValue>,
-    types: HashMap<String, ThrumType>,
+    pub vars: HashMap<String, VarID>,
+    pub types: HashMap<String, ThrumType>,
 }
-
-pub struct TypecheckValue {
-    // Source code location - for error messages
+#[derive(Clone)]
+pub struct TypecheckVar {
+    pub var_id: VarID,
+    pub name: String,
     pub typ: TypeKind,
-
-    pub declared_at: usize,
+    
+    // Source code location - for error messages
+    pub declared_at: Span,
     pub is_declared_mut: bool,
     pub is_used: bool,
-    pub is_mutated: bool,
+    pub is_used_mut: bool,
 }
-#[derive(Default)]
-pub struct TypecheckEnvironment {
-    pub scopes: Vec<TypecheckScope>,
-}
-impl TypecheckEnvironment {
-    pub fn new() -> Self { TypecheckEnvironment { scopes: vec![TypecheckScope::default()] } }
 
+impl<'a> Typechecker<'a> {
     // e.g. for a block or function
-    pub fn enter_scope(&mut self) { self.scopes.push(TypecheckScope::default()); }
-    pub fn exit_scope(&mut self) { self.scopes.pop(); }
+    pub fn enter_scope(&mut self) {
+        self.scopes.push(TypecheckScope::default());
+    }
 
-    pub fn define_variable(&mut self, name: String, typ: TypeKind) -> bool {
-        let already_exists = self.name_exists_already(&name);
+    pub fn exit_scope(&mut self) -> Vec<VarID> {
+        let dropped_scope = self.scopes.pop().unwrap();
+        dropped_scope.vars.into_values().collect()
+        
+    }
+
+    pub fn define_variable(&mut self, name: String, mutable: bool, typ: TypeKind, span: Span) -> TypecheckVar {
+        if self.name_exists_already(&name) {
+            self.error(ErrType::TyperNameAlreadyDefined(name.clone()), span);
+        }
+
+        // make the new var
+        let var_id = VarID(self.next_var_id);
+        self.next_var_id += 1;
+        let new_var = TypecheckVar {
+            var_id,
+            typ,
+            name: name.clone(),
+            declared_at: span,
+            is_declared_mut: mutable,
+            is_used: false,
+            is_used_mut: false,
+        };
+
+        // and insert into both maps.
+        self.var_lookup.insert(var_id, new_var.clone());
         self.scopes
             .last_mut().unwrap()
-            .vars.insert(name, TypecheckValue {
-                typ,
-                declared_at: 0,
-                is_declared_mut: false,
-                is_used: false,
-                is_mutated: false,
-            });
-        already_exists
+            .vars.insert(name, var_id);
+        
+        new_var
     }
-    pub fn lookup_variable(&self, name: &str) -> Option<TypeKind> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(t) = scope.vars.get(name) {
-                return Some(t.typ.clone());
+    pub fn lookup_variable(&mut self, name: &str) -> Option<&mut TypecheckVar> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(id) = scope.vars.get_mut(name) {
+                let var = self.var_lookup.get_mut(id).unwrap();
+                return Some(var);
             }
         }
         None
     }
+    pub fn use_variable(&mut self, name: &str, mutable: bool, span: Span, var_id_to_fill: &mut Option<VarID>) -> TypeKind {
+        match self.lookup_variable(name) {
+            Some(var) => {
+                let var_id = var.var_id;
+                let var_typ = var.typ.clone();
+                *var_id_to_fill = Some(var_id);
+                var.is_used = true;
+                if mutable {
+                    var.is_used_mut = true;
+                    if !var.is_declared_mut {
+                        self.error(ErrType::TyperVarIsntDeclaredMut(var_id), span);
+                    }
+                }
+                var_typ
+            }
+            None => {
+                self.error(ErrType::TyperUndefinedIdentifier(name.to_string()), span);
+                TypeKind::TypeError
+            }
+        }
+    }
 
-    pub fn define_type(&mut self, name: String, typ: ThrumType) -> bool {
-        let already_exists = self.name_exists_already(&name);
+    pub fn define_type(&mut self, name: String, typ: ThrumType, span: Span) {
+        if self.name_exists_already(&name) {
+            self.error(ErrType::TyperNameAlreadyDefined(name.clone()), span);
+        }
         self.scopes.last_mut().unwrap().types.insert(name, typ);
-        already_exists
     }
     pub fn lookup_type(&mut self, name: &str) -> Option<ThrumType> {
         for scope in self.scopes.iter().rev() {
@@ -76,7 +124,7 @@ impl TypecheckEnvironment {
     pub fn load_prelude_from_lib(&mut self, module: &ThrumModule) {
         for (name, value) in &module.values {
             if value.is_prelude {
-                self.define_variable(name.clone(), value.typ.clone());
+                self.define_variable(name.clone(), false, value.typ.clone(), Span::invalid());
             }
         }
         // Recursion

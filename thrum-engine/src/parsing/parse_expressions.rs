@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{ErrType, lexing::tokens::{LexerToken, TokenType}, parsing::{Parser, Precedence, ast_structure::{EnumExpression, Expr, ExprInfo, MatchArm, MatchPattern, Span, TupleElement, TypeKind, Value}}};
+use crate::{ErrType, lexing::tokens::{TokenSpan, TokenType}, parsing::{Parser, Precedence, ast_structure::{EnumExpression, Expr, ExprInfo, MatchArm, Span, TupleElement, TypeKind, Value}}};
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_expression(&mut self, precedence: Precedence) -> ExprInfo {
@@ -14,7 +14,7 @@ impl<'a> Parser<'a> {
         // Pratt parser loop
         loop {
             let op_token = self.peek().clone();
-            let mut op_precedence = self.get_precedence(&op_token.token_type);
+            let mut op_precedence = self.get_precedence(&op_token.token);
             
             // Not an infix operator.
             if op_precedence == Precedence::Lowest { break }
@@ -22,18 +22,18 @@ impl<'a> Parser<'a> {
             // only includes the next operator if it binds stronger than the current one.
             // 1 + 2 * 3   -> this would consume until * and only afterwards process +
             // 1 + 2 * 3   -> this would stop before * and only afterwards process it
-            if precedence < op_precedence { break }
+            if precedence >= op_precedence { break }
             
             // 1 level lower for right associativity
             // ** is special because 2**3**2 should get parsed as: 2**(3**2)
-            if op_token.token_type == TokenType::StarStar { op_precedence = Precedence::Product }
+            if op_token.token == TokenType::StarStar { op_precedence = Precedence::Product }
 
             // operators that are not allowed to be line-split.
             // this is so semicolons are actually not needed in the language,
             // for example here the parser would normally want to keep consuming the ( as a function call
             // let (a, b) = (0, 1)
             // (a, b) = (b, a + b)
-            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon = op_token.token_type
+            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon = op_token.token
                 && !self.peek_is_on_same_line() {
                     break;
                 }
@@ -48,50 +48,59 @@ impl<'a> Parser<'a> {
 
 
 
-    fn parse_infix(&mut self, left_expr: ExprInfo, op_token: LexerToken, op_precedence: Precedence) -> ExprInfo {
-        let left_expr_span = left_expr.span;
-        let (end_span, expr) = match op_token.token_type {
+    fn parse_infix(&mut self, left_expr: ExprInfo, op_token: TokenSpan, op_precedence: Precedence) -> ExprInfo {
+        let s_span = left_expr.span;
+        match op_token.token {
             TokenType::LeftParen => {
-                let (arguments, end_span) = self.parse_comma_seperated_expressions(
+                let (end_span, arguments) = self.parse_comma_seperated_expressions(
                     TokenType::RightParen,
                     "to close the function call argument list"
                 );
-                (end_span, Expr::Call { callee: Box::new(left_expr), arguments })
+                Expr::Call { callee: Box::new(left_expr), arguments }
+                .to_info(s_span.merge(end_span))
             },
 
             TokenType::LeftBracket => {
                 let right_index_expr = self.parse_expression(Precedence::Lowest);
                 let end_span = self.expect_token(TokenType::RightBracket, "to close the index expression");
-                (end_span, Expr::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) })
+                Expr::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) }
+                .to_info(s_span.merge(end_span))
             },
 
             TokenType::Dot(member) => {
                 // support both expr.member and expr.3
-                (op_token.span, Expr::MemberAccess { left: Box::new(left_expr), member, resolved_index: None })
+                Expr::MemberAccess { left: Box::new(left_expr), member, resolved_index: None }
+                .to_info(s_span.merge(op_token.span))
             },
 
             TokenType::ColonColon => self.parse_path_operator(left_expr),
             
             _ if op_precedence == Precedence::Assign => {
                 let pattern = Box::new(self.convert_lhs_assign_into_pattern(left_expr));
-                let extra_operator = self.convert_assign_operator_to_operator(&op_token.token_type).unwrap();
+                let extra_operator = TokenSpan {
+                    token: self.convert_assign_operator_to_operator(&op_token.token).unwrap(),
+                    span: op_token.span
+                };
 
                 // expression
                 let value = self.parse_expression(Precedence::Lowest);
+                let value_span = value.span;
 
-                (value.span, Expr::Assign { pattern, extra_operator, value: Some(Box::new(value)) })
+                Expr::Assign { pattern, extra_operator, value: Some(Box::new(value)) }
+                .to_info(s_span.merge(value_span))
             },
 
             _ => {  // other operators
                 let right_expr = self.parse_expression(op_precedence);
-                (right_expr.span, Expr::Infix {
-                    operator: op_token.token_type,
+                let right_expr_span = right_expr.span;
+                Expr::Infix {
+                    operator: op_token,
                     left: Box::new(left_expr),
                     right: Box::new(right_expr)
-                })
+                }
+                .to_info(s_span.merge(right_expr_span))
             }
-        };
-        expr.to_info(left_expr_span.merge(end_span))
+        }
     }
 
 
@@ -104,47 +113,49 @@ impl<'a> Parser<'a> {
 
     fn parse_prefix(&mut self) -> ExprInfo {
         let first_token = self.next();
-        let start_span = first_token.span;
+        let s_span = first_token.span;
         // after advancing:
-        let (end_span, expr) = match first_token.token_type {
-            TokenType::Identifier(name) => (start_span, Expr::Identifier { name }),
-            TokenType::Number(val) => (start_span, Expr::Literal(Value::Num(val)).into()),
-            TokenType::Bool(val) => (start_span, Expr::Literal(Value::Bool(val)).into()),
+        match first_token.token {
+            TokenType::Identifier(name) => Expr::Identifier { name, var_id: None }.to_info(s_span),
+            TokenType::Number(val) => Expr::Literal(Value::Num(val)).to_info(s_span),
+            TokenType::Bool(val) => Expr::Literal(Value::Bool(val)).to_info(s_span),
 
             // Prefix operators
             TokenType::Minus | TokenType::Exclamation | TokenType::BitNot | TokenType::DotDotDot => {
                 let right = Box::new(self.parse_expression(Precedence::Prefix));
-                (right.span, Expr::Prefix { operator: first_token.token_type, right })
+                let right_span = right.span;
+                Expr::Prefix { operator: first_token.token, right }
+                .to_info(s_span.merge(right_span))
             },
 
             TokenType::Star => {
                 let expr = Box::new(self.parse_expression(Precedence::Prefix));
-                (expr.span, Expr::Deref { expr })
+                let expr_span = expr.span;
+                Expr::Deref { expr }
+                .to_info(s_span.merge(expr_span))
             },
 
             TokenType::Caret => {
-                (start_span, Expr::Identifier { name: format!("_pipe_{}", self.pipe_operators_active) })
+                Expr::Identifier { name: format!("_pipe_{}", self.pipe_operators_active), var_id: None }
+                .to_info(s_span)
             },
 
-            TokenType::LeftBrace => {
-                let block_expr = self.parse_block_expression(TokenType::RightBrace);
-                (block_expr.span, block_expr.expression)
-            },
+            TokenType::LeftBrace => self.parse_block_expression(TokenType::RightBrace, s_span),
 
             TokenType::LeftParen => 'l: {
                 // empty tuple case '()'
-                if let Some(span) = self.optional_token(TokenType::RightParen) {
-                    break 'l Expr::Tuple(vec![]).to_info(span);
+                if let Some(end_span) = self.optional_token(TokenType::RightParen) {
+                    break 'l Expr::Tuple(vec![]).to_info(s_span.merge(end_span))
                 }
 
-                let first_elem_labeled = matches!(self.peek().token_type, TokenType::Dot(_));
+                let first_elem_labeled = matches!(self.peek().token, TokenType::Dot(_));
                 let first_elem = self.parse_tuple_element("0".to_string());
 
                 if self.optional_token(TokenType::Comma).is_some() || first_elem_labeled {
                     // , means its a tuple!
                     // e.g. (1, 2) (1,) (.x = 1,)
                     let mut tuple_body = vec![first_elem];
-                    let (span, other_tuple_elems) = self.parse_comma_separated(
+                    let (end_span, other_tuple_elems) = self.parse_comma_separated(
                         TokenType::RightParen,
                         |p, i| {
                             p.parse_tuple_element((i+1).to_string())
@@ -153,103 +164,119 @@ impl<'a> Parser<'a> {
                     );
                     tuple_body.extend(other_tuple_elems);
                     tuple_body.sort_by(|a, b| a.label.cmp(&b.label));
-                    (span, Expr::Tuple(tuple_body))
+                    Expr::Tuple(tuple_body)
+                    .to_info(s_span.merge(end_span))
                 }
                 else {
                     // normal grouped expression
-                    let span = self.expect_token(TokenType::RightParen, "to close the grouped expression");
+                    self.expect_token(TokenType::RightParen, "to close the grouped expression");
                     // if first_elem_labeled {
                     //     Err(self.error("If this is supposed to be a tuple, use a trailing comma."))
                     // }
-                    (span, first_elem.expr)
+                    first_elem.expr
                 }
             },
 
             TokenType::LeftBracket => {
-                Expr::Array(
-                    self.parse_comma_seperated_expressions(TokenType::RightBracket, "to close the array")
-                ).into()
+                let (end_span, elements) = self.parse_comma_seperated_expressions(
+                    TokenType::RightBracket,
+                    "to close the array"
+                );
+                Expr::Array(elements)
+                .to_info(s_span.merge(end_span))
             },
 
             TokenType::StringStart => {
                 let mut parts = Vec::new();
 
                 loop {
-                    match self.peek().token_type.clone() {
-                        TokenType::StringFrag(s) => {
-                            self.next();
-                            parts.push(Expr::Literal(Value::Str(s)).into());
-                        }
+                    let token = self.next();
+                    match token.token {
+                        TokenType::StringFrag(s) => parts.push(Expr::Literal(Value::Str(s)).to_info(token.span)),
+
                         TokenType::LeftBrace => {
-                            self.next();
                             parts.push(self.parse_expression(Precedence::Lowest));
                             self.expect_token(TokenType::RightBrace, "to close the template string block");
                         }
-                        TokenType::StringEnd => {
-                            self.next();
-                            break Expr::TemplateString(parts).into();
-                        }
-                        _ => {
-                            // the lexer should make sure that its impossible to reach this point
-                            unreachable!()
-                        }
+
+                        TokenType::StringEnd => break Expr::TemplateString(parts).to_info(s_span.merge(token.span)),
+
+                        // the lexer should make sure that no other tokens end up here!
+                        _ => unreachable!()
                     }
                 }
             },
 
-            TokenType::ColonColon => self.parse_path_operator(Expr::TypePath(vec!["".to_string()]).into()),
+            TokenType::ColonColon => self.parse_path_operator(
+                Expr::TypePath(vec!["".to_string()]).to_info(s_span)
+            ),
 
             TokenType::Let => {
-                let pattern = Box::new(self.parse_binding_match_pattern(false));
+                let pattern = self.parse_binding_match_pattern(false);
+                let mut end_span = pattern.span;
 
-                // value can be optional. for example: `let x` and later `x = ...`
-                let value = if self.optional_token(TokenType::Equal) {
+                // the value of let-expressions can be optional. for example:
+                // let x;
+                // x = ...
+                let value = if let Some(span) = self.optional_token(TokenType::Equal) {
+                    end_span = span.merge(end_span);
                     Some(Box::new(self.parse_expression(Precedence::Lowest)))
                 }
                 else { None };
 
-                Expr::Assign { pattern, extra_operator: TokenType::Equal, value }.into()
+                Expr::Assign { pattern: Box::new(pattern), extra_operator: TokenSpan { token: TokenType::Equal, span: s_span }, value }
+                .to_info(s_span.merge(end_span))
             },
 
             TokenType::Case => {
-                let pattern = Box::new(self.parse_binding_match_pattern(false));
+                let pattern = self.parse_binding_match_pattern(false);
                 self.expect_token(TokenType::Equal, "after the case-expression pattern");
-                let value = Box::new(self.parse_expression(Precedence::Lowest));
+                let value = self.parse_expression(Precedence::Lowest);
+                let value_span = value.span;
 
-                Expr::Case { pattern, value }.into()
+                Expr::Case { pattern: Box::new(pattern), value: Box::new(value) }
+                .to_info(s_span.merge(value_span))
             }
 
             TokenType::If => {
                 let condition = Box::new(self.parse_expression(Precedence::Lowest));
                 let (then, alt) = self.parse_if_and_else();
-                Expr::If { condition, then, alt }.into()
+                let alt_span = alt.span;
+                Expr::If { condition, then, alt }
+                .to_info(s_span.merge(alt_span))
             },
 
             TokenType::Ensure => {
                 let condition = Box::new(self.parse_expression(Precedence::Lowest));
                 self.expect_token(TokenType::Else, "after the ensure condition");
                 let alt = Box::new(self.parse_expression(Precedence::Lowest));
-                Expr::Ensure { condition, alt, then: Expr::Void.into() }.into()
+                let alt_span = alt.span;
+                Expr::Ensure { condition, alt, then: Box::new(Expr::Void.to_info(alt_span.to_0_width_right())) }
+                .to_info(s_span.merge(alt_span))
             },
 
             TokenType::While => {
-                let label = self.parse_optional_label().unwrap_or("while".to_string());
+                let label = self.parse_optional_label().map_or("while".to_string(), |(_, l)| l);
 
                 let condition = Box::new(self.parse_expression(Precedence::Lowest));
 
-                self.expect_token( TokenType::LeftBrace, "to open the while block");
-                let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
+                let block_span = self.expect_token( TokenType::LeftBrace, "to open the while block");
+                let body = Box::new(self.parse_block_expression(TokenType::RightBrace, block_span));
+                let body_span = body.span;
 
-                Expr::While { condition, body, label }.into()
+                Expr::While { condition, body, label }
+                .to_info(s_span.merge(body_span))
             },
 
             TokenType::Loop => {
-                let label = self.parse_optional_label().unwrap_or("loop".to_string());
+                let label = self.parse_optional_label().map_or("loop".to_string(), |(_, l)| l);
 
-                self.expect_token( TokenType::LeftBrace, "to open the loop block");
-                let body = Box::new(self.parse_block_expression(TokenType::RightBrace));
+                let block_span = self.expect_token( TokenType::LeftBrace, "to open the loop block");
+                let body = Box::new(self.parse_block_expression(TokenType::RightBrace, block_span));
+                let body_span = body.span;
 
-                Expr::Loop { body, label }.into()
+                Expr::Loop { body, label }
+                .to_info(s_span.merge(body_span))
             },
 
             TokenType::Match => {
@@ -257,7 +284,7 @@ impl<'a> Parser<'a> {
 
                 self.expect_token( TokenType::LeftBrace, "to open the match block");
 
-                let arms = self.parse_line_seperated(
+                let (end_span, arms) = self.parse_line_seperated(
                     TokenType::RightBrace,
                     |p| {
                         let pattern = p.parse_binding_match_pattern(false);
@@ -265,97 +292,111 @@ impl<'a> Parser<'a> {
                         let body = p.parse_expression(Precedence::Lowest);
                         MatchArm { pattern, body }
                     },
-                    || None,
+                    |_| None,
                 );
 
-                Expr::Match { match_value, arms }.into()
+                Expr::Match { match_value, arms }
+                .to_info(s_span.merge(end_span))
             },
             
             TokenType::Enum => {
                 // enum Option { Some(T), None }
-                let name = self.expect_identifier("to name the enum");
+                let (_, name) = self.expect_identifier("to name the enum");
                 self.expect_token( TokenType::LeftBrace, "to open the enum definition block");
-                let enums = self.parse_comma_separated(
+                let (end_span, enums) = self.parse_comma_separated(
                     TokenType::RightBrace,
                     |p, _| p.parse_enum_definition_variant(),
                     "to close the enum definition block"
                 );
-                Expr::EnumDefinition { name, enums }.into()     
+                Expr::EnumDefinition { name, enums }
+                .to_info(s_span.merge(end_span))
             },
 
             TokenType::Fn => {
-                let name = self.expect_identifier("to name the function");
+                let (_, name) = self.expect_identifier("to name the function");
                 self.expect_token(TokenType::LeftParen, "to open the fn definition paramter list");
-                let params = self.parse_binding_pattern_list(
+                let (_, params) = self.parse_binding_pattern_list(
                     TokenType::RightParen,
                     true, "to close the fn definition parameter list"
                 );
 
-                let return_type = if self.optional_token(TokenType::RightArrow) {
+                let return_type = if self.optional_token(TokenType::RightArrow).is_some() {
                     self.parse_type_expression()
                 }
                 else { TypeKind::Void };
 
-                self.expect_token(TokenType::LeftBrace, "to open the fn definition block");
-                let body = Rc::new(self.parse_block_expression(TokenType::RightBrace));
+                let block_span = self.expect_token(TokenType::LeftBrace, "to open the fn definition block");
+                let body = Rc::new(self.parse_block_expression(TokenType::RightBrace, block_span));
+                let body_span = body.span;
     
-                Expr::FnDefinition { name, params, return_type, body }.into()
+                Expr::FnDefinition { name, params, return_type, body, var_id: None }
+                .to_info(s_span.merge(body_span))
             },
 
             TokenType::Pipe => {
                 // Closure!
-                let params = self.parse_binding_pattern_list(
+                let (_, params) = self.parse_binding_pattern_list(
                     TokenType::RightArrow,
                     true, "to close the fn definition parameter list"
                 );
 
-                let return_type = if self.optional_token(TokenType::Colon) {
+                let return_type = if self.optional_token(TokenType::Colon).is_some() {
                     self.parse_type_expression()
                 }
                 else { TypeKind::ParserUnknown };
                 
                 let body = Rc::new(self.parse_expression(Precedence::Lowest));
+                let body_span = body.span;
 
-                Expr::Closure { params, return_type, body }.into()
+                Expr::Closure { params, return_type, body }
+                .to_info(s_span.merge(body_span))
             }
 
             TokenType::Return => {
-                let return_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
-                    Box::new(self.parse_expression(Precedence::Lowest))
+                let expr = Box::new(if self.peek_is_expression_start() && self.peek_is_on_same_line() {
+                    self.parse_expression(Precedence::Lowest)
                 }
-                else { Box::new(Expr::Void.into()) };
-                Expr::Return(return_expression).into()
+                else { Expr::Void.to_info(s_span.to_0_width_right()) });
+                let expr_span = expr.span;
+
+                Expr::Return(expr)
+                .to_info(s_span.merge(expr_span))
             },
 
             TokenType::Break => {
-                let label = self.parse_optional_label();
+                let label = self.parse_optional_label().map(|(_, l)| l);
 
-                let break_expression = if self.peek_is_expression_start() && self.peek_is_on_same_line() {
-                    Box::new(self.parse_expression(Precedence::Lowest))
-                } else { Box::new(Expr::Void.into()) };
+                let expr = Box::new(if self.peek_is_expression_start() && self.peek_is_on_same_line() {
+                    self.parse_expression(Precedence::Lowest)
+                } else { Expr::Void.to_info(s_span.to_0_width_right()) });
+                let expr_span = expr.span;
 
-                Expr::Break { expr: break_expression, label }.into()
+                Expr::Break { expr, label }
+                .to_info(s_span.merge(expr_span))
             },
 
             TokenType::Continue => {
-                let label = if self.optional_token(TokenType::Hashtag) {
-                    Some(self.expect_identifier("to name the break label."))
-                } else { None };
+                let mut end_span = s_span;
+                let label = self.parse_optional_label().map(|(span, l)| {
+                    end_span = span;
+                    l
+                });
                 
-                Expr::Continue { label }.into()
+                Expr::Continue { label }
+                .to_info(s_span.merge(end_span))
             }
 
             TokenType::Mut => {
-                let name = self.expect_identifier(&format!("after {}", TokenType::Mut));
-                Expr::MutRef { expr: Box::new(Expr::Identifier { name }.into()) }.into()
+                let (end_span, name) = self.expect_identifier(&format!("after {}", TokenType::Mut));
+                Expr::MutRef { expr: Box::new(Expr::Identifier { name, var_id: None }.to_info(end_span)) }
+                .to_info(s_span.merge(end_span))
             }
 
             _ => {
                 self.error(ErrType::ParserExpectedAnExpression);
-                Expr::Void.to_info_with_type(TypeKind::TypeError)
+                Expr::Void.to_info(s_span.to_0_width_right())
             }
-        };
-        expr.to_info(start_span.merge(end_span))
+        }
     }
 
 
@@ -377,7 +418,7 @@ impl<'a> Parser<'a> {
             TokenType::BitOr => Precedence::BitwiseOr,
             TokenType::BitXor => Precedence::BitwiseXor,
             TokenType::BitAnd => Precedence::BitwiseAnd,
-            TokenType::EqualEqual | TokenType::NotEqual | TokenType::PipeGreater => Precedence::Equals,
+            TokenType::EqualEqual | TokenType::NotEqual => Precedence::Equals,
             TokenType::Less | TokenType::Greater | TokenType::LessEqual | TokenType::GreaterEqual => Precedence::LessGreater,
             TokenType::LeftShift | TokenType::RightShift => Precedence::Shift,
             TokenType::Plus | TokenType::Minus => Precedence::Sum,
@@ -415,13 +456,13 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_block_expression(&mut self, end_token: TokenType, start_span: Span) -> ExprInfo {
         // '{' already consumed.
-        let (end_span, expression_body) = self.parse_line_seperated(
+        let (end_span, exprs) = self.parse_line_seperated(
             end_token,
             |p| p.parse_expression(Precedence::Lowest),
             |span| Some(Expr::Void.to_info(span))
         );
 
-        Expr::Block(expression_body).to_info(start_span.merge(end_span))
+        Expr::Block { exprs, drops_vars: Vec::new() }.to_info(start_span.merge(end_span))
     }
 
 
@@ -439,14 +480,14 @@ impl<'a> Parser<'a> {
 
     fn parse_enum_definition_variant(&mut self) -> EnumExpression {
         // Some(T)
-        let enum_name = self.expect_identifier("to name an enum variant");
+        let (_, enum_name) = self.expect_identifier("to name an enum variant");
 
-        let inner_types = if self.optional_token(TokenType::LeftParen) {
+        let inner_types = if self.optional_token(TokenType::LeftParen).is_some() {
             self.parse_comma_separated(
                 TokenType::RightParen,
                 |p, _| p.parse_binding_match_pattern(true),
                 "to close the enum variant tuple"
-            )
+            ).1
         }
         else { Vec::new() };
 
@@ -457,7 +498,7 @@ impl<'a> Parser<'a> {
 
 
 
-    fn parse_comma_seperated_expressions(&mut self, end_token: TokenType, error_msg: &str) -> (Vec<ExprInfo>, Span) {
+    fn parse_comma_seperated_expressions(&mut self, end_token: TokenType, error_msg: &str) -> (Span, Vec<ExprInfo>) {
         // '[1, 2, 3]',   '(1, 2)',   dict { 1, 2 }
         self.parse_comma_separated(
             end_token,
@@ -473,7 +514,7 @@ impl<'a> Parser<'a> {
                     self.parse_expression(Precedence::Lowest)
                 }
                 else {
-                    Expr::Identifier { name: label.clone() }.to_info(dot_span)
+                    Expr::Identifier { name: label.clone(), var_id: None }.to_info(dot_span)
                 };
             
             TupleElement { label, expr }
@@ -486,20 +527,20 @@ impl<'a> Parser<'a> {
 
 
 
-    fn parse_path_operator(&mut self, left_expr: ExprInfo) -> (Span, Expr) {
+    fn parse_path_operator(&mut self, left_expr: ExprInfo) -> ExprInfo {
         match left_expr.expression {
-            Expr::Identifier { name } => {
-                let next_path_segment = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
-                Expr::TypePath(vec![name, next_path_segment]).into()
+            Expr::Identifier { name, var_id: _ } => {
+                let (span, next_path_segment) = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
+                Expr::TypePath(vec![name, next_path_segment]).to_info(left_expr.span.merge(span))
             }
             Expr::TypePath(mut segments) => {
-                let next_path_segment = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
+                let (span, next_path_segment) = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
                 segments.push(next_path_segment);
-                Expr::TypePath(segments).into()
+                Expr::TypePath(segments).to_info(left_expr.span.merge(span))
             }
             _ => {
                 self.error(ErrType::ParserUnexpectedPathToken);
-                Expr::Void.to_info_with_type(TypeKind::TypeError)
+                Expr::Void.to_info(left_expr.span)
             }
         }
     }

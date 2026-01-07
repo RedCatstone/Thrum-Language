@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Instant};
 
-use crate::{lexing::tokens::{LexerToken, TokenType}, parsing::ast_structure::{ExprInfo, TypeKind, Value}, pretty_printing::{format_program_error, join_slice_to_string}, typing::TypeID, vm_compiling::{BytecodeChunk, Compiler}, vm_evaluating::VM};
+use crate::{lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::{ExprInfo, TypeKind, Value}, pretty_printing::{format_program_error, join_slice_to_string}, typing::{TypeID, VarID}, vm_compiling::{BytecodeChunk, Compiler}, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod parsing;
@@ -25,6 +25,7 @@ pub enum CodeResultError {
 pub struct ProgramError {
     pub line: usize,
     pub byte_offset: usize,
+    pub length: usize,
     pub typ: ErrType,
 }
 
@@ -61,6 +62,7 @@ pub enum ErrType {
     TyperOrPatternBindsVarsTooMuch(Vec<String>),
     TyperOrPatternDoesntBindVars(Vec<String>),
     TyperPatternVarBoundTwice(Vec<String>),
+    TyperVarIsntDeclaredMut(VarID),
 
     DefaultString(String),
 }
@@ -69,10 +71,24 @@ pub enum ErrType {
 #[derive(Default)]
 pub struct Program<'a> {
     source_code: &'a str,
-    lexer_tokens: Vec<LexerToken>,
-    ast: Vec<ExprInfo>,
-    type_lookup: HashMap<TypeID, TypeKind>,
+    // v
+    // Lexing
+    // v
+    lexer_tokens: Vec<TokenSpan>,
+    // v
+    // Parsing
+    // v
+    ast: Option<ExprInfo>,
+    // v
+    // Compiling
+    // v
     compiled_bytecode: Vec<BytecodeChunk>,
+
+    // this tells me at which byte line 3 starts for example
+    line_starts_lookup: Vec<usize>,
+
+    // extra data the type_checker adds
+    type_lookup: HashMap<TypeID, TypeKind>,
 
     errors: Vec<ProgramError>,
 }
@@ -80,7 +96,7 @@ impl<'a> Program<'a> {
     pub fn stage_complete(&mut self, stage: &str) -> bool {
         println!("--- {stage} Stage Complete! ---");
 
-        let print_stages = vec!["Lexing", "Parsing", /* "Desugar after Parsing", */ "Typechecking", /* "Compiling" */];
+        let print_stages = ["Lexing", "Parsing", /* "Desugar after Parsing", */ "Typechecking", /* "Compiling" */];
 
         if print_stages.contains(&stage) {
             println!("{}\n", self);

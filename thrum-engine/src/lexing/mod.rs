@@ -1,7 +1,6 @@
-use core::fmt;
 use std::{str::Chars, iter::Peekable};
 
-use crate::{ErrType, Program, ProgramError, lexing::tokens::{LexerToken, TokenType, get_keyword}, parsing::ast_structure::Span};
+use crate::{ErrType, Program, ProgramError, lexing::tokens::{TokenSpan, TokenType, get_keyword}, parsing::ast_structure::Span};
 
 pub mod tokens;
 
@@ -9,17 +8,22 @@ pub mod tokens;
 pub fn tokenize_code(program: &mut Program) {
     let mut lexer = Lexer::new(program);
     lexer.tokenize(None);
-    program.lexer_tokens = lexer.tokens;
+
+    let tokens = lexer.tokens;
+    let line_starts_lookup = lexer.line_starts_lookup;
+    program.lexer_tokens = tokens;
+    program.line_starts_lookup = line_starts_lookup;
 }
 
 
 pub struct Lexer<'a> {
     errors: &'a mut Vec<ProgramError>,
     source_iter: Peekable<Chars<'a>>,
-    tokens: Vec<LexerToken>,
+    tokens: Vec<TokenSpan>,
     byte_offset: usize,
     curr_token_start_byte_offset: usize,
     line: usize,
+    line_starts_lookup: Vec<usize>,
 }
 
 impl<'a> Lexer<'a> {
@@ -31,6 +35,7 @@ impl<'a> Lexer<'a> {
             byte_offset: 0,
             curr_token_start_byte_offset: 0,
             line: 1,
+            line_starts_lookup: vec![0] // line 1 starts at byte 0
         }
     }
 
@@ -40,6 +45,7 @@ impl<'a> Lexer<'a> {
             self.byte_offset += ch.len_utf8();
             if ch == '\n' {
                 self.line += 1;
+                self.line_starts_lookup.push(self.byte_offset);
             }
         }
         c
@@ -55,11 +61,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn add_token(&mut self, token_type: TokenType) {
-        let new_token = LexerToken {
-            token_type,
+        let new_token = TokenSpan {
+            token: token_type,
             span: Span {
                 line: self.line,
-                byte_offset: self.byte_offset,
+                byte_offset: self.curr_token_start_byte_offset,
                 length: self.byte_offset - self.curr_token_start_byte_offset,
             }
         };
@@ -71,6 +77,7 @@ impl<'a> Lexer<'a> {
         self.errors.push(ProgramError {
             line: self.line,
             byte_offset: self.byte_offset,
+            length: 1,
             typ: err_type
         });
     }
@@ -342,17 +349,5 @@ impl<'a> Lexer<'a> {
         }
 
         text
-    }
-}
-
-
-
-pub struct LexerError {
-    pub line: usize,
-    pub message: String,
-}
-impl fmt::Display for LexerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.line, self.message)
     }
 }

@@ -1,22 +1,25 @@
-use std::{cmp::{self, min}, collections::HashMap, rc::Rc};
+use std::{cmp, collections::HashMap, rc::Rc};
 
 use strum_macros::IntoStaticStr;
 
-use crate::{lexing::tokens::TokenType, nativelib::NativeFn, typing::TypeID};
+use crate::{lexing::tokens::{TokenSpan, TokenType}, nativelib::NativeFn, typing::{TypeID, VarID}};
 
+
+// this is the main struct that builds the AST (Abstract Syntax Tree)
+#[derive(Debug)]
 pub struct ExprInfo {
+    // the actualy expression info, this is a very long enum.
     pub expression: Expr,
+
+    // starts out as ParserUnknown, but later gets filled in by the typechecker.
     pub typ: TypeKind,
 
-    // where its located in the file, for errors
+    // where its located in the source code, for better errors
     pub span: Span,
 }
 impl Expr {
     pub fn to_info(self, span: Span) -> ExprInfo {
-        self.to_info_with_type(span, TypeKind::ParserUnknown)
-    }
-    pub fn to_info_with_type(self, span: Span, typ: TypeKind) -> ExprInfo {
-        ExprInfo { expression: self, span, typ }
+        ExprInfo { expression: self, span, typ: TypeKind::ParserUnknown }
     }
 }
 
@@ -29,14 +32,17 @@ pub struct Span {
 }
 impl Span {
     pub fn merge(self, other: Span) -> Span {
-        match self.byte_offset.cmp(&other.byte_offset) {
-            cmp::Ordering::Less => Span {
-                line: self.line,
-                byte_offset: self.byte_offset,
-                length: (other.byte_offset + other.length) - self.byte_offset
-            },
-            cmp::Ordering::Greater => other.merge(self),
-            cmp::Ordering::Equal => unreachable!("tried to merge 2 spans with the same byte_offset")
+        // |----------| (span self)
+        // 219029812813 + (12321 * 1259812895)
+        //                 |----------------| (span other)
+        // merged span:
+        // |--------------------------------|
+        let start_byte = cmp::min(self.byte_offset, other.byte_offset);
+        let end_byte = cmp::max(self.byte_offset + self.length, other.byte_offset + other.length);
+        Span {
+            line: cmp::min(self.line, other.line),
+            byte_offset: start_byte,
+            length: end_byte - start_byte,
         }
     }
     pub fn to_0_width_right(self) -> Span {
@@ -45,6 +51,9 @@ impl Span {
             byte_offset: self.byte_offset + self.length,
             length: 0
         }
+    }
+    pub fn invalid() -> Span {
+        Span { line: usize::MAX, byte_offset: usize::MAX, length: usize::MAX }
     }
 }
 
@@ -57,21 +66,25 @@ pub enum Expr {
     Literal(Value),
     Identifier {
         name: String,
+        var_id: Option<VarID>,
     },
 
     Assign {  // x = 2  or  let x = 2
-        pattern: Box<MatchPattern>,
-        extra_operator: TokenType,
+        pattern: Box<MatchPatternInfo>,
+        extra_operator: TokenSpan,
         value: Option<Box<ExprInfo>>,
     },
 
-    Case {
-        pattern: Box<MatchPattern>,
+    Case {  // case ?x = queue.pop()
+        pattern: Box<MatchPatternInfo>,
         value: Box<ExprInfo>,
     },
 
     // { ... }
-    Block(Vec<ExprInfo>),
+    Block {
+        exprs: Vec<ExprInfo>,
+        drops_vars: Vec<VarID>,
+    },
 
     // Operator expressions
     Prefix {  // !a
@@ -79,7 +92,7 @@ pub enum Expr {
         right: Box<ExprInfo>,
     },
     Infix {  // a + b
-        operator: TokenType,
+        operator: TokenSpan,
         left: Box<ExprInfo>,
         right: Box<ExprInfo>,
     },
@@ -89,16 +102,16 @@ pub enum Expr {
     Tuple(Vec<TupleElement>),  // (1, 2)
     Array(Vec<ExprInfo>),  // [1, 2]
 
-    // x^
-    MutRef {
+    
+    MutRef {  // x^
         expr: Box<ExprInfo>,
     },
-    Deref {
+    Deref {  // *x
         expr: Box<ExprInfo>,
     },
     
-    // arr.len
-    MemberAccess {
+
+    MemberAccess { // arr.len
         left: Box<ExprInfo>,
         member: String,
         resolved_index: Option<usize>,
@@ -133,41 +146,45 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
 
-    // sugar
-    While {
+    // sugar for a normal loop
+    While {  // while true { ... }
         condition: Box<ExprInfo>,
         body: Box<ExprInfo>,
         label: String,
     },
 
-    Loop {
+    Loop {  // loop { ... }
         body: Box<ExprInfo>,
         label: String,
     },
 
-    EnumDefinition {
+    EnumDefinition {  // enum Color { Red, Blue, Green(data) }
         name: String,
         enums: Vec<EnumExpression>,
     },
 
-    FnDefinition {  // fn square(x: num) -> x**2
+    FnDefinition {  // fn square(x: num) -> { x**2 }
         name: String,
-        params: Vec<MatchPattern>,
+        var_id: Option<VarID>,
+        params: Vec<MatchPatternInfo>,
         return_type: TypeKind,
         body: Rc<ExprInfo>,
     },
 
-    Closure {  // x -> x**2
-        params: Vec<MatchPattern>,
+    Closure {  // |x -> x**2
+        params: Vec<MatchPatternInfo>,
         return_type: TypeKind,
         body: Rc<ExprInfo>,
     },
 
+    // return ...
     Return(Box<ExprInfo>),
+    // break #label ...
     Break {
         label: Option<String>,
         expr: Box<ExprInfo>,
     },
+    // continue #label
     Continue {
         label: Option<String>,
     },
@@ -195,7 +212,7 @@ pub enum Value {
     Void,
 
     // for empty local slots in the vm
-    // i could also use <void> here, but i wonna be more clear
+    // i could also use <void> here, but i want to be more clear
     Empty,
 }
 impl PartialOrd for Value {
@@ -216,29 +233,66 @@ impl PartialEq for Value {
 }
 
 
+
+
+
 #[derive(Debug, Clone)]
+pub struct MatchPatternInfo {
+    pub pattern: MatchPattern,
+    pub typ: TypeKind,
+    pub span: Span,
+    pub has_place: bool,
+    pub can_fail: bool,
+
+    // only the outermost pattern has stuff in this Vec.
+    pub vars_defined: Vec<(String, VarID)>,
+}
+impl MatchPattern {
+    pub fn to_info(self, span: Span) -> MatchPatternInfo {
+        MatchPatternInfo { pattern: self, span, typ: TypeKind::ParserUnknown, has_place: false, can_fail: false, vars_defined: Vec::new() }
+    }
+}
+
+
+#[derive(Debug, Clone, IntoStaticStr)]
 pub enum MatchPattern {
     Binding {  // x: num
         name: String,
+        mutable: bool,
         typ: TypeKind,
+        var_id: Option<VarID>,
     },
     Wildcard,  // _
-    Or(Vec<MatchPattern>),
-    Array(Vec<MatchPattern>),  // [...]
+    Or(Vec<MatchPatternInfo>),
+    Array(Vec<MatchPatternInfo>),  // [...]
     Tuple(Vec<TupleMatchPattern>),  // (...)
     EnumVariant {
         path: Vec<String>, // std::Option
         name: String,   // Some
-        inner_patterns: Vec<MatchPattern>,
+        inner_patterns: Vec<MatchPatternInfo>,
     },
     Literal(Value),
     Conditional {
-        pattern: Box<MatchPattern>,
+        pattern: Box<MatchPatternInfo>,
         body: Rc<ExprInfo>,
     },
 
-    Place(PlaceExpr),
+    PlaceIdentifier {
+        name: String,
+        var_id: Option<VarID>
+    },
+    PlaceDeref {
+        name: String,
+        var_id: Option<VarID>
+    },
+    PlaceIndex {
+        left: Rc<ExprInfo>,
+        index: Rc<ExprInfo>
+    }
 }
+
+
+
 #[derive(Debug)]
 pub struct TupleElement {
     pub label: String,
@@ -247,7 +301,7 @@ pub struct TupleElement {
 #[derive(Debug, Clone)]
 pub struct TupleMatchPattern {
     pub label: String,
-    pub pattern: MatchPattern,
+    pub pattern: MatchPatternInfo,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleType {
@@ -255,25 +309,18 @@ pub struct TupleType {
     pub typ: TypeKind,
 }
 
-#[derive(Debug, Clone)]
-pub enum PlaceExpr {
-    Identifier(String),
-    Deref(String),
-    Index { left: Rc<ExprInfo>, index: Rc<ExprInfo> },
-}
-
 
 
 #[derive(Debug)]
 pub struct MatchArm {
-    pub pattern: MatchPattern,
+    pub pattern: MatchPatternInfo,
     pub body: ExprInfo,
 }
 
 #[derive(Debug)]
 pub struct EnumExpression {
     pub name: String,
-    pub inner_types: Vec<MatchPattern>,
+    pub inner_types: Vec<MatchPatternInfo>,
 }
 
 
@@ -324,9 +371,8 @@ impl TypeKind {
     pub fn prune(&self, type_lookup: &HashMap<TypeID, TypeKind>) -> TypeKind {
         if let TypeKind::Inference(id) = self
             && let Some(entry) = type_lookup.get(id) {
-                let pruned = entry.prune(&type_lookup);
+                entry.prune(type_lookup)
                 // type_lookup.insert(*id, pruned.clone());
-                pruned
             }
         else { self.clone() }
     }
@@ -336,7 +382,7 @@ impl TypeKind {
 pub enum DefinedTypeKind {
     Enum {
         name: String,
-        inner_types: HashMap<String, Vec<MatchPattern>>,
+        inner_types: HashMap<String, Vec<MatchPatternInfo>>,
     },
 
     Native(TypeKind),

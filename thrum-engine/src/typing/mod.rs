@@ -1,13 +1,16 @@
 use crate::{
-    ErrType, Program, ProgramError, nativelib::{ThrumModule, ThrumType, get_native_lib}, parsing::{ast_structure::{Expr, MatchPattern, TupleType, TypeKind, ExprInfo}, desugar}, typing::{check_expressions::ExprContext, type_environment::TypecheckEnvironment}
+    ErrType, Program, ProgramError,
+    nativelib::{ThrumModule, get_native_lib},
+    parsing::{ast_structure::{Expr, ExprInfo, Span, TypeKind}, desugar},
+    typing::{check_expressions::ExprContext, type_environment::{TypecheckScope, TypecheckVar}}
 };
-use std::{cell::RefCell, collections::HashMap, fmt};
-
+use std::{cell::RefCell, collections::HashMap};
 
 mod check_expressions;
 mod check_pattern_types;
-mod type_environment;
+pub mod type_environment;
 mod inference;
+
 
 
 // example:
@@ -21,93 +24,77 @@ mod inference;
 
 
 
-pub struct TypeCheckError {
-    pub message: String
-}
-impl fmt::Display for TypeCheckError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-
 pub fn typecheck_program(program: &mut Program) {
-    let mut type_checker = TypeChecker::new(&mut program.errors);
+    let mut type_checker = Typechecker::new(&mut program.errors, get_native_lib());
     
     // PASS 1: run type unification/constraint solving logic.
-    type_checker.check_block(&mut program.ast, &ExprContext::default());
+    type_checker.check_expression(program.ast.as_mut().unwrap(), &ExprContext::default());
 
     // PASS 2: clean up (remove all TypeKind::Infered(id))
-    type_checker.finalize_expressions(&mut program.ast);
+    type_checker.finalize_expression(program.ast.as_mut().unwrap());
     program.type_lookup = type_checker.type_lookup;
 }
 
 
 
 
-struct AssignablePatternType {
-    typ: TypeKind,
-    has_place: bool,
-    can_fail: bool,
-    vars: Vec<(String, TypeKind)>,
-}
-
 #[derive(Eq, PartialEq, Hash, Debug, Clone, Copy)]
-pub struct TypeID (usize);
+pub struct TypeID (pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VarID (pub usize);
 
 
-pub struct TypeChecker<'a> {
+pub struct Typechecker<'a> {
     errors: &'a mut Vec<ProgramError>,
-    env: TypecheckEnvironment,
     library: ThrumModule,
+    scopes: Vec<TypecheckScope>,
+
     type_lookup: HashMap<TypeID, TypeKind>,
     next_inference_id: usize,
+
+    var_lookup: HashMap<VarID, TypecheckVar>,
+    next_var_id: usize,
 
     current_function_return_type: Option<TypeKind>,
     current_break_types: Vec<(String, TypeKind)>,
 }
 
-impl<'a> TypeChecker<'a> {
-    pub fn new(errors: &'a mut Vec<ProgramError>) -> Self {
-        let library = get_native_lib();
-        let mut env = TypecheckEnvironment::new();
-        env.load_prelude_from_lib(&library);
-
-        TypeChecker {
+impl<'a> Typechecker<'a> {
+    pub fn new(errors: &'a mut Vec<ProgramError>, lib: ThrumModule) -> Self {
+        let mut tc = Typechecker {
             errors,
-            env,
-            library,
+            library: ThrumModule::default(),
+            scopes: vec![TypecheckScope::default()],
 
             type_lookup: HashMap::default(),
-            next_inference_id: 0,
+            // starts at 1, meaning it can never be 0
+            // maybe the compiler can optimize stuff with that, idk
+            next_inference_id: 1,
+
+            var_lookup: HashMap::default(),
+            next_var_id: 1,
+
             current_function_return_type: None,
             current_break_types: Vec::new(),
-        }
+        };
+        tc.load_prelude_from_lib(&lib);
+        tc.library = lib;
+        tc
     }
 
-    fn error(&mut self, err_type: ErrType) -> TypeKind {
+    fn error(&mut self, err_type: ErrType, span: Span) -> TypeKind {
         self.errors.push(ProgramError {
-            line: 0,
-            byte_offset: 0,
+            line: span.line,
+            byte_offset: span.byte_offset,
+            length: span.length,
             typ: err_type
         });
         TypeKind::TypeError
     }
 
-    fn type_mismatch(&mut self, expected: TypeKind, found: TypeKind) -> TypeKind {
-        self.error(ErrType::TyperMismatch(expected, found))
-    }
-
-
-    fn checked_define_variable(&mut self, name: String, typ: TypeKind) {
-        if self.env.define_variable(name.clone(), typ) {
-            self.error(ErrType::TyperNameAlreadyDefined(name));
-        }
-    }
-    fn checked_define_type(&mut self, name: String, typ: ThrumType) {
-        if self.env.define_type(name.clone(), typ) {
-            self.error(ErrType::TyperNameAlreadyDefined(name));
-        }
+    fn type_mismatch(&mut self, expected: TypeKind, found: TypeKind, span: Span) -> TypeKind {
+        self.error(ErrType::TyperMismatch(expected, found), span)
     }
 
 
@@ -115,60 +102,41 @@ impl<'a> TypeChecker<'a> {
 
 
 
-    fn finalize_expressions(&mut self, expressions: &mut [ExprInfo]) {
+    fn finalize_expression(&mut self, expr: &mut ExprInfo) {
         // wrap self in a RefCell to allow multiple "borrows" that are checked at runtime.
         let self_cell = RefCell::new(self);
 
         desugar::loop_over_every_ast_node(
-            expressions,
-
-            |mut expr| {
-                let mut self_borrow = self_cell.borrow_mut();
-                self_borrow.finalize_type(&mut expr.typ);
-                match &mut expr.expression {
-                    Expr::FnDefinition { return_type, .. }
-                    | Expr::Closure { return_type, .. } => {
-                        self_borrow.finalize_type(return_type);
+            expr,
+            |expr| {
+                match expr.expression {
+                    Expr::Ensure { condition, alt, then } => {
+                        ExprInfo {
+                            expression: Expr::If { condition, then, alt },
+                            typ: expr.typ,
+                            span: expr.span
+                        }
                     }
-
-                    // Do nothing to other nodes
-                    _ => { }
+                    _ => expr
                 }
-                expr
             },
+            |pattern| pattern,
 
-            |mut pattern| {
-                match &mut pattern {
-                    // finalize binding pattern types
-                    MatchPattern::Binding { typ, .. } => {
-                        self_cell.borrow_mut().finalize_type(typ);
+            |typ| {
+                let mut self_borrow = self_cell.borrow_mut();
+                let pruned = self_borrow.prune(&typ);
+                let final_typ = match pruned {
+                    TypeKind::ParserUnknown => {
+                        unreachable!("somehow the typechecker missed a ParserUnknown type...")
                     }
-                    // Do nothing to other patterns
-                    _ => {}
-                }
-                pattern
+                    TypeKind::Inference(id) => {
+                        self_borrow.type_lookup.insert(id, TypeKind::TypeError);
+                        self_borrow.error(ErrType::TyperCantInferType(pruned), Span::invalid())
+                    }
+                    _ => pruned,
+                };
+                final_typ
             }
         );
-    }
-
-    fn finalize_type(&mut self, typ: &mut TypeKind) -> TypeKind {
-        let pruned = self.prune(typ);
-        let final_typ = match pruned {
-            TypeKind::Inference(id) => {
-                self.type_lookup.insert(id, TypeKind::TypeError);
-                self.error(ErrType::TyperCantInferType(pruned))
-            }
-            TypeKind::Arr(mut inner) => TypeKind::Arr(Box::new(self.finalize_type(&mut inner))),
-            TypeKind::Tup(elements) => TypeKind::Tup(
-                elements.into_iter().map(|TupleType { label, mut typ }| TupleType { label, typ: self.finalize_type(&mut typ) }).collect()
-            ),
-            TypeKind::Fn { param_types, mut return_type } => TypeKind::Fn {
-                param_types: param_types.into_iter().map(|mut t| self.finalize_type(&mut t)).collect(),
-                return_type: Box::new(self.finalize_type(&mut return_type)),
-            },
-            _ => pruned,
-        };
-        *typ = final_typ;
-        typ.clone()
     }
 }

@@ -64,15 +64,15 @@ pub enum TokenType {
 }
 
 #[derive(Clone, Debug)]
-pub struct LexerToken {
-    pub token_type: TokenType,
+pub struct TokenSpan {
+    pub token: TokenType,
 
     // where its located in the file, for errors
     pub span: Span,
 }
-impl LexerToken {
-    pub const END_TOKEN: LexerToken = LexerToken {
-        token_type: TokenType::EndOfFile,
+impl TokenSpan {
+    pub const END_TOKEN: TokenSpan = TokenSpan {
+        token: TokenType::EndOfFile,
         span: Span {
             line: usize::MAX,
             byte_offset: usize::MAX,

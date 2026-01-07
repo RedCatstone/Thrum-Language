@@ -405,7 +405,7 @@ impl VM {
     }
 
     pub fn read_next_instruction(frame: &mut CallFrame, chunk: &BytecodeChunk) -> OpCode {
-        VM::read_byte(frame, chunk).try_into().expect("Not a valid OpCode")
+        OpCode::from_repr(VM::read_byte(frame, chunk)).expect("Not a valid OpCode")
         // unsafe { std::mem::transmute(self.read_byte()) }
     }
 
