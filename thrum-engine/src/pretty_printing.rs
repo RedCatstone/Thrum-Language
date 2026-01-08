@@ -139,6 +139,7 @@ pub fn format_program_error(err: &ProgramError, program: &Program) -> String {
         ErrType::ParserUnexpectedPathToken => format!("Incorrect '::'-path Syntax."),
         ErrType::ParserPatternTemplateString => format!("Template strings are not allowed in match patterns."),
         ErrType::ParserPatternInvalidSyntax => format!("Invalid syntax in match pattern."),
+        ErrType::ParserLabelsHaveToBeOnSameLine => format!("Labels have to be on the same line with the labeled thing."),
 
         ErrType::TyperMismatch(expected, found) => format!("Expected type: {}, found: {}",
             expected.prune(&program.type_lookup), found.prune(&program.type_lookup)
@@ -156,18 +157,20 @@ pub fn format_program_error(err: &ProgramError, program: &Program) -> String {
             available.join(", ")
         ),
         ErrType::TyperTooManyArguments(expected, found) => format!("Expected {} arguments, found {}.", expected, found),
-        ErrType::TyperCantCallNonFnType(typ) => format!("Can't call a non-function type: {}", typ.prune(&program.type_lookup)),
+        ErrType::TyperCantCallNonFnType(typ) => format!("Can't call a non-function type: {}.", typ.prune(&program.type_lookup)),
         ErrType::TyperTupleDoesntHaveMember(tup, member) => format!("member .{member} does not exist on tuple: {}", tup.prune(&program.type_lookup)),
-        ErrType::TyperInvalidOperatorOnType(op, typ) => format!("The operator {op} is not defined on type {typ}"),
+        ErrType::TyperInvalidOperatorOnType(op, typ) => format!("The operator {op} is not defined on type {typ}."),
         ErrType::TyperPatternNeverType => format!("{} is not allowed in patterns.", TypeKind::Never),
-        ErrType::TyperOrPatternBindsVarsTooMuch(vars) => format!("All or-patterns must bind the same variables. This pattern binds {}",
+        ErrType::TyperOrPatternBindsVarsTooMuch(vars) => format!("All or-patterns must bind the same variables. This pattern binds {}.",
             join_slice_to_string(vars, ", ")
         ),
-        ErrType::TyperOrPatternDoesntBindVars(vars) => format!("All or-patterns must bind the same variables. This pattern doesn't bind {}",
+        ErrType::TyperOrPatternDoesntBindVars(vars) => format!("All or-patterns must bind the same variables. This pattern doesn't bind {}.",
             join_slice_to_string(vars, ", ")
         ),
         ErrType::TyperPatternVarBoundTwice(vars) => format!("Pattern binds {} twice.", join_slice_to_string(vars, ", ")),
-        ErrType::TyperVarIsntDeclaredMut(var) => format!("Variable ({var:?}) is not defined mutable"),
+        ErrType::TyperVarIsntDeclaredMut(var) => format!("Variable ({var:?}) cannot be assigned twice, because it isn't mutable."),
+        ErrType::TyperCantUseUninitializedVar(var) => format!("Can't use ({var:?}) because it isn't initialized yet."),
+        ErrType::TyperCantUseMaybeInitializedVar(var) => format!("Can't use ({var:?}) because it isn't initialized in every possible branch."),
 
 
         // this case should not be used, every error should have its own entry in this enum!
@@ -176,6 +179,8 @@ pub fn format_program_error(err: &ProgramError, program: &Program) -> String {
 
     // print the error message
     let mut output_str = format!("ERROR: {}\n", err_type_msg);
+
+    if err.length > usize::MAX / 2 { return format!("Error (couldn't print where): {}", err_type_msg) }
 
     let err_start = err.byte_offset;
     let err_end = err.byte_offset + err.length;
@@ -328,8 +333,8 @@ impl ExprInfo {
                 writeln!(f, " - {pattern}")?;
                 value.format_recursive(f, ind + 1, "value", true)?;
             }
-            Expr::Block { exprs, drops_vars } => {
-                writeln!(f, " - drops: {}", join_slice_to_debug_string(drops_vars, ", "))?;
+            Expr::Block { exprs, label, drops_vars } => {
+                writeln!(f, " - #{label:?} drops: {}", join_slice_to_debug_string(drops_vars, ", "))?;
                 for (i, expr) in exprs.iter().enumerate() {
                     expr.format_recursive(f, ind + 1, "", i == exprs.len()-1)?;
                 }

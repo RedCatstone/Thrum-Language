@@ -63,6 +63,9 @@ impl<'a> Parser<'a> {
 
     fn error(&mut self, err_type: ErrType) {
         let span = self.peek().span;
+        self.error_with_span(err_type, span);
+    }
+    fn error_with_span(&mut self, err_type: ErrType, span: Span) {
         self.errors.push(ProgramError {
             line: span.line,
             byte_offset: span.byte_offset,
@@ -104,7 +107,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_optional_label(&mut self) -> Option<(Span, String)> {
+        let is_on_same_line = self.peek_is_on_same_line();
         if self.optional_token(TokenType::Hashtag).is_some() {
+            if !is_on_same_line {
+                self.error(ErrType::ParserLabelsHaveToBeOnSameLine);
+            }
             let next_token = self.next();
             let label = 
                 match next_token.token {
@@ -112,7 +119,9 @@ impl<'a> Parser<'a> {
                     x => x.to_string()
                 };
             Some((next_token.span, label))
-        } else { None }
+        } else {
+            None
+        }
     }
 
     fn optional_token(&mut self, expected: TokenType) -> Option<Span> {

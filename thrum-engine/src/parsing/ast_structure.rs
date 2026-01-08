@@ -83,6 +83,7 @@ pub enum Expr {
     // { ... }
     Block {
         exprs: Vec<ExprInfo>,
+        label: Option<String>,
         drops_vars: Vec<VarID>,
     },
 

@@ -42,6 +42,7 @@ pub enum ErrType {
     ParserUnexpectedPathToken,
     ParserPatternInvalidSyntax,
     ParserPatternTemplateString,
+    ParserLabelsHaveToBeOnSameLine,
 
     TyperMismatch(TypeKind, TypeKind),
     TyperNameAlreadyDefined(String),
@@ -63,6 +64,8 @@ pub enum ErrType {
     TyperOrPatternDoesntBindVars(Vec<String>),
     TyperPatternVarBoundTwice(Vec<String>),
     TyperVarIsntDeclaredMut(VarID),
+    TyperCantUseUninitializedVar(VarID),
+    TyperCantUseMaybeInitializedVar(VarID),
 
     DefaultString(String),
 }

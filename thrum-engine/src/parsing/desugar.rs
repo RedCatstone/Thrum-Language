@@ -25,7 +25,7 @@ pub fn loop_over_every_ast_node(
             types.push(&mut expr.typ);
 
             match &mut expr.expression {
-                Expr::Block { exprs: x, drops_vars: _ }
+                Expr::Block { exprs: x, drops_vars: _, label: _ }
                 | Expr::Array(x)
                 | Expr::TemplateString(x) => {
                     exprs.extend(x);
@@ -221,9 +221,9 @@ pub fn desugar_after_parsing(program: &mut Program) {
                 }
 
                 // turn ensure into normal if else
-                Expr::Block { mut exprs, drops_vars } => {
+                Expr::Block { mut exprs, drops_vars, label } => {
                     desugar_ensure(&mut exprs);
-                    Expr::Block { exprs, drops_vars }
+                    Expr::Block { exprs, drops_vars, label }
                 }
 
                 // Do nothing to other nodes
@@ -248,6 +248,6 @@ fn desugar_ensure(exprs: &mut Vec<ExprInfo>) {
         let Expr::Ensure { then, .. } = &mut exprs.last_mut().unwrap().expression
         else { unreachable!() };
         // exprs_after_ensure get put into the then block
-        then.expression = Expr::Block { exprs: exprs_after_ensure, drops_vars: Vec::new() };
+        then.expression = Expr::Block { exprs: exprs_after_ensure, drops_vars: Vec::new(), label: None };
     }
 }

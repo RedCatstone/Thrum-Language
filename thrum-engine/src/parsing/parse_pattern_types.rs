@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{ErrType, lexing::tokens::TokenType, parsing::{Parser, Precedence, ast_structure::{Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TupleElement, TupleMatchPattern, TupleType, TypeKind, Value}}};
+use crate::{ErrType, lexing::tokens::TokenType, parsing::{Parser, ast_structure::{Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TupleElement, TupleMatchPattern, TupleType, TypeKind, Value}}};
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_type_expression(&mut self) -> TypeKind {
@@ -86,14 +86,14 @@ impl<'a> Parser<'a> {
                         MatchPattern::PlaceDeref { name, var_id: None }
                     }
                     _ => {
-                        self.error(ErrType::DefaultString("^ is only allowed after identifiers in place expressions.".to_string()));
+                        self.error_with_span(ErrType::DefaultString("^ is only allowed after identifiers in place expressions.".to_string()), span);
                         MatchPattern::Wildcard
                     }
                 }
             }
 
             _ => {
-                self.error(ErrType::ParserPatternInvalidSyntax);
+                self.error_with_span(ErrType::ParserPatternInvalidSyntax, span);
                 MatchPattern::Wildcard
             }
         }
@@ -107,7 +107,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_binding_match_pattern(&mut self, type_annotation_required: bool) -> MatchPatternInfo {
         let token = self.next();
         let s_span = token.span;
-        let pattern = match token.token {
+        match token.token {
             TokenType::Number(num) => MatchPattern::Literal(Value::Num(num)).to_info(s_span),
             TokenType::Bool(bool) => MatchPattern::Literal(Value::Bool(bool)).to_info(s_span),
             TokenType::StringStart => {
@@ -203,17 +203,6 @@ impl<'a> Parser<'a> {
                 MatchPattern::Wildcard
                 .to_info(s_span)
             }
-        };
-
-        if self.optional_token(TokenType::If).is_some() {
-            let body = self.parse_expression(Precedence::Arrow);
-            let body_span = body.span;
-
-            MatchPattern::Conditional { pattern: Box::new(pattern), body: Rc::new(body) }
-            .to_info(s_span.merge(body_span))
-        }
-        else {
-            pattern
         }
     }
 

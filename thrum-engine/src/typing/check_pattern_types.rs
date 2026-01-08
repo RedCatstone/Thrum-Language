@@ -13,6 +13,9 @@ impl<'a> Typechecker<'a> {
         // the HashMap has the expected vars from the first Or-pattern in there.
         // if this pattern binds a variable that is not in the hashmap, its name gets added to the Vec<String> for a combined error message.
         expect_vars_defined: &mut Option<(&mut HashMap<String, VarID>, &mut Vec<String>)>,
+        // if the value being matched is initialized
+        // let x;  // value is not initialized here
+        is_init: bool,
         define_pattern_vars: bool
     ) {
         let mut merge_pattern = |other: &mut MatchPatternInfo| {
@@ -35,7 +38,7 @@ impl<'a> Typechecker<'a> {
                     *typ = self.new_inference_type();
                 }
                 else if *typ == TypeKind::Never {
-                    self.error(crate::ErrType::TyperPatternNeverType, pattern.span);
+                    self.error(ErrType::TyperPatternNeverType, pattern.span);
                 }
                 if define_pattern_vars {
                     // if an Or-pattern expects vars to be defined,
@@ -55,7 +58,7 @@ impl<'a> Typechecker<'a> {
                     }
                     else {
                         // if it isn't in an or-pattern, just define it normally
-                        let var = self.define_variable(name.clone(), *mutable, typ.clone(), pattern.span);
+                        let var = self.define_variable(name.clone(), *mutable, is_init, typ.clone(), pattern.span);
                         *var_id = Some(var.var_id);
                         pattern.vars_defined.push((var.name, var.var_id));
                     }
@@ -67,7 +70,7 @@ impl<'a> Typechecker<'a> {
                 let mut arr_types = Vec::new();
                 
                 for p in inner_patterns {
-                    self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                    self.check_binding_pattern(p, expect_vars_defined, is_init, define_pattern_vars);
                     merge_pattern(p);
                     arr_types.push(p.typ.clone());
                 }
@@ -79,7 +82,7 @@ impl<'a> Typechecker<'a> {
                 let mut tuple_types = Vec::new();
 
                 for TupleMatchPattern { label, pattern: p } in inner_patterns {
-                    self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                    self.check_binding_pattern(p, expect_vars_defined, is_init, define_pattern_vars);
                     merge_pattern(p);
                     tuple_types.push(TupleType { label: label.clone(), typ: p.typ.clone() });
                 }
@@ -94,12 +97,12 @@ impl<'a> Typechecker<'a> {
                 let mut or_types = Vec::new();
 
                 let Some((first_pattern, other_patterns)) = inner_patterns.split_first_mut() else {
-                    unreachable!("Parser makes sure that this is impossible.")
+                    unreachable!("Parser makes sure that there should always be at least 2 patterns here")
                 };
 
                 // check the first pattern normal
-                self.check_binding_pattern(first_pattern, expect_vars_defined, define_pattern_vars);
-                let first_pattern_vars: HashMap<String, VarID> = std::mem::take(&mut first_pattern.vars_defined).into_iter().collect();
+                self.check_binding_pattern(first_pattern, expect_vars_defined, is_init, define_pattern_vars);
+                let first_pattern_vars: HashMap<String, VarID> = first_pattern.vars_defined.iter().cloned().collect();
                 merge_pattern(first_pattern);
                 or_types.push(first_pattern.typ.clone());
 
@@ -108,7 +111,9 @@ impl<'a> Typechecker<'a> {
                     let mut vars_bound_too_much = Vec::new();
 
                     let mut first_pattern_vars_clone = first_pattern_vars.clone();
-                    self.check_binding_pattern(p, &mut Some((&mut first_pattern_vars_clone, &mut vars_bound_too_much)), define_pattern_vars);
+                    self.check_binding_pattern(p, &mut Some((&mut first_pattern_vars_clone, &mut vars_bound_too_much)), is_init, define_pattern_vars);
+                    // the vars were already taken from the first or_pattern, so just trash these
+                    p.vars_defined = Vec::new();
                     merge_pattern(p);
                     or_types.push(p.typ.clone());
 
@@ -125,7 +130,7 @@ impl<'a> Typechecker<'a> {
             }
 
             MatchPattern::Conditional { pattern: p, body } => {
-                self.check_binding_pattern(p, expect_vars_defined, define_pattern_vars);
+                self.check_binding_pattern(p, expect_vars_defined, is_init, define_pattern_vars);
                 merge_pattern(p);
                 self.check_expression(Rc::get_mut(body).unwrap(), &ExprContext::default());
                 self.unify_types(&TypeKind::Bool, &body.typ, p.span);
@@ -169,7 +174,7 @@ impl<'a> Typechecker<'a> {
             }
 
             MatchPattern::PlaceIdentifier { name, var_id } => {
-                pattern.typ = self.use_variable(name, false, pattern.span, var_id);
+                pattern.typ = self.update_variable(name, pattern.span, var_id);
                 pattern.has_place = true;
             }
 

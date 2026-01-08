@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{ErrType, lexing::tokens::{TokenSpan, TokenType}, parsing::{Parser, Precedence, ast_structure::{EnumExpression, Expr, ExprInfo, MatchArm, Span, TupleElement, TypeKind, Value}}};
+use crate::{ErrType, lexing::tokens::{TokenSpan, TokenType}, parsing::{Parser, Precedence, ast_structure::{EnumExpression, Expr, ExprInfo, MatchArm, MatchPattern, Span, TupleElement, TypeKind, Value}}};
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_expression(&mut self, precedence: Precedence) -> ExprInfo {
@@ -287,7 +287,18 @@ impl<'a> Parser<'a> {
                 let (end_span, arms) = self.parse_line_seperated(
                     TokenType::RightBrace,
                     |p| {
-                        let pattern = p.parse_binding_match_pattern(false);
+                        // parse the pattern itself
+                        let mut pattern = p.parse_binding_match_pattern(false);
+
+                        // optional if after pattern
+                        if p.optional_token(TokenType::If).is_some() {
+                            let body = p.parse_expression(Precedence::Arrow);
+                            let body_span = body.span;
+                            let pattern_span = pattern.span;
+                
+                            pattern = MatchPattern::Conditional { pattern: Box::new(pattern), body: Rc::new(body) }
+                                .to_info(pattern_span.merge(body_span))
+                        }
                         p.expect_token(TokenType::RightArrow, "after the match arm pattern.");
                         let body = p.parse_expression(Precedence::Lowest);
                         MatchArm { pattern, body }
@@ -456,13 +467,15 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_block_expression(&mut self, end_token: TokenType, start_span: Span) -> ExprInfo {
         // '{' already consumed.
+        let label = self.parse_optional_label().map(|(_, l)| l);
+
         let (end_span, exprs) = self.parse_line_seperated(
             end_token,
             |p| p.parse_expression(Precedence::Lowest),
             |span| Some(Expr::Void.to_info(span))
         );
 
-        Expr::Block { exprs, drops_vars: Vec::new() }.to_info(start_span.merge(end_span))
+        Expr::Block { exprs, label, drops_vars: Vec::new() }.to_info(start_span.merge(end_span))
     }
 
 

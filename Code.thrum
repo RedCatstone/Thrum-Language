@@ -1,6 +1,23 @@
-fn factorial(n: num) -> num {
-    ensure n > 1 else return 1
-    factorial(n - 1) * n
+
+let x
+
+{ #bloc
+    if true {
+        x = 5
+    }
+    else {
+        break #bloc
+    }
 }
 
-factorial(3)
+{ #bloc
+    if false {
+        x = 69
+    }
+    else {
+        x = 3
+        break #bloc
+    }
+}
+
+x

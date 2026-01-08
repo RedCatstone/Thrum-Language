@@ -2,7 +2,7 @@ use crate::{
     ErrType, Program, ProgramError,
     nativelib::{ThrumModule, get_native_lib},
     parsing::{ast_structure::{Expr, ExprInfo, Span, TypeKind}, desugar},
-    typing::{check_expressions::ExprContext, type_environment::{TypecheckScope, TypecheckVar}}
+    typing::{check_expressions::ExprContext, type_environment::{SnapshotInitVars, TypecheckScope, TypecheckVar}}
 };
 use std::{cell::RefCell, collections::HashMap};
 
@@ -44,6 +44,12 @@ pub struct TypeID (pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarID (pub usize);
 
+pub struct BreakTypeInfo {
+    label: String,
+    typ: TypeKind,
+    snapshots_from_breaks: Vec<Option<SnapshotInitVars>>,
+}
+
 
 pub struct Typechecker<'a> {
     errors: &'a mut Vec<ProgramError>,
@@ -57,7 +63,7 @@ pub struct Typechecker<'a> {
     next_var_id: usize,
 
     current_function_return_type: Option<TypeKind>,
-    current_break_types: Vec<(String, TypeKind)>,
+    current_break_types: Vec<BreakTypeInfo>,
 }
 
 impl<'a> Typechecker<'a> {
@@ -125,7 +131,7 @@ impl<'a> Typechecker<'a> {
             |typ| {
                 let mut self_borrow = self_cell.borrow_mut();
                 let pruned = self_borrow.prune(&typ);
-                let final_typ = match pruned {
+                match pruned {
                     TypeKind::ParserUnknown => {
                         unreachable!("somehow the typechecker missed a ParserUnknown type...")
                     }
@@ -134,8 +140,7 @@ impl<'a> Typechecker<'a> {
                         self_borrow.error(ErrType::TyperCantInferType(pruned), Span::invalid())
                     }
                     _ => pruned,
-                };
-                final_typ
+                }
             }
         );
     }

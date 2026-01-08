@@ -4,7 +4,7 @@ use crate::{
     ErrType,
     lexing::tokens::{TokenSpan, TokenType},
     nativelib::ThrumType,
-    parsing::ast_structure::{DefinedTypeKind, Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TupleElement, TupleType, TypeKind, Value}
+    parsing::ast_structure::{DefinedTypeKind, Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TupleElement, TupleType, TypeKind, Value}, typing::BreakTypeInfo
 };
 use crate::typing::Typechecker;
 
@@ -85,14 +85,14 @@ impl<'a> Typechecker<'a> {
                 arr_element_type
             }
 
-            Expr::Block { exprs, drops_vars } => {
+            Expr::Block { exprs, label, drops_vars } => {
                 self.enter_scope();
 
                 // 1. define FnDefinitions
                 for expr in exprs.iter_mut() {
                     if let Expr::FnDefinition { name, params, return_type, var_id, .. } = &mut expr.expression {
                         let fn_typ = self.get_fn_type(params, return_type, false);
-                        let var = self.define_variable(name.clone(), false, fn_typ, expr.span);
+                        let var = self.define_variable(name.clone(), false, true, fn_typ, expr.span);
                         *var_id = Some(var.var_id);
                     }
                 }
@@ -100,6 +100,10 @@ impl<'a> Typechecker<'a> {
                 // normal pass
                 let mut is_never = false;
                 let block_drop_type = if let Some((last_expr, other_exprs)) = exprs.split_last_mut() {
+                    // label logic
+                    let snap_before_block = self.snap_label_before(label);
+
+                    // actual expression compiling
                     for expr in other_exprs {
                         self.check_expression(expr, &ctx);
                         if expr.typ.is_never() { is_never = true }
@@ -108,6 +112,19 @@ impl<'a> Typechecker<'a> {
                     // this isn't reeeaally needed, but it definitely can't hurt to allow.
                     // let x = { case ?x = ... and x > 3 }
                     self.check_expression(last_expr, &ctx.allow_conditional_bindings());
+                    if last_expr.typ.is_never() { is_never = true }
+
+                    // label logic again
+                    if let Some(label) = label {
+                        let mut break_type_info = self.current_break_types.pop().unwrap();
+                        assert_eq!(break_type_info.label, *label);
+                        self.unify_types(&last_expr.typ, &break_type_info.typ, last_expr.span);
+
+                        // 1 more snapshot after the full block executed
+                        break_type_info.snapshots_from_breaks.push(self.snapshot_branch_vars_init_state(is_never));
+                        self.merge_vars_init_states(snap_before_block.unwrap(), &break_type_info.snapshots_from_breaks);
+                    };
+                    
                     if is_never { TypeKind::Never } else { last_expr.typ.clone() }
                 } else {
                     // Empty block returns Void
@@ -142,27 +159,46 @@ impl<'a> Typechecker<'a> {
             }
 
             Expr::If { condition, then, alt } => {
+                let ctx: &ExprContext = &ctx;
                 self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
-    
-                self.check_expression(then, &ctx);
+
+                let snap = self.snapshot_first_vars_init_state();
+
+                self.check_expression(then, ctx);
+                let then_snap = self.snapshot_branch_vars_init_state(then.typ.is_never());
+                self.restore_vars_init_state(&snap);
+
                 self.check_expression(alt, &ctx.expect(then.typ.clone()));
+                let alt_snap = self.snapshot_branch_vars_init_state(alt.typ.is_never());
+                self.restore_vars_init_state(&snap);
+
+                self.merge_vars_init_states(snap, &[then_snap, alt_snap]);
 
                 then.typ.clone()
             },
 
             Expr::Ensure { condition, alt, then } => {
                 self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
+                
+                let snap = self.snapshot_first_vars_init_state();
     
                 self.check_expression(alt, &ctx);
                 if !alt.typ.is_never() {
                     self.type_mismatch(TypeKind::Never, alt.typ.clone(), alt.span);
                 }
+
+                // since alt.typ is supposed to always be TypeKind::Never only the then branch snapshot matters
+                self.restore_vars_init_state(&snap);
+
                 self.check_expression(then, &ctx);
                 then.typ.clone()
             }
 
             Expr::Match { match_value, arms: cases } => {
                 self.check_expression(match_value, &ctx);
+
+                let original_snap = self.snapshot_first_vars_init_state();
+                let mut arm_snapshots = Vec::new();
 
                 let mut cases_to_cover = match self.prune(&match_value.typ) {
                     TypeKind::Bool => Some(HashSet::from([true.to_string(), false.to_string()])),
@@ -180,13 +216,15 @@ impl<'a> Typechecker<'a> {
                         }
                         _ => { }
                     }
-                    self.check_binding_pattern(&mut arm.pattern, &mut None, true);
+                    self.check_binding_pattern(&mut arm.pattern, &mut None, true, true);
                     self.unify_types(&match_value.typ, &arm.pattern.typ, arm.pattern.span);
 
                     if !arm.pattern.can_fail { has_unfailable_arm = true; }
 
                     self.check_expression(&mut arm.body, &ctx);
                     arm_types.push(arm.body.typ.clone());
+                    arm_snapshots.push(self.snapshot_branch_vars_init_state(arm.body.typ.is_never()));
+                    self.restore_vars_init_state(&original_snap);
 
                     // ignoring dropped vars because patterns store what vars they define themselves.
                     self.exit_scope();
@@ -199,23 +237,33 @@ impl<'a> Typechecker<'a> {
                     self.error(crate::ErrType::TyperPatternDoesntCoverAllCases(cases_to_cover.unwrap().iter().cloned().collect()), expr.span);
                 }
 
+                self.merge_vars_init_states(original_snap, &arm_snapshots);
+
                 self.unify_type_vec(&arm_types, match_value.span)
             },
 
             Expr::Loop { body, label } => {
                 let loop_break_type = self.new_inference_type();
-                self.current_break_types.push((label.to_string(), loop_break_type.clone()));
+
+                let snap_before_loop = self.snap_label_before(&mut Some(label.clone()));
+
+                // check expression
                 self.check_expression(body, &ctx.expect(TypeKind::Void));
-                self.current_break_types.pop().unwrap();
+
+                // label logic again
+                let break_type_info = self.current_break_types.pop().unwrap();
+                assert_eq!(break_type_info.label, *label);
                 if loop_break_type == self.prune(&loop_break_type) {
-                    // loop doesn't have any breaks -> infinite loop
+                    // loop doesn't have any breaks -> infinite loop -> TypeKind::Never
                     self.unify_types(&loop_break_type, &TypeKind::Never, expr.span);
                 }
+                self.merge_vars_init_states(snap_before_loop.unwrap(), &break_type_info.snapshots_from_breaks);
+
                 loop_break_type
             },
             
             Expr::Assign { pattern, extra_operator, value } => {
-                self.check_binding_pattern(pattern, &mut None, true);
+                self.check_binding_pattern(pattern, &mut None, value.is_some(), true);
                 if pattern.can_fail {
                     self.error(ErrType::TyperFailableLetPattern, expr.span);
                 }
@@ -230,7 +278,7 @@ impl<'a> Typechecker<'a> {
             },
 
             Expr::Case { pattern, value } => {
-                self.check_binding_pattern(pattern, &mut None, true);
+                self.check_binding_pattern(pattern, &mut None, true, true);
                 self.check_expression(value, &ctx.expect(pattern.typ.clone()));
                 if value.typ.is_never() { is_never = true }
                 else if !pattern.vars_defined.is_empty() && !old_ctx.allow_conditional_bindings {
@@ -274,26 +322,31 @@ impl<'a> Typechecker<'a> {
             },
 
             Expr::Break { expr, label } => {
-                let curr_break_type = if self.current_break_types.is_empty() {
-                    self.error(ErrType::TyperBreakOutsideLoop, expr.span)
-                }
-                else if let Some(break_label) = label {
-                    // break with a label -> find the closest loop with that label
-                    match self.current_break_types
-                        .iter().rev()
-                        .find(|(x_label, _typ)| x_label == break_label) {
-                            Some((_label, typ)) => typ.clone(),
-                            None => self.error(ErrType::TyperUndefinedLoopLabel(
-                                break_label.to_string(),
-                                self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()
-                            ), expr.span)
-                        }
-                } else {
-                    // break without a label -> just break to the current loop
-                    self.current_break_types.last().unwrap().1.clone()
-                };
+                // this is None if it couldn't find where to break to (already errored)
+                let break_info = self.find_loop_label(label, expr.span);
+                
+                let ctx = if let Some(i) = break_info { &ctx.expect(i.typ.clone()) } else { &ctx };
+                self.check_expression(expr, ctx);
 
-                self.check_expression(expr, &ctx.expect(curr_break_type));
+                // the current init var states need to be pushed here to correctly handle stuff like this:
+                // let x
+                // { #bloc
+                //     if false {
+                //         x = 5
+                //     }
+                //     else {
+                //         x = 3
+                //         break #bloc
+                //     }
+                // }
+                // x  // x is initialized in every possible branch -> 
+                let snap =  self.snapshot_branch_vars_init_state(expr.typ.clone().is_never());
+
+                // refind break_info to make the borrow checker happy
+                let break_info = self.find_loop_label(label, expr.span);
+                if let Some(break_info) = break_info {
+                    break_info.snapshots_from_breaks.push(snap);
+                }
 
                 TypeKind::Never
             },
@@ -302,10 +355,10 @@ impl<'a> Typechecker<'a> {
                 if let Some(continue_label) = label
                     && !self.current_break_types
                         .iter().rev()
-                        .any(|(x_label, _typ)| x_label == continue_label) {
+                        .any(|x| x.label == *continue_label) {
                             self.error(ErrType::TyperUndefinedLoopLabel(
                                 continue_label.to_string(),
-                                self.current_break_types.iter().map(|(l, _)| l.to_string()).collect()
+                                self.current_break_types.iter().map(|x| x.label.to_string()).collect()
                             ), expr.span);
                         }
                 TypeKind::Never
@@ -391,6 +444,40 @@ impl<'a> Typechecker<'a> {
     }
 
 
+    fn find_loop_label(&mut self, label: &mut Option<String>, span: Span) -> Option<&mut BreakTypeInfo> {
+        if self.current_break_types.is_empty() {
+            self.error(ErrType::TyperBreakOutsideLoop, span);
+            None
+        }
+        else if let Some(target_label) = label {
+            // rposition to search from the back (innermost loop out).
+            let found_index = self.current_break_types
+                .iter()
+                .rposition(|info| info.label == *target_label);
+
+            match found_index {
+                Some(idx) => {
+                    // found the label, return the break type
+                    Some(&mut self.current_break_types[idx])
+                }
+                None => {
+                    // couldn't find the label -> report error
+                    let available_labels = self.current_break_types.iter().map(|info| info.label.clone()).collect();
+                    self.error(ErrType::TyperUndefinedLoopLabel(
+                        target_label.to_string(),
+                        available_labels
+                    ), span);
+                    
+                    None
+                }
+            }
+        } else {
+            // Break without label -> grab the last one
+            Some(self.current_break_types.last_mut().unwrap())
+        }
+    }
+
+
 
     pub(super) fn check_literal(&mut self, val: &mut Value) -> TypeKind {
         match val {
@@ -452,7 +539,7 @@ impl<'a> Typechecker<'a> {
     fn get_fn_type(&mut self, params: &mut [MatchPatternInfo], return_type: &mut TypeKind, define_params: bool) -> TypeKind {
         let mut param_types = Vec::new();
         for param_pattern in params.iter_mut() {
-            self.check_binding_pattern(param_pattern, &mut None, define_params);
+            self.check_binding_pattern(param_pattern, &mut None, true, define_params);
 
             if param_pattern.has_place { self.error(ErrType::TyperFnParamPlacePatterns, param_pattern.span); }
             if param_pattern.can_fail { self.error(ErrType::TyperFailableFnParamPatterns, param_pattern.span); }

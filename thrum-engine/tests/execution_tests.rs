@@ -22,10 +22,27 @@ fn test_strings() {
 }
 
 #[test]
+fn test_delayed_let() {
+    assert_eq!(
+        run_code(r#"
+            { #bloc
+                let x
+                if true {
+                    x = 5
+                }
+                else break #bloc -1
+                x
+            }
+        "#),
+        Ok(Value::Num(5.0))
+    );
+}
+
+#[test]
 fn test_while() {
     assert_eq!(
         run_code(r#"
-        let x = 0
+        let mut x = 0
         while x < 5 {
             x += 1
         }
@@ -108,7 +125,7 @@ fn test_case_expr() {
 fn test_labeled_loops() {
     assert_eq!(
         run_code(r#"
-        let res = 1
+        let mut res = 1
         loop #outer {
             res += 1
             loop {
@@ -122,6 +139,20 @@ fn test_labeled_loops() {
         }
         "#),
         Ok(Value::Num(69.0))
+    );
+}
+
+
+#[test]
+fn test_labeled_blocks() {
+    assert_eq!(
+        run_code(r#"
+        { #bloc
+            break #bloc 69420
+            5
+        }
+        "#),
+        Ok(Value::Num(69420.0))
     );
 }
 

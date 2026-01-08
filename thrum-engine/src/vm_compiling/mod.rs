@@ -228,7 +228,7 @@ impl<'a> CompileFunction<'a> {
                 self.compile_prefix(operator, &right.typ)
             }
 
-            Expr::Block { exprs, drops_vars } => {
+            Expr::Block { exprs, label, drops_vars } => {
                 let drops_vars: &[VarID] = drops_vars;
                 // define FnDefinitions first
                 for expr in exprs {
@@ -236,8 +236,7 @@ impl<'a> CompileFunction<'a> {
                         Expr::FnDefinition { name, var_id, params, body, ..  } => {
                             let chunk_index = self.bytecode_chunks.len();
                             let function_value = Value::Closure { chunk_index };
-                            self.push_get_constant_op(function_value.clone());
-                            self.push_define_local(var_id.unwrap(), Some(function_value));
+                            self.define_local(var_id.unwrap(), Some(function_value));
 
                             CompileFunction::compile_function(
                                 name.to_string(),
@@ -254,12 +253,33 @@ impl<'a> CompileFunction<'a> {
 
                 // process all other expressions
                 if let Some((last_expr, preceding_exprs)) = exprs.split_last() {
+                    // block label logic
+                    if let Some(label) = label {
+                        self.loop_infos.push(LoopInfo {
+                            break_jumps: Vec::new(),
+                            start: usize::MAX,
+                            label: label.to_string()
+                        });
+                    }
+
+                    // actual compiling of the expressions
                     for expr in preceding_exprs {
                         self.compile_expression(expr);
                         // if it is not the last expression of the block, the return value is discarded, so pop it.
                         self.push_pop_value();
                     }
                     self.compile_expression(last_expr);
+
+                    
+                    // all break jumps that are refering to this loop.
+                    if let Some(label) = label {
+                        let loop_info = self.loop_infos.pop().unwrap();
+                        assert_eq!(label, &loop_info.label);
+
+                        for jump in loop_info.break_jumps {
+                            self.patch_jump_op(jump);
+                        }                        
+                    }
                 }
                 else {
                     // if block is empty, just push void
@@ -275,7 +295,7 @@ impl<'a> CompileFunction<'a> {
 
             Expr::Assign { pattern, extra_operator, value } => {
                 for (_, var) in &pattern.vars_defined {
-                    self.define_local(*var);
+                    self.define_local(*var, None);
                 }
 
                 if let Some(val) = value {
@@ -402,6 +422,7 @@ impl<'a> CompileFunction<'a> {
 
                 // all break/continue jumps that are refering to this loop.
                 let loop_info = self.loop_infos.pop().unwrap();
+                assert_eq!(label, &loop_info.label);
 
                 for jump in loop_info.break_jumps {
                     self.patch_jump_op(jump);
@@ -430,7 +451,7 @@ impl<'a> CompileFunction<'a> {
                     self.loop_infos
                         .iter_mut().rev()
                         .find(|x| x.label == *break_label)
-                        .unwrap()
+                        .expect("could not find label...")
                 } else {
                     self.loop_infos.last_mut().unwrap()
                 };
@@ -453,7 +474,7 @@ impl<'a> CompileFunction<'a> {
                     self.loop_infos
                         .iter().rev()
                         .find(|x| x.label == *continue_label)
-                        .unwrap()
+                        .expect("could not find label...")
                 } else {
                     self.loop_infos.last_mut().unwrap()
                 };
@@ -673,14 +694,20 @@ impl<'a> CompileFunction<'a> {
         self.cur_temp_amount += 1;
     }
 
-    fn define_local(&mut self, var_id: VarID) -> usize {
+    fn define_local(&mut self, var_id: VarID, const_value: Option<Value>) -> usize {
         if let Some(var) = self.variables.get(&var_id) {
             match var {
                 CompilerVar::AtSlot(slot) => *slot,
                 CompilerVar::ConstValue(a) => unreachable!("Cannot get the slot of a constant {a}")
             }
         } else {
-            self.variables.insert(var_id, CompilerVar::AtSlot(self.cur_var_amount));
+            // doesn't exist yet, define it!
+            let to_insert = if let Some(const_val) = const_value {
+                CompilerVar::ConstValue(const_val)
+            } else {
+                CompilerVar::AtSlot(self.cur_var_amount)
+            };
+            self.variables.insert(var_id, to_insert);
             let slot = self.cur_var_amount;
 
             self.cur_var_amount += 1;
@@ -693,17 +720,9 @@ impl<'a> CompileFunction<'a> {
         }
     }
 
-    fn push_define_local(&mut self, var_id: VarID, const_value: Option<Value>) {
-        if let Some(val) = const_value {
-            self.variables.insert(var_id, CompilerVar::ConstValue(val));
-            self.cur_var_amount += 1;
-        }
-        else {
-            let slot = self.define_local(var_id);
-            self.push_op_with_opnum(OpCode::LocalSet, slot);
-        };
-
-
+    fn push_define_local(&mut self, var_id: VarID) {
+        let slot = self.define_local(var_id, None);
+        self.push_op_with_opnum(OpCode::LocalSet, slot);
         self.cur_temp_amount -= 1;
     }
 
@@ -795,7 +814,7 @@ impl<'a> CompileFunction<'a> {
     fn compile_binding_pattern(&mut self, pattern: &MatchPatternInfo, failure_jumps: &mut Vec<FailureJump>) {
         match &pattern.pattern {
             // the value is already on the stack, just the compiler just needs a variable that points to it.
-            MatchPattern::Binding { var_id, .. } => self.push_define_local(var_id.unwrap(), None),
+            MatchPattern::Binding { var_id, .. } => self.push_define_local(var_id.unwrap()),
             MatchPattern::Wildcard => self.push_pop_value(),
 
             MatchPattern::Tuple(patterns) => {
