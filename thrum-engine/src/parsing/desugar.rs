@@ -1,8 +1,4 @@
-use std::rc::Rc;
-
 use crate::{Program, lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::{Expr, ExprInfo, MatchPattern, MatchPatternInfo, Span, TypeKind, Value}};
-
-
 
 
 
@@ -35,20 +31,19 @@ pub fn loop_over_every_ast_node(
                 }
                 Expr::Prefix { right: expr, operator: _ }
                 | Expr::Loop { body: expr, label: _ }
-                | Expr::Deref { expr }
-                | Expr::MutRef { expr }
+                | Expr::Move { expr, auto_clone: _ }
                 | Expr::Return(expr)
                 | Expr::Break { expr, label: _ }
                 | Expr::MemberAccess { left: expr, member: _, resolved_index: _ } => {
                     exprs.push(expr);
                 }
-                Expr::Infix { left: expr1, right: expr2, operator: _ }
-                | Expr::Index { left: expr1, index: expr2 }
-                | Expr::While { condition: expr1, body: expr2, label: _ } => {
-                    exprs.push(expr1);
-                    exprs.push(expr2);
+                Expr::Infix { left, right, operator: _ }
+                | Expr::Index { left, index: right }
+                | Expr::While { condition: left, body: right, label: _ } => {
+                    exprs.push(left);
+                    exprs.push(right);
                 }
-                Expr::Assign { pattern, value, extra_operator: _ } => {
+                Expr::Assign { pattern, value, extra_operator: _, op_span: _ } => {
                     patterns.push(pattern);
                     if let Some(val) = value { exprs.push(val); }
                 }
@@ -73,15 +68,20 @@ pub fn loop_over_every_ast_node(
                     exprs.push(callee);
                     exprs.extend(arguments);
                 }
-                Expr::FnDefinition { params, body, return_type, name: _, var_id: _ }
-                | Expr::Closure { params, body, return_type } => {
-                    for param in params { patterns.push(param); }
-                    exprs.push(Rc::get_mut(body).unwrap());
-                    types.push(return_type);
+                Expr::FnDefinition { params, body, return_type_annotation: _, name: _, var_id: _ }
+                | Expr::Closure { params, body, return_type_annotation: _ } => {
+                    for param in params {
+                        patterns.push(param);
+                    }
+                    exprs.push(body);
                 }
 
                 // types should already be finalized
-                Expr::Literal(_) | Expr::Identifier { name: _, var_id: _ } | Expr::TypePath(_) | Expr::EnumDefinition{ name: _, enums: _ } | Expr::Continue { label: _ }
+                Expr::Literal(_)
+                | Expr::IdentifierRef { name: _, mutable: _, var_id: _ }
+                | Expr::EnumDefinition{ name: _, variants: _ }
+                | Expr::TypePath(_)
+                | Expr::Continue { label: _ }
                 | Expr::Void => { /* already finalized */ }
             }
         }
@@ -91,7 +91,6 @@ pub fn loop_over_every_ast_node(
                 pattern,
                 MatchPattern::Wildcard.to_info(Span::invalid()), // temporary placeholder
             ));
-            types.push(&mut pattern.typ);
 
             match &mut pattern.pattern {
                 MatchPattern::Array(elements)
@@ -102,21 +101,17 @@ pub fn loop_over_every_ast_node(
                 MatchPattern::Tuple(elements) => {
                     for elem in elements { patterns.push(&mut elem.pattern) }
                 }
-                MatchPattern::Binding { typ, name: _, mutable: _, var_id: _ } => {
-                    types.push(typ);
-                }
                 | MatchPattern::Wildcard
-                | MatchPattern::Literal(_)
-                | MatchPattern::PlaceIdentifier { name: _, var_id: _ }
-                | MatchPattern::PlaceDeref { name: _, var_id: _ } => { /* done */ }
+                | MatchPattern::Binding { name: _, mutable: _, var_id: _ }
+                | MatchPattern::Literal(_) => { /* done */ }
+
+                MatchPattern::PlacePointer { expr } => {
+                    exprs.push(expr);
+                },
     
-                MatchPattern::PlaceIndex { left, index } => {
-                    exprs.push(Rc::get_mut(left).unwrap());
-                    exprs.push(Rc::get_mut(index).unwrap());
-                }
                 MatchPattern::Conditional { pattern, body } => {
                     patterns.push(pattern);
-                    exprs.push(Rc::get_mut(body).unwrap());
+                    exprs.push(body);
                 }
             }
         }
@@ -128,7 +123,7 @@ pub fn loop_over_every_ast_node(
 
             match typ {
                 TypeKind::Arr(t)
-                | TypeKind::MutPointer(t) => {
+                | TypeKind::Pointer { inner: t, mutable: _, borrows_var: _ } => {
                     types.push(t);
                 }
                 TypeKind::Tup(tuple_types) => {
@@ -136,8 +131,8 @@ pub fn loop_over_every_ast_node(
                         types.push(&mut tt.typ);
                     }
                 }
-                TypeKind::Struct { inner_types, name: _ } => {
-                    types.extend(inner_types)
+                TypeKind::CustomType { name: _, generic_types } => {
+                    types.extend(generic_types);
                 }
                 TypeKind::Fn { param_types, return_type } => {
                     types.extend(param_types);
@@ -146,7 +141,6 @@ pub fn loop_over_every_ast_node(
                 TypeKind::Num
                 | TypeKind::Str
                 | TypeKind::Bool
-                | TypeKind::Enum { .. }
                 | TypeKind::Inference(_)
                 | TypeKind::TypeError
                 | TypeKind::Void
@@ -171,13 +165,13 @@ pub fn desugar_after_parsing(program: &mut Program) {
         |expr| {
             match expr.expression {
                 // turn while loops into normal loops with a conditional break
-                Expr::While { condition: while_condition, body: while_body, label: while_label } => {
+                Expr::While { condition: w_condition, body: w_body, label: w_label } => {
                     // modify into
                     Expr::Loop {
-                        label: while_label,
+                        label: w_label,
                         body: Box::new(Expr::If {
-                            condition: while_condition,
-                            then: while_body,
+                            condition: w_condition,
+                            then: w_body,
                             alt: Box::new(Expr::Break {
                                 expr: Box::new(Expr::Void.to_info(expr.span)),
                                 label: None
@@ -198,25 +192,68 @@ pub fn desugar_after_parsing(program: &mut Program) {
                 }
 
                 Expr::Infix { operator, left, right }
-                if matches!(operator.token, TokenType::NotEqual | TokenType::LessEqual | TokenType::GreaterEqual) => {
-                    match operator.token {
-                        // !=  ! ==
-                        TokenType::NotEqual => Expr::Prefix {
-                            operator: TokenType::Exclamation,
-                            right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::EqualEqual, span: expr.span }, left, right }.to_info(expr.span))
-                        },
-                        // <=  ! >
-                        TokenType::LessEqual => Expr::Prefix {
-                            operator: TokenType::Exclamation,
-                            right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::Greater, span: expr.span }, left, right }.to_info(expr.span))
-                        },
-                        // >=  ! <
-                        TokenType::GreaterEqual => Expr::Prefix {
-                            operator: TokenType::Exclamation,
-                            right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::Less, span: expr.span }, left, right }.to_info(expr.span))
-                        },
-                        // Do nothing
-                        _ => unreachable!()
+                if operator.token == TokenType::NotEqual => {
+                    // !=   ! ==
+                    Expr::Prefix {
+                        operator: TokenType::Exclamation,
+                        right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::EqualEqual, span: expr.span }, left, right }.to_info(expr.span))
+                    }
+                }
+                Expr::Infix { operator, left, right }
+                if operator.token == TokenType::LessEqual => {
+                    // <=   ! >
+                    Expr::Prefix {
+                        operator: TokenType::Exclamation,
+                        right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::Greater, span: expr.span }, left, right }.to_info(expr.span))
+                    }
+                }
+                Expr::Infix { operator, left, right }
+                if operator.token == TokenType::GreaterEqual => {
+                    // >=   ! <
+                    Expr::Prefix {
+                        operator: TokenType::Exclamation,
+                        right: Box::new(Expr::Infix { operator: TokenSpan { token: TokenType::Less, span: expr.span }, left, right }.to_info(expr.span))
+                    }
+                }
+                
+                // x[...] += 1 desugars to:
+                // { let priv = x[...]; priv^ = priv^ + 1 }
+                Expr::Assign { pattern, extra_operator, op_span, value }
+                if extra_operator.is_some() && value.is_some() => {
+                    let Some(op) = extra_operator else { unreachable!() };
+                    let MatchPattern::PlacePointer { expr } = pattern.pattern else { panic!("todo fix this") };
+
+                    let expr_span = expr.span;
+                    let var_name = "priv".to_string();
+                    let move_priv = Expr::Move {
+                        expr: Box::new(Expr::IdentifierRef { name: var_name, mutable: false, var_id: None }.to_info(expr.span)),
+                        auto_clone: false
+                    }.to_info(expr.span);
+
+                    Expr::Block {
+                        exprs: vec![
+                            Expr::Assign {
+                                pattern: Box::new(MatchPattern::Binding { name: "priv".to_string(), mutable: false, var_id: None }.to_info(expr.span)),
+                                extra_operator: None,
+                                op_span: Span::invalid(),
+                                value: Some(Box::new(expr))
+                            }.to_info(expr_span),
+
+                            Expr::Assign {
+                                pattern: Box::new(MatchPattern::PlacePointer { expr: move_priv.clone() }.to_info(expr_span)),
+                                extra_operator: None,
+                                op_span: Span::invalid(),
+                                value: Some(Box::new(
+                                    Expr::Infix {
+                                        operator: TokenSpan { token: op, span: op_span },
+                                        left: Box::new(move_priv),
+                                        right: value.unwrap()
+                                    }.to_info(expr_span)
+                                ))
+                            }.to_info(expr_span)
+                        ],
+                        label: None,
+                        drops_vars: Vec::new()
                     }
                 }
 
@@ -239,15 +276,14 @@ pub fn desugar_after_parsing(program: &mut Program) {
 
 
 fn desugar_ensure(exprs: &mut Vec<ExprInfo>) {
-    // puts all expressions after an ensure expression into its then block.
     if let Some(ensure_index) = exprs.iter().position(|x| matches!(x.expression, Expr::Ensure { .. })) {
         // take everything AFTER ensure (inside this block expr)
         let exprs_after_ensure = exprs.split_off(ensure_index + 1);
 
-        // take the ensure node itself
+        // take the ensure Expr itself
         let Expr::Ensure { then, .. } = &mut exprs.last_mut().unwrap().expression
         else { unreachable!() };
-        // exprs_after_ensure get put into the then block
+        // and put exprs_after_ensure into its then block
         then.expression = Expr::Block { exprs: exprs_after_ensure, drops_vars: Vec::new(), label: None };
     }
 }

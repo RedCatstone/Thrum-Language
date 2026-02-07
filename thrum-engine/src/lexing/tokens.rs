@@ -10,32 +10,32 @@ pub enum TokenType {
     Colon, ColonColon,          // : ::
 
     // Operators
-    Equal,                      // =
-    Plus, PlusEqual,            // + +=
-    Minus, MinusEqual,          // - -=
-    Star, StarEqual,            // * *=
-    StarStar, StarStarEqual,    // ** **=
-    Slash, SlashEqual,          // / /=
-    Percent, PercentEqual,      // % %=
-    Quest, QuestDot, QuestEqual,// ? ?. ?=
+    Equal { extra_operator: Option<Box<Self>> }, // =
+    Plus,                       // + +=
+    Minus,                      // - -=
+    Star,                       // * *=
+    StarStar,                   // ** **=
+    Slash,                      // / /=
+    Percent,                    // % %=
+    Quest, QuestDot,            // ? ?. ?=
 
     // Bitwise
-    BitNot, BitNotEqual,        // ~ ~=
-    BitAnd, BitAndEqual,        // ~& ~&=
-    BitOr, BitOrEqual,          // ~| ~|=
-    BitXor, BitXorEqual,        // ~^ ~^=
-    LeftShift, LeftShiftEqual,  // ~< ~<=
-    RightShift, RightShiftEqual,// ~> ~>=
+    BitNot,                     // ~! ~!=
+    BitAnd,                     // ~& ~&=
+    BitOr,                      // ~| ~|=
+    BitXor,                     // ~^ ~^=
+    LeftShift,                  // ~< ~<=
+    RightShift,                 // ~>> ~>>=
     
     // Logical
     Ampersand, Pipe,            // & |
     EqualEqual,                 // ==
-    Exclamation, NotEqual,              // ! !=
+    Exclamation, NotEqual,      // ! !=
     Less, LessEqual,            // < <=
     Greater, GreaterEqual,      // > >=
     
     // Advanced
-    RightArrow,                 // ->
+    RightArrow, TildeArrow,     // -> ~>
     PipeGreater, Caret,         // |> ^
     DotDot, DotDotLess,         // .. ..<
     DotDotDot,                  // ...
@@ -55,12 +55,17 @@ pub enum TokenType {
     Break, Continue,
     Fn, Return,
     Let, Const, Case, Ensure,
-    Mut,
+    Mut, Ref, Own,
     Struct, Enum,
     Import, From, As,
     Match,
 
     EndOfFile
+}
+impl TokenType {
+    pub fn equal(with: Self) -> Self {
+        Self::Equal { extra_operator: Some(Box::new(with)) }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +76,7 @@ pub struct TokenSpan {
     pub span: Span,
 }
 impl TokenSpan {
-    pub const END_TOKEN: TokenSpan = TokenSpan {
+    pub const END_TOKEN: Self = Self {
         token: TokenType::EndOfFile,
         span: Span {
             line: usize::MAX,
@@ -90,7 +95,7 @@ pub fn get_keyword(identifier: &str) -> Option<TokenType> {
         "break" => Some(TokenType::Break), "continue" => Some(TokenType::Continue),
         "fn" => Some(TokenType::Fn), "return" => Some(TokenType::Return),
         "let" => Some(TokenType::Let), "const" => Some(TokenType::Const), "case" => Some(TokenType::Case), "ensure" => Some(TokenType::Ensure),
-        "mut" => Some(TokenType::Mut),
+        "mut" => Some(TokenType::Mut), "ref" => Some(TokenType::Ref), "own" => Some(TokenType::Own),
         "struct" => Some(TokenType::Struct), "enum" => Some(TokenType::Enum),
         "match" => Some(TokenType::Match),
         "import" => Some(TokenType::Import), "from" => Some(TokenType::From), "as" => Some(TokenType::As),

@@ -4,34 +4,47 @@ use crate::{parsing::ast_structure::{Span, TypeKind}, typing::{Typechecker, Type
 
 
 
-impl<'a> Typechecker<'a> {
-    pub fn new_inference_type(&mut self) -> TypeKind {
+impl Typechecker<'_> {
+    // its so cursed that this function can be const
+    // but cool i guess :)
+    pub const fn new_inference_type(&mut self) -> TypeKind {
         let id = self.next_inference_id;
         self.next_inference_id += 1;
         TypeKind::Inference(TypeID(id))
     }
 
-    pub fn prune(&mut self, typ: &TypeKind) -> TypeKind {
-        typ.prune(&self.type_lookup)
+    pub fn prune(&mut self, typ: &TypeKind, error_on_inference: Option<Span>) -> TypeKind {
+        let pruned = typ.prune(&self.type_lookup);
+        if let TypeKind::Inference(_) = pruned && let Some(err_span) = error_on_inference {
+            self.error(crate::ErrType::TyperTypeMustBeKnownHere { typ: pruned }, err_span)
+        } else {
+            pruned
+        }
     }
 
 
     pub fn unify_types(&mut self, a: &TypeKind, b: &TypeKind, span: Span) {
-        let type_a = self.prune(a);
-        let type_b = self.prune(b);
+        let type_a = self.prune(a, None);
+        let type_b = self.prune(b, None);
         
         match (type_a.clone(), type_b.clone()) {
             _ if type_a == type_b => { /* Do nothing */ }
 
             // if one is an inference variable, bind it to the other type.
-            (TypeKind::Inference(id), _) => { self.type_lookup.insert(id, type_b.clone()); }
-            (_, TypeKind::Inference(id)) => { self.type_lookup.insert(id, type_a.clone()); }
+            (TypeKind::Inference(id), _) => { self.type_lookup.insert(id, type_b); }
+            (_, TypeKind::Inference(id)) => { self.type_lookup.insert(id, type_a); }
             
-            (TypeKind::Never, _) => { /* Do nothing */ }
-            (_, TypeKind::Never) => { /* Do nothing */ }
+            (TypeKind::Never | TypeKind::TypeError, _)
+            | (_, TypeKind::Never | TypeKind::TypeError) => { /* Do nothing */ }
 
-            (TypeKind::MutPointer(inner_a), TypeKind::MutPointer(inner_b))
-            | (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
+            (TypeKind::Pointer { mutable: mut_a, inner: inner_a, borrows_var: _ },
+            TypeKind::Pointer { mutable: mut_b, inner: inner_b, borrows_var: _ }) => {
+                self.unify_types(&inner_a, &inner_b, span);
+                // if mut_a != mut_b {
+                //     self.type_mismatch(type_a, type_b, span);
+                // }
+            }
+            (TypeKind::Arr(inner_a), TypeKind::Arr(inner_b)) => {
                 self.unify_types(&inner_a, &inner_b, span);
             }
             (TypeKind::Tup(elements_a), TypeKind::Tup(elements_b)) => {
@@ -68,7 +81,7 @@ impl<'a> Typechecker<'a> {
             let mut is_never = false;
             for other in others {
                 self.unify_types(first, other, span);
-                if self.prune(other) == TypeKind::Never {
+                if self.prune(other, None).is_never() {
                     is_never = true;
                 }
             }

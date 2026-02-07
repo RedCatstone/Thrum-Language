@@ -3,7 +3,8 @@ use std::{iter::Peekable, vec::IntoIter};
 use crate::{ErrType, Program, ProgramError, lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::Span};
 
 mod parse_expressions;
-mod parse_pattern_types;
+mod parse_patterns;
+mod parse_type_annotations;
 pub mod ast_structure;
 pub mod desugar;
 
@@ -76,12 +77,11 @@ impl<'a> Parser<'a> {
 
     fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Span {
         let token = self.peek();
-        if std::mem::discriminant(&token.token) == std::mem::discriminant(&expected) {
+        if token.token == expected {
             self.next().span
-        }
-        else {
+        } else {
             let found_instead = self.peek().clone();
-            self.error(ErrType::ParserExpectToken(expected, error_msg.to_string(), found_instead.token));
+            self.error(ErrType::ParserExpectToken { expected, err_msg: error_msg.to_string(), found: found_instead.token });
             found_instead.span
         }
     }
@@ -89,21 +89,11 @@ impl<'a> Parser<'a> {
         if let TokenType::Identifier(text) = &self.peek().token {
             let text = text.clone();
             (self.next().span, text)
-        }
-        else {
+        } else {
             let found_instead = self.peek().clone();
-            self.error(ErrType::ParserExpectToken(TokenType::Identifier(String::new()), error_msg.to_string(), found_instead.token));
+            self.error(ErrType::ParserExpectToken { expected: TokenType::Identifier(String::new()), err_msg: error_msg.to_string(), found: found_instead.token });
             (found_instead.span, String::new())
         }
-    }
-
-    fn optional_dot_token(&mut self) -> Option<(Span, String)> {
-        if let TokenType::Dot(text) = &self.peek().token {
-            let text = text.clone();
-            let dot_token = self.next();
-            Some((dot_token.span, text))
-        }
-        else { None }
     }
 
     fn parse_optional_label(&mut self) -> Option<(Span, String)> {
@@ -125,7 +115,7 @@ impl<'a> Parser<'a> {
     }
 
     fn optional_token(&mut self, expected: TokenType) -> Option<Span> {
-        if std::mem::discriminant(&self.peek().token) == std::mem::discriminant(&expected) {
+        if self.peek().token == expected {
             Some(self.next().span)
         }
         else { None }
@@ -174,7 +164,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let span = self.expect_token(end_token.clone(), "to close the block");
+        let span = self.expect_token(end_token, "to close the block");
         (span, list)
     }
 
@@ -187,7 +177,7 @@ impl<'a> Parser<'a> {
             if self.peek_is_expression_start() {
                 return;
             }
-            else { self.next(); }
+            self.next();
         }
     }
 }
@@ -201,14 +191,13 @@ impl<'a> Parser<'a> {
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum Precedence {
     Lowest,
-    Colon,      // :
-    Arrow,      // ->
     Assign,     // =, +=, -=, etc.
     Pipe,       // |>
     Range,      // 1..2
     Nullish,    // ??
     Or,         // |
     And,        // &
+    TildeArrow, // ~>
     BitwiseOr,  // ~|
     BitwiseXor, // ~^
     BitwiseAnd, // ~&
@@ -221,4 +210,29 @@ pub enum Precedence {
     Postfix,    // ^
     Prefix,     // !, ~!, -
     CallIndex,  // square(X), array[i], dict {1, 2}
+}
+impl Precedence {
+    pub const fn get_precedence(token_type: &TokenType) -> Self {
+        match token_type {
+            TokenType::Equal { .. } => Self::Assign,
+            TokenType::DotDot | TokenType::DotDotLess => Self::Range,
+            TokenType::Quest => Self::Nullish,
+            TokenType::PipeGreater => Self::Pipe,
+            TokenType::Pipe => Self::Or,
+            TokenType::Ampersand => Self::And,
+            TokenType::TildeArrow => Self::TildeArrow,
+            TokenType::BitOr => Self::BitwiseOr,
+            TokenType::BitXor => Self::BitwiseXor,
+            TokenType::BitAnd => Self::BitwiseAnd,
+            TokenType::EqualEqual | TokenType::NotEqual => Self::Equals,
+            TokenType::Less | TokenType::Greater | TokenType::LessEqual | TokenType::GreaterEqual => Self::LessGreater,
+            TokenType::LeftShift | TokenType::RightShift => Self::Shift,
+            TokenType::Plus | TokenType::Minus => Self::Sum,
+            TokenType::Star | TokenType::Slash | TokenType::Percent => Self::Product,
+            TokenType::StarStar => Self::Power,
+            TokenType::Caret => Self::Postfix,
+            TokenType::LeftParen | TokenType::LeftBracket | TokenType::Dot(_) | TokenType::ColonColon | TokenType::QuestDot => Self::CallIndex,
+            _ => Self::Lowest,
+        }
+    }
 }

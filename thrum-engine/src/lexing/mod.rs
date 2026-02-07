@@ -70,7 +70,7 @@ impl<'a> Lexer<'a> {
             }
         };
         self.tokens.push(new_token);
-        self.curr_token_start_byte_offset = self.byte_offset
+        self.curr_token_start_byte_offset = self.byte_offset;
     }
 
     fn error(&mut self, err_type: ErrType) {
@@ -116,18 +116,18 @@ impl<'a> Lexer<'a> {
 
                 // Operators
                 '+' => {
-                    let token = if self.match_next('=') { TokenType::PlusEqual } else { TokenType::Plus };
+                    let token = if self.match_next('=') { TokenType::equal(TokenType::Plus) } else { TokenType::Plus };
                     self.add_token(token);
                 }
                 '-' => {
                     let token = if self.match_next('>') { TokenType::RightArrow }
-                    else if self.match_next('=') { TokenType::MinusEqual } else { TokenType::Minus };
+                    else if self.match_next('=') { TokenType::equal(TokenType::Minus) } else { TokenType::Minus };
                     self.add_token(token);
                 }
                 '*' => {
                     let token = if self.match_next('*') {
-                        if self.match_next('=') { TokenType::StarStarEqual } else { TokenType::StarStar }
-                    } else if self.match_next('=') { TokenType::StarEqual } else { TokenType::Star };
+                        if self.match_next('=') { TokenType::equal(TokenType::StarStar) } else { TokenType::StarStar }
+                    } else if self.match_next('=') { TokenType::equal(TokenType::Star) } else { TokenType::Star };
                     self.add_token(token);
                 }
                 '/' => {
@@ -144,16 +144,16 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     else {
-                        let token = if self.match_next('=') { TokenType::SlashEqual } else { TokenType::Slash };
+                        let token = if self.match_next('=') { TokenType::equal(TokenType::Slash) } else { TokenType::Slash };
                         self.add_token(token);
                     }
                 }
                 '%' => {
-                    let token = if self.match_next('=') { TokenType::PercentEqual } else { TokenType::Percent };
+                    let token = if self.match_next('=') { TokenType::equal(TokenType::Percent) } else { TokenType::Percent };
                     self.add_token(token);
                 }
                 '?' => {
-                    let token = if self.match_next('=') { TokenType::QuestEqual }
+                    let token = if self.match_next('=') { TokenType::equal(TokenType::Quest) }
                     else if self.match_next('.') { TokenType::QuestDot } else { TokenType::Quest };
                     self.add_token(token);
                 }
@@ -161,19 +161,28 @@ impl<'a> Lexer<'a> {
                 // Bitwise
                 '~' => {
                     let token = if self.match_next('!') {
-                        if self.match_next('=') { TokenType::BitNotEqual } else { TokenType::BitNot }
-                    } else if self.match_next('&') {
-                        if self.match_next('=') { TokenType::BitAndEqual } else { TokenType::BitAnd }
-                    } else if self.match_next('|') {
-                        if self.match_next('=') { TokenType::BitOrEqual } else { TokenType::BitOr }
-                    } else if self.match_next('^') {
-                        if self.match_next('=') { TokenType::BitXorEqual } else { TokenType::BitXor }
-                    } else if self.match_next('>') {
-                        if self.match_next('=') { TokenType::RightShiftEqual } else { TokenType::RightShift }
-                    } else if self.match_next('<') {
-                        if self.match_next('=') { TokenType::LeftShiftEqual } else { TokenType::LeftShift }
-                    } else {
-                        self.error(ErrType::LexerTilda);
+                        if self.match_next('=') { TokenType::equal(TokenType::BitNot) } else { TokenType::BitNot }
+                    }
+                    else if self.match_next('&') {
+                        if self.match_next('=') { TokenType::equal(TokenType::BitAnd) } else { TokenType::BitAnd }
+                    }
+                    else if self.match_next('|') {
+                        if self.match_next('=') { TokenType::equal(TokenType::BitOr) } else { TokenType::BitOr }
+                    }
+                    else if self.match_next('^') {
+                        if self.match_next('=') { TokenType::equal(TokenType::BitXor) } else { TokenType::BitXor }
+                    }
+                    else if self.match_next('>') {
+                        if self.match_next('>') {
+                            if self.match_next('=') { TokenType::equal(TokenType::RightShift) } else { TokenType::RightShift }
+                        }
+                        else { TokenType::TildeArrow }
+                    }
+                    else if self.match_next('<') {
+                        if self.match_next('=') { TokenType::equal(TokenType::LeftShift) } else { TokenType::LeftShift }
+                    }
+                    else {
+                        self.error(ErrType::LexerTilde);
                         continue;
                     };
                     self.add_token(token);
@@ -188,7 +197,7 @@ impl<'a> Lexer<'a> {
                 }
                 '^' => self.add_token(TokenType::Caret),
                 '=' => {
-                    let token = if self.match_next('=') { TokenType::EqualEqual } else { TokenType::Equal };
+                    let token = if self.match_next('=') { TokenType::EqualEqual } else { TokenType::Equal { extra_operator: None } };
                     self.add_token(token);
                 }
                 '!' => {
@@ -197,7 +206,7 @@ impl<'a> Lexer<'a> {
                 }
                 '<' => {
                     let token = if self.match_next('<') {
-                        if self.match_next('=') { TokenType::LeftShiftEqual } else { TokenType::LeftShift }
+                        if self.match_next('=') { TokenType::equal(TokenType::LeftShift) } else { TokenType::LeftShift }
                     } else if self.match_next('=') { TokenType::LessEqual } else { TokenType::Less };
                     self.add_token(token);
                 },
@@ -236,7 +245,7 @@ impl<'a> Lexer<'a> {
                     else { self.add_token(TokenType::Identifier(text)); }
                 }
 
-                _ => self.error(ErrType::LexerUnexpectedCharacter(c)),
+                _ => self.error(ErrType::LexerUnexpectedCharacter { c }),
             }
         }
     }
@@ -272,7 +281,7 @@ impl<'a> Lexer<'a> {
                             '\n' => {
                                 // skip whitespaces on new line
                                 string.push('\n');
-                                while let Some(' ') = self.source_iter.peek() { self.advance(); }
+                                while let Some(' ' | '\r' | '\t') = self.source_iter.peek() { self.advance(); }
                             }
                             any => string.push(any),
                         }
@@ -319,7 +328,7 @@ impl<'a> Lexer<'a> {
         }
         match text.parse::<f64>() {
             Ok(num) => self.add_token(TokenType::Number(num)),
-            Err(_) => self.error( ErrType::LexerNumberParseError(text)),
+            Err(_) => self.error( ErrType::LexerNumberParseError { text }),
         }
         if process_dot_later { self.process_dot_token(); }
     }
@@ -340,8 +349,7 @@ impl<'a> Lexer<'a> {
     }
     
     fn lex_identifier(&mut self, first_char: Option<char>) -> String {
-        let mut text = if let Some(c) = first_char { String::from(c) }
-        else { String::new() };
+        let mut text = if let Some(c) = first_char { String::from(c) } else { String::new() };
         
         while let Some(&c) = self.source_iter.peek() && (c == '_' || c.is_alphanumeric()) {
             text.push(c);

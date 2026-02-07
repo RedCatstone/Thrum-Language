@@ -11,7 +11,6 @@ pub struct ThrumValue {
     pub val: Value,
     pub is_prelude: bool,
 }
-#[derive(Clone)]
 pub struct ThrumType {
     pub typ: DefinedTypeKind,
     pub values: HashMap<String, ThrumValue>
@@ -19,7 +18,7 @@ pub struct ThrumType {
 
 #[derive(Default)]
 pub struct ThrumModule {
-    pub sub_modules: HashMap<String, ThrumModule>,
+    pub sub_modules: HashMap<String, Self>,
     pub values: HashMap<String, ThrumValue>,
     pub types: HashMap<String, ThrumType>,
 }
@@ -66,20 +65,20 @@ pub fn get_native_lib() -> ThrumModule {
 
 
 pub fn native_print(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { unreachable!() };
-    println!("{}", str);
+    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
+    println!("{str}");
 
     Ok(Value::Void)
 }
 
 pub fn native_panic(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { unreachable!() };
-    println!("{}", str);
+    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
+    println!("{str}");
 
-    Err(RuntimeError { message: str.to_string() })
+    Err(RuntimeError { message: str.clone() })
 }
 
 pub fn native_str_len(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { unreachable!() };
+    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
     Ok(Value::Num(str.len() as f64))
 }

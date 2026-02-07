@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, rc::Rc};
+use std::{cmp, collections::HashMap};
 
 use strum_macros::IntoStaticStr;
 
@@ -6,7 +6,7 @@ use crate::{lexing::tokens::{TokenSpan, TokenType}, nativelib::NativeFn, typing:
 
 
 // this is the main struct that builds the AST (Abstract Syntax Tree)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExprInfo {
     // the actualy expression info, this is a very long enum.
     pub expression: Expr,
@@ -18,7 +18,7 @@ pub struct ExprInfo {
     pub span: Span,
 }
 impl Expr {
-    pub fn to_info(self, span: Span) -> ExprInfo {
+    pub const fn to_info(self, span: Span) -> ExprInfo {
         ExprInfo { expression: self, span, typ: TypeKind::ParserUnknown }
     }
 }
@@ -31,7 +31,7 @@ pub struct Span {
     pub length: usize,
 }
 impl Span {
-    pub fn merge(self, other: Span) -> Span {
+    pub fn merge(self, other: Self) -> Self {
         // |----------| (span self)
         // 219029812813 + (12321 * 1259812895)
         //                 |----------------| (span other)
@@ -39,39 +39,41 @@ impl Span {
         // |--------------------------------|
         let start_byte = cmp::min(self.byte_offset, other.byte_offset);
         let end_byte = cmp::max(self.byte_offset + self.length, other.byte_offset + other.length);
-        Span {
+        Self {
             line: cmp::min(self.line, other.line),
             byte_offset: start_byte,
             length: end_byte - start_byte,
         }
     }
-    pub fn to_0_width_right(self) -> Span {
-        Span {
+    pub const fn to_0_width_right(self) -> Self {
+        Self {
             line: self.line,
             byte_offset: self.byte_offset + self.length,
             length: 0
         }
     }
-    pub fn invalid() -> Span {
-        Span { line: usize::MAX, byte_offset: usize::MAX, length: usize::MAX }
+    pub const fn invalid() -> Self {
+        Self { line: usize::MAX, byte_offset: usize::MAX, length: usize::MAX }
     }
 }
 
 
 
 // Everything is an expression.
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, IntoStaticStr, Clone)]
 pub enum Expr {
     // Primary expressions
     Literal(Value),
-    Identifier {
+    IdentifierRef {
         name: String,
+        mutable: bool,
         var_id: Option<VarID>,
     },
 
     Assign {  // x = 2  or  let x = 2
         pattern: Box<MatchPatternInfo>,
-        extra_operator: TokenSpan,
+        extra_operator: Option<TokenType>,
+        op_span: Span,
         value: Option<Box<ExprInfo>>,
     },
 
@@ -103,12 +105,10 @@ pub enum Expr {
     Tuple(Vec<TupleElement>),  // (1, 2)
     Array(Vec<ExprInfo>),  // [1, 2]
 
-    
-    MutRef {  // x^
+
+    Move {  // x^
         expr: Box<ExprInfo>,
-    },
-    Deref {  // *x
-        expr: Box<ExprInfo>,
+        auto_clone: bool,
     },
     
 
@@ -161,21 +161,21 @@ pub enum Expr {
 
     EnumDefinition {  // enum Color { Red, Blue, Green(data) }
         name: String,
-        enums: Vec<EnumExpression>,
+        variants: Vec<EnumExpression>,
     },
 
     FnDefinition {  // fn square(x: num) -> { x**2 }
         name: String,
         var_id: Option<VarID>,
         params: Vec<MatchPatternInfo>,
-        return_type: TypeKind,
-        body: Rc<ExprInfo>,
+        return_type_annotation: TypeKindInfo,
+        body: Box<ExprInfo>,
     },
 
     Closure {  // |x -> x**2
         params: Vec<MatchPatternInfo>,
-        return_type: TypeKind,
-        body: Rc<ExprInfo>,
+        return_type_annotation: TypeKindInfo,
+        body: Box<ExprInfo>,
     },
 
     // return ...
@@ -201,9 +201,12 @@ pub enum Value {
     Bool(bool),
 
     // for evaluating the tree
-    Arr(Rc<Vec<Value>>),
-    Tup(Rc<Vec<Value>>),
-    ValueStackPointer(usize),
+    Arr(Vec<Self>),
+    Tup(Vec<Self>),
+
+    // raw unsafe pointer for the vm
+    // this SHOULD be fully safe, since the borrow checker checked all the lifetimes.
+    ValuePointer(*mut Self),
     NativeFn(NativeFn),
     Closure {
         chunk_index: usize,
@@ -219,12 +222,12 @@ pub enum Value {
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Value::Num(l), Value::Num(r)) => l.partial_cmp(r),
-            (Value::Str(l), Value::Str(r)) => l.partial_cmp(r),
-            (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
-            (Value::Arr(l), Value::Arr(r)) => l.partial_cmp(r),
-            (Value::Tup(l), Value::Tup(r)) => l.partial_cmp(r),
-            (Value::Void, Value::Void) => Some(std::cmp::Ordering::Equal),
+            (Self::Num(l), Self::Num(r)) => l.partial_cmp(r),
+            (Self::Str(l), Self::Str(r)) => l.partial_cmp(r),
+            (Self::Bool(l), Self::Bool(r)) => l.partial_cmp(r),
+            (Self::Arr(l), Self::Arr(r)) => l.partial_cmp(r),
+            (Self::Tup(l), Self::Tup(r)) => l.partial_cmp(r),
+            (Self::Void, Self::Void) => Some(std::cmp::Ordering::Equal),
             (l, r) => panic!("Cannot compare {l} with {r}"),
         }
     }
@@ -236,31 +239,34 @@ impl PartialEq for Value {
 
 
 
-
 #[derive(Debug, Clone)]
 pub struct MatchPatternInfo {
     pub pattern: MatchPattern,
     pub typ: TypeKind,
     pub span: Span,
-    pub has_place: bool,
-    pub can_fail: bool,
 
-    // only the outermost pattern has stuff in this Vec.
+    // only the outermost pattern has stuff in these.
     pub vars_defined: Vec<(String, VarID)>,
+    pub covered_cases: Vec<PatternSpace>,
 }
 impl MatchPattern {
-    pub fn to_info(self, span: Span) -> MatchPatternInfo {
-        MatchPatternInfo { pattern: self, span, typ: TypeKind::ParserUnknown, has_place: false, can_fail: false, vars_defined: Vec::new() }
+    pub const fn to_info(self, span: Span) -> MatchPatternInfo {
+        MatchPatternInfo {
+            pattern: self,
+            typ: TypeKind::ParserUnknown,
+            span,
+            vars_defined: Vec::new(),
+            covered_cases: Vec::new(),
+        }
     }
 }
 
 
-#[derive(Debug, Clone, IntoStaticStr)]
+#[derive(Debug, IntoStaticStr, Clone)]
 pub enum MatchPattern {
     Binding {  // x: num
         name: String,
         mutable: bool,
-        typ: TypeKind,
         var_id: Option<VarID>,
     },
     Wildcard,  // _
@@ -275,26 +281,38 @@ pub enum MatchPattern {
     Literal(Value),
     Conditional {
         pattern: Box<MatchPatternInfo>,
-        body: Rc<ExprInfo>,
+        body: ExprInfo,
     },
 
-    PlaceIdentifier {
-        name: String,
-        var_id: Option<VarID>
+    // PlaceIdentifier {
+    //     name: String,
+    //     var_id: Option<VarID>
+    // },
+    PlacePointer {
+        expr: ExprInfo
     },
-    PlaceDeref {
-        name: String,
-        var_id: Option<VarID>
-    },
-    PlaceIndex {
-        left: Rc<ExprInfo>,
-        index: Rc<ExprInfo>
-    }
+}
+
+
+#[derive(Debug, Clone)]
+pub enum PatternSpace {
+    // Num { from: f64, to: f64 },
+    Bool { bool: bool },
+
+    // if i cover (false, false) it will be [true, All], [false, true]
+    // if i then cover (_, true) it will be [true, false] (from first missingcase, the second one results in no case)
+    Tup { inners: Vec<Self> },
+
+    // EnumVariant { name: String, attached_tuple: Box<PatternSpace/*::Tup */> },
+
+    // this represents ALL cases
+    // if we are missing ALL and a wildcard subtracts ALL from that -> empty (covered)
+    All,
 }
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TupleElement {
     pub label: String,
     pub expr: ExprInfo,
@@ -312,20 +330,29 @@ pub struct TupleType {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: MatchPatternInfo,
     pub body: ExprInfo,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnumExpression {
-    pub name: String,
-    pub inner_types: Vec<MatchPatternInfo>,
+    pub variant_name: String,
+    pub attached_tuple: TypeKindInfo,
 }
 
 
 
+
+
+
+
+#[derive(Debug, Clone)]
+pub struct TypeKindInfo {
+    pub typ: TypeKind,
+    pub span: Span
+}
 
 
 
@@ -336,21 +363,24 @@ pub enum TypeKind {
     Str,
     Bool,
 
-    Arr(Box<TypeKind>),
+    Arr(Box<Self>),
     Tup(Vec<TupleType>),
     Fn {
-        param_types: Vec<TypeKind>,
-        return_type: Box<TypeKind>,
-    },
-    Struct {
-        name: String,
-        inner_types: Vec<TypeKind>,
-    },
-    Enum {
-        name: String,
+        param_types: Vec<Self>,
+        return_type: Box<Self>,
     },
 
-    MutPointer(Box<TypeKind>),
+    Pointer {
+        mutable: bool,
+        inner: Box<Self>,
+        borrows_var: Option<VarID>
+    },
+
+    // type Point = { x: u32, y: u32 }
+    CustomType {
+        name: String,
+        generic_types: Vec<Self>,
+    },
 
     Inference(TypeID),
     TypeError,
@@ -365,35 +395,67 @@ pub enum TypeKind {
 
 }
 impl TypeKind {
+    pub fn from_custom_type(self) -> Self {
+        let Self::CustomType { name, generic_types } = self
+        else { unreachable!("this function should only be called with TypeKind::CustomStruct. ({self})") };
+
+        match name.as_str() {
+            "num" => Self::Num,
+            "bool" => Self::Bool,
+            "str" => Self::Str,
+            "void" => Self::Void,
+            "never" => Self::Never,
+            "arr" => {
+                assert!(generic_types.len() == 1, "arr type has to have 1 generic. (this panic definitely needs fixing later)");
+                Self::Arr(Box::new(generic_types[0].clone()))
+            }
+            _ => Self::CustomType {
+                name,
+                generic_types
+            }
+        }
+    }
+
     pub fn is_never(&self) -> bool {
         *self == Self::Never
     }
 
-    pub fn prune(&self, type_lookup: &HashMap<TypeID, TypeKind>) -> TypeKind {
-        if let TypeKind::Inference(id) = self
+    pub fn prune(&self, type_lookup: &HashMap<TypeID, Self>) -> Self {
+        if let Self::Inference(id) = self
             && let Some(entry) = type_lookup.get(id) {
                 entry.prune(type_lookup)
                 // type_lookup.insert(*id, pruned.clone());
             }
         else { self.clone() }
     }
+
+    pub fn is_auto_clone(&self) -> bool {
+        match self {
+            Self::Num
+            | Self::Bool
+            | Self::Pointer { .. }
+            | Self::Fn { .. } => true,
+
+            Self::Str
+            | Self::Arr(..)
+            | Self::Tup(..)
+            | Self::CustomType { .. }
+            | Self::Void
+            | Self::Never
+            | Self::TypeError => false,
+
+            Self::Inference(..)
+            | Self::ParserUnknown => unreachable!("is_auto_clone() should not be called with type {self}")
+        }
+    }
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub enum DefinedTypeKind {
     Enum {
         name: String,
-        inner_types: HashMap<String, Vec<MatchPatternInfo>>,
+        variants: Vec<EnumExpression>
     },
 
     Native(TypeKind),
-}
-
-impl DefinedTypeKind {
-    pub fn to_typekind(self) -> TypeKind {
-        match self {
-            Self::Native(typ) => typ,
-            Self::Enum { name, .. } => TypeKind::Enum { name },
-        }
-    }
 }

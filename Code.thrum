@@ -1,23 +1,4 @@
-
-let x
-
-{ #bloc
-    if true {
-        x = 5
-    }
-    else {
-        break #bloc
-    }
+match (false, false, false) {
+    (false, false, false) -> "a"
+    (false, _, true) -> "b"
 }
-
-{ #bloc
-    if false {
-        x = 69
-    }
-    else {
-        x = 3
-        break #bloc
-    }
-}
-
-x

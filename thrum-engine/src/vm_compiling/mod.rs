@@ -8,17 +8,18 @@ use crate::{Program, lexing::tokens::TokenType, nativelib::{ThrumModule, get_nat
 #[repr(u8)]
 #[derive(Debug, FromRepr)]
 pub enum OpCode {
-    ConstGet,  // ConstantIndex
+    ConstGet,   // ConstantIndex
+    ConstGetRef,  // ConstantIndex
     PushVoid,
 
     // operations on the locals part of the stack
-    LocalGet, // LocalIndex
     LocalSet, // LocalIndex
+    LocalMakePointer, // LocalIndex
     LocalsFree, // LocalIndex AmountToFree
-
-    MakePointer, // LocalIndex
-    ValueRefSet,  // set value to a pointer location
-    FollowPointer,
+    
+    PointerGetClone, // LocalIndex
+    PointerGetMove,
+    PointerSet,
     
     // operations on the temp part of the stack
     ValuePop,
@@ -29,8 +30,8 @@ pub enum OpCode {
     NumAdd, NumSubtract, NumMultiply, NumDivide, NumModulo, NumExponent, NumNegate,
     BoolNegate,
     StrAdd, StrTemplate,
-    ArrCreate, ArrGet, ArrRefSet, ArrUnpackCheckJump,
-    TupCreate, TupGet, TupUnpack,
+    ArrCreate, ArrGet, ArrPointerGet, ArrUnpackCheckJump,
+    TupCreate, TupGet, TupPointerGet, TupUnpack,
 
     // control flow
     Jump, JumpBack, JumpIfFalse,
@@ -144,7 +145,7 @@ struct LoopInfo {
     label: String,
 }
 
-impl<'a> CompileFunction<'a> {
+impl CompileFunction<'_> {
     fn compile_function(
         name: String,
         program: &ExprInfo,
@@ -201,7 +202,7 @@ impl<'a> CompileFunction<'a> {
                     self.compile_expression(element);
                 }
                 self.push_op_with_opnum(OpCode::StrTemplate, elements.len());
-                self.cur_temp_amount = (self.cur_temp_amount + 1) - elements.len();
+                self.cur_temp_amount = self.cur_temp_amount + 1 - elements.len();
             }
             Expr::Array(elements) => {
                 for element in elements {
@@ -225,29 +226,25 @@ impl<'a> CompileFunction<'a> {
             }
             Expr::Prefix { operator, right } => {
                 self.compile_expression(right);
-                self.compile_prefix(operator, &right.typ)
+                self.compile_prefix(operator, &right.typ);
             }
 
             Expr::Block { exprs, label, drops_vars } => {
-                let drops_vars: &[VarID] = drops_vars;
                 // define FnDefinitions first
                 for expr in exprs {
-                    match &expr.expression {
-                        Expr::FnDefinition { name, var_id, params, body, ..  } => {
-                            let chunk_index = self.bytecode_chunks.len();
-                            let function_value = Value::Closure { chunk_index };
-                            self.define_local(var_id.unwrap(), Some(function_value));
+                    if let Expr::FnDefinition { name, var_id, params, body, ..  } = &expr.expression {
+                        let chunk_index = self.bytecode_chunks.len();
+                        let function_value = Value::Closure { chunk_index };
+                        self.define_local(var_id.unwrap(), Some(function_value));
 
-                            CompileFunction::compile_function(
-                                name.to_string(),
-                                body,
-                                params,
-                                self.bytecode_chunks,
-                                self.variables,
-                                self.library,
-                            );
-                        }
-                        _ => { /* Do nothing */}
+                        CompileFunction::compile_function(
+                            name.clone(),
+                            body,
+                            params,
+                            self.bytecode_chunks,
+                            self.variables,
+                            self.library,
+                        );
                     }
                 }
 
@@ -258,7 +255,7 @@ impl<'a> CompileFunction<'a> {
                         self.loop_infos.push(LoopInfo {
                             break_jumps: Vec::new(),
                             start: usize::MAX,
-                            label: label.to_string()
+                            label: label.clone()
                         });
                     }
 
@@ -266,6 +263,7 @@ impl<'a> CompileFunction<'a> {
                     for expr in preceding_exprs {
                         self.compile_expression(expr);
                         // if it is not the last expression of the block, the return value is discarded, so pop it.
+                        // TODO if the value got created through a push void, remove that pushvoid call instead
                         self.push_pop_value();
                     }
                     self.compile_expression(last_expr);
@@ -284,42 +282,36 @@ impl<'a> CompileFunction<'a> {
                 else {
                     // if block is empty, just push void
                     self.push_void();
-                };
+                }
 
                 self.drop_vars(drops_vars, true);
             }
 
-            Expr::Identifier { var_id, .. } => {
-                self.push_get_identifier(var_id.as_ref().unwrap());
+            Expr::IdentifierRef { var_id, .. } => {
+                self.push_get_identifier_ref(var_id.unwrap());
             }
 
-            Expr::Assign { pattern, extra_operator, value } => {
+            Expr::Assign { pattern, extra_operator, value, .. } => {
                 for (_, var) in &pattern.vars_defined {
                     self.define_local(*var, None);
                 }
 
                 if let Some(val) = value {
-                    if extra_operator.token == TokenType::Equal {
-                        // push value to the stack
-                        self.compile_expression(val);
-                    }
-                    else {
+                    if let Some(extra_op) = extra_operator {
                         // example: x += 2
                         // it needs to first push the value of x, compute x + 2, then set x to that result
                         match &pattern.pattern {
-                            MatchPattern::PlaceIdentifier { var_id, .. } => self.push_get_identifier(var_id.as_ref().unwrap()),
-                            MatchPattern::PlaceIndex { left, index } => {
-                                self.compile_expression(left);
-                                self.compile_expression(index);
-                                self.push_op(OpCode::ArrGet);
-                            }
-                            MatchPattern::PlaceDeref { var_id, .. } => {
-                                self.push_get_identifier(var_id.as_ref().unwrap());
-                                self.push_op(OpCode::FollowPointer);
+                            MatchPattern::PlacePointer { expr } => {
+                                self.compile_expression(expr);
+                                self.push_op(OpCode::PointerGetMove);
                             }
                             _ => unreachable!("Infix assignments are only allowed for place patterns.")
                         }
-                        self.compile_infix(&extra_operator.token, &val.typ, val);
+                        self.compile_infix(extra_op, &val.typ, val);
+                    }
+                    else {
+                        // push value to the stack
+                        self.compile_expression(val);
                     }
 
                     // compile the binding pattern
@@ -360,22 +352,12 @@ impl<'a> CompileFunction<'a> {
                 self.cur_temp_amount += 1;
             }
 
-            Expr::MutRef { expr } => {
-                match &expr.expression {
-                    Expr::Identifier { var_id, .. } => {
-                        self.push_get_local_mut(var_id.as_ref().unwrap());
-                    }
-                    _ => todo!()
-                }
-            }
-
-            Expr::Deref { expr } => {
-                match &expr.expression {
-                    Expr::Identifier { var_id, .. } => {
-                        self.push_get_identifier(var_id.as_ref().unwrap());
-                        self.push_op(OpCode::FollowPointer);
-                    }
-                    _ => todo!()
+            Expr::Move { expr, auto_clone: just_a_clone } => {
+                self.compile_expression(expr);
+                if *just_a_clone {
+                    self.push_op(OpCode::PointerGetClone);
+                } else {
+                    self.push_op(OpCode::PointerGetMove);
                 }
             }
 
@@ -414,7 +396,7 @@ impl<'a> CompileFunction<'a> {
                 self.loop_infos.push(LoopInfo {
                     break_jumps: Vec::new(),
                     start: loop_start,
-                    label: label.to_string()
+                    label: label.clone()
                 });
                 self.compile_expression(body);
                 self.push_pop_value();
@@ -609,9 +591,7 @@ impl<'a> CompileFunction<'a> {
                             self.push_get_constant_op(module_val.val.clone());
                             break;
                         }
-                        else {
-                            unreachable!("value path too long.")
-                        }
+                        unreachable!("value path too long.")
                     }
         
                     unreachable!("segment {segment} could not be found...");
@@ -626,9 +606,8 @@ impl<'a> CompileFunction<'a> {
             _ => { panic!("{expr:?} not yet implemented") }
         }
 
-        if start_temps + 1 != self.cur_temp_amount {
-            panic!("wrong temp number ({} -> {}) after processing {:?}", start_temps, self.cur_temp_amount, expr);
-        }
+        assert!(start_temps + 1 == self.cur_temp_amount,
+            "wrong temp number ({} -> {}) after processing {:?}", start_temps, self.cur_temp_amount, expr);
     }
 
 
@@ -637,6 +616,7 @@ impl<'a> CompileFunction<'a> {
 
 
     fn push_op(&mut self, op: OpCode) { self.bytecode_chunks[self.curr_bytecode_index].codes.push(op as u8); }
+    // fn push_ops(&mut self, ops: Vec<OpCode>) { for op in ops.into_iter() { self.push_op(op); } }
     fn push_opnum(&mut self, opnum: usize) {
         if opnum < u8::MAX as usize {
             self.bytecode_chunks[self.curr_bytecode_index].codes.push(opnum as u8);
@@ -679,7 +659,7 @@ impl<'a> CompileFunction<'a> {
     }
 
 
-    fn push_get_constant_op(&mut self, val: Value) {
+    fn add_constant(&mut self, val: Value) -> usize {
         // let index = match self.bytecode.constants.iter().position(|constant| val == constant.clone()) {
         //     Some(i) => i,
         //     None => {
@@ -687,10 +667,19 @@ impl<'a> CompileFunction<'a> {
         //         self.bytecode.constants.len() - 1
         //     }
         // };
-        let index = self.bytecode_chunks[self.curr_bytecode_index].constants.len();
         self.bytecode_chunks[self.curr_bytecode_index].constants.push(val);
-        self.push_op_with_opnum(OpCode::ConstGet, index);
+        self.bytecode_chunks[self.curr_bytecode_index].constants.len() - 1
+    }
 
+    fn push_get_constant_op(&mut self, val: Value) {
+        let index = self.add_constant(val);
+        self.push_op_with_opnum(OpCode::ConstGet, index);
+        self.cur_temp_amount += 1;
+    }
+
+    fn push_get_constant_ref(&mut self, val: Value) {
+        let index = self.add_constant(val);
+        self.push_op_with_opnum(OpCode::ConstGetRef, index);
         self.cur_temp_amount += 1;
     }
 
@@ -713,7 +702,7 @@ impl<'a> CompileFunction<'a> {
             self.cur_var_amount += 1;
             // if this is the highest amount of vars needed so far, store that
             if self.cur_var_amount > self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed {
-                self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = self.cur_var_amount
+                self.bytecode_chunks[self.curr_bytecode_index].local_slots_needed = self.cur_var_amount;
             }
 
             slot
@@ -726,41 +715,31 @@ impl<'a> CompileFunction<'a> {
         self.cur_temp_amount -= 1;
     }
 
-    fn push_get_identifier(&mut self, var_id: &VarID) {
-        match self.variables.get(var_id) {
+    fn push_get_identifier_ref(&mut self, var_id: VarID) {
+        match self.variables.get(&var_id) {
             None => {
                 unreachable!("{var_id:?} is not in the current variables...")
             }
             Some(CompilerVar::ConstValue(val)) => {
-                self.push_get_constant_op(val.clone());
+                self.push_get_constant_ref(val.clone());
             }
             Some(CompilerVar::AtSlot(slot)) => {
-                self.push_op_with_opnum(OpCode::LocalGet, *slot);
+                self.push_op_with_opnum(OpCode::LocalMakePointer, *slot);
                 self.cur_temp_amount += 1;
             }
         }
     }
 
-    fn push_set_local(&mut self, var_id: &VarID) {
-        match self.variables.get(var_id) {
-            None => unreachable!("{var_id:?} is not in the current variables..."),
-            Some(CompilerVar::ConstValue(val)) => unreachable!("tried to set to a constant value {var_id:?}, {val}"),
-            Some(CompilerVar::AtSlot(slot)) => {
-                self.push_op_with_opnum(OpCode::LocalSet, *slot);
-            }
-        }
-        self.cur_temp_amount -= 1;
-    }
-    fn push_get_local_mut(&mut self, var_id: &VarID) {
-        match self.variables.get(var_id) {
-            None => unreachable!("{var_id:?} is not in the current variables..."),
-            Some(CompilerVar::ConstValue(val)) => unreachable!("tried to set to a constant value {var_id:?}, {val}"),
-            Some(CompilerVar::AtSlot(slot)) => {
-                self.push_op_with_opnum(OpCode::MakePointer, *slot);
-            }
-        }
-        self.cur_temp_amount += 1;
-    }
+    // fn push_set_local(&mut self, var_id: &VarID) {
+    //     match self.variables.get(var_id) {
+    //         None => unreachable!("{var_id:?} is not in the current variables..."),
+    //         Some(CompilerVar::ConstValue(val)) => unreachable!("tried to set to a constant value {var_id:?}, {val}"),
+    //         Some(CompilerVar::AtSlot(slot)) => {
+    //             self.push_op_with_opnum(OpCode::LocalSet, *slot);
+    //         }
+    //     }
+    //     self.cur_temp_amount -= 1;
+    // }
 
     fn push_void(&mut self) {
         self.cur_temp_amount += 1;
@@ -782,13 +761,9 @@ impl<'a> CompileFunction<'a> {
         self.cur_temp_amount -= 1;
         self.push_op(OpCode::JumpIfFalse);
     }
-    fn push_arr_ref_set(&mut self) {
-        self.cur_temp_amount -= 1;
-        self.push_op(OpCode::ArrRefSet);
-    }
-    fn push_value_ref_set(&mut self) {
-        self.cur_temp_amount -= 1;
-        self.push_op(OpCode::ValueRefSet);
+    fn push_pointer_set(&mut self) {
+        self.cur_temp_amount -= 2;
+        self.push_op(OpCode::PointerSet);
     }
 
 
@@ -825,11 +800,10 @@ impl<'a> CompileFunction<'a> {
                     self.compile_binding_pattern(pattern, failure_jumps);
                 }
             }
-            MatchPattern::PlaceIdentifier { var_id, .. } => self.push_set_local(var_id.as_ref().unwrap()),
 
-            MatchPattern::PlaceDeref { var_id, .. } => {
-                self.push_get_identifier(var_id.as_ref().unwrap());
-                self.push_value_ref_set();
+            MatchPattern::PlacePointer { expr, .. } => {
+                self.compile_expression(expr);
+                self.push_pointer_set();
             }
 
 
@@ -855,15 +829,6 @@ impl<'a> CompileFunction<'a> {
                 self.compile_expression(body);
                 self.push_jump_if_false();
                 failure_jumps.push(FailureJump { temps: self.cur_temp_amount, jump_loc: self.push_opnum_for_patching() });
-            }
-
-            MatchPattern::PlaceIndex { left, index } => {
-                self.compile_expression(index);
-                match &left.expression {
-                    Expr::Identifier { var_id, .. } => self.push_get_local_mut(var_id.as_ref().unwrap()),
-                    _ => todo!("{:?}", left.expression)
-                }
-                self.push_arr_ref_set();
             }
             _ => panic!("not implemented")
         }

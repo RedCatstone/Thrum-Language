@@ -7,7 +7,7 @@ use crate::{
 use std::{cell::RefCell, collections::HashMap};
 
 mod check_expressions;
-mod check_pattern_types;
+mod check_patterns;
 pub mod type_environment;
 mod inference;
 
@@ -32,6 +32,11 @@ pub fn typecheck_program(program: &mut Program) {
 
     // PASS 2: clean up (remove all TypeKind::Infered(id))
     type_checker.finalize_expression(program.ast.as_mut().unwrap());
+
+    if !type_checker.var_lookup.is_empty() {
+        println!("VAR LOOKUP \n{:?}", type_checker.var_lookup);
+    }
+
     program.type_lookup = type_checker.type_lookup;
 }
 
@@ -100,7 +105,7 @@ impl<'a> Typechecker<'a> {
     }
 
     fn type_mismatch(&mut self, expected: TypeKind, found: TypeKind, span: Span) -> TypeKind {
-        self.error(ErrType::TyperMismatch(expected, found), span)
+        self.error(ErrType::TyperMismatch { expected, found }, span)
     }
 
 
@@ -130,14 +135,14 @@ impl<'a> Typechecker<'a> {
 
             |typ| {
                 let mut self_borrow = self_cell.borrow_mut();
-                let pruned = self_borrow.prune(&typ);
+                let pruned = self_borrow.prune(&typ, None);
                 match pruned {
                     TypeKind::ParserUnknown => {
-                        unreachable!("somehow the typechecker missed a ParserUnknown type...")
+                        self_borrow.error(ErrType::DefaultString("somehow the typechecker missed a ParserUnknown type...".to_string()), Span::invalid())
                     }
                     TypeKind::Inference(id) => {
                         self_borrow.type_lookup.insert(id, TypeKind::TypeError);
-                        self_borrow.error(ErrType::TyperCantInferType(pruned), Span::invalid())
+                        self_borrow.error(ErrType::TyperCantInferType { typ: pruned }, Span::invalid())
                     }
                     _ => pruned,
                 }

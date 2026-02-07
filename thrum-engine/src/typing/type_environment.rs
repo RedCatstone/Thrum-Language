@@ -10,7 +10,7 @@ pub struct TypecheckScope {
     pub vars: HashMap<String, VarID>,
     pub types: HashMap<String, ThrumType>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TypecheckVar {
     pub var_id: VarID,
     pub name: String,
@@ -18,21 +18,24 @@ pub struct TypecheckVar {
     
     // Source code location - for error messages
     pub declared_at: Span,
-    pub is_initialized: InitializedState,
     pub is_declared_mut: bool,
+    pub is_initialized: InitState,
     pub is_used: bool,
     pub is_used_mut: bool,
+    pub borrows_count: usize,
+    pub mut_borrows_count: usize,
+    pub is_moved: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum InitializedState {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum InitState {
     No, Yes, Maybe
 }
 
 
-pub type SnapshotInitVars = HashMap<VarID, InitializedState>;
+pub type SnapshotInitVars = HashMap<VarID, InitState>;
 
-impl<'a> Typechecker<'a> {
+impl Typechecker<'_> {
     // e.g. for a block or function
     pub(super) fn enter_scope(&mut self) {
         self.scopes.push(TypecheckScope::default());
@@ -46,7 +49,7 @@ impl<'a> Typechecker<'a> {
 
     pub(super) fn define_variable(&mut self, name: String, mutable: bool, is_init: bool, typ: TypeKind, span: Span) -> TypecheckVar {
         if self.name_exists_already(&name) {
-            self.error(ErrType::TyperNameAlreadyDefined(name.clone()), span);
+            self.error(ErrType::TyperNameAlreadyDefined { name: name.clone() }, span);
         }
 
         // make the new var
@@ -57,10 +60,13 @@ impl<'a> Typechecker<'a> {
             typ,
             name: name.clone(),
             declared_at: span,
-            is_initialized: if is_init { InitializedState::Yes } else { InitializedState::No },
             is_declared_mut: mutable,
+            is_initialized: if is_init { InitState::Yes } else { InitState::No },
             is_used: false,
             is_used_mut: false,
+            borrows_count: 0,
+            mut_borrows_count: 0,
+            is_moved: false,
         };
 
         // and insert into both maps.
@@ -71,6 +77,7 @@ impl<'a> Typechecker<'a> {
         
         new_var
     }
+
     pub(super) fn lookup_variable(&mut self, name: &str, var_id_to_fill: &mut Option<VarID>) -> Option<&mut TypecheckVar> {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(id) = scope.vars.get_mut(name) {
@@ -81,67 +88,73 @@ impl<'a> Typechecker<'a> {
         }
         None
     }
-    pub(super) fn update_variable(&mut self, name: &str, span: Span, var_id_to_fill: &mut Option<VarID>) -> TypeKind {
-        match self.lookup_variable(name, var_id_to_fill) {
-            Some(var) => {
-                let var_was_initialized = var.is_initialized;
-                var.is_used = true;
-                if let InitializedState::No = var.is_initialized {
-                    var.is_initialized = InitializedState::Yes;
-                }
 
-                let var = var.clone();
-                
-                if let InitializedState::Maybe = var_was_initialized {
-                    self.error(ErrType::TyperCantUseMaybeInitializedVar(var.var_id), span);
-                }
-                if let InitializedState::Yes = var_was_initialized && !var.is_declared_mut {
-                    self.error(ErrType::TyperVarIsntDeclaredMut(var.var_id), span);
-                }
-                var.typ
+    pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, span: Span, var_id_to_fill: &mut Option<VarID>) -> TypeKind {
+        if let Some(var) = self.lookup_variable(name, var_id_to_fill) {
+            let mut errors = Vec::new();
+
+            if mutable {
+                if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
+                if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
+                var.mut_borrows_count += 1;
+            } else {
+                if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
+                var.borrows_count += 1;
             }
-            None => {
-                self.error(ErrType::TyperUndefinedIdentifier(name.to_string()), span);
-                TypeKind::TypeError
-            }
+            let var_typ = TypeKind::Pointer {
+                mutable,
+                inner: Box::new(var.typ.clone()),
+                borrows_var: *var_id_to_fill
+            };            
+            for e in errors { self.error(e, span); }
+            var_typ
+        } else {
+            self.error(ErrType::TyperUndefinedIdentifier { name: name.to_string() }, span)
         }
     }
 
-    pub(super) fn use_variable(&mut self, name: &str, mutable: bool, span: Span, var_id_to_fill: &mut Option<VarID>) -> TypeKind {
-        match self.lookup_variable(name, var_id_to_fill) {
-            Some(var) => {
-                var.is_used = true;
-                if mutable { var.is_used_mut = true; }
 
-                let var = var.clone();
+    pub(super) fn update_variable(&mut self, var_id: Option<VarID>, span: Span) {
+        let var = self.var_lookup.get_mut(&var_id.unwrap()).unwrap();
+        let mut errors = Vec::new();
+        
+        var.is_used = true;
+        var.is_used_mut = true;
+        var.is_moved = false;  // if variable was moved, doing `a = ...` unmoves it again.
 
-                match var.is_initialized {
-                    InitializedState::No => { self.error(ErrType::TyperCantUseUninitializedVar(var.var_id), span); },
-                    InitializedState::Maybe => { self.error(ErrType::TyperCantUseMaybeInitializedVar(var.var_id), span); },
-                    InitializedState::Yes => { /* All good */ }
-                }
-                if mutable && !var.is_declared_mut {
-                    self.error(ErrType::TyperVarIsntDeclaredMut(var.var_id), span);
-                }
-                var.typ
-            }
-            None => {
-                self.error(ErrType::TyperUndefinedIdentifier(name.to_string()), span);
-                TypeKind::TypeError
-            }
+        match var.is_initialized {
+            InitState::No => var.is_initialized = InitState::Yes,
+            InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.var_id }),
+            InitState::Yes => if !var.is_declared_mut { errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.var_id }); }
         }
+        
+        for e in errors { self.error(e, span); }
     }
+
+    pub(super) fn move_variable(&mut self, var_id: &Option<VarID>, span: Span) {
+        let var = self.var_lookup.get_mut(&var_id.unwrap()).unwrap();
+        let mut errors = Vec::new();
+
+        if var.is_moved {
+            errors.push(ErrType::TyperCantUseMovedVar { var: var.var_id });
+        }
+        var.is_moved = true;
+
+        for e in errors { self.error(e, span); }
+    }
+
+
 
     pub(super) fn define_type(&mut self, name: String, typ: ThrumType, span: Span) {
         if self.name_exists_already(&name) {
-            self.error(ErrType::TyperNameAlreadyDefined(name.clone()), span);
+            self.error(ErrType::TyperNameAlreadyDefined { name: name.clone() }, span);
         }
         self.scopes.last_mut().unwrap().types.insert(name, typ);
     }
-    pub(super) fn lookup_type(&mut self, name: &str) -> Option<ThrumType> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(t) = scope.types.get(name) {
-                return Some(t.clone());
+    pub(super) fn lookup_type(&mut self, name: &str) -> Option<&mut ThrumType> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(t) = scope.types.get_mut(name) {
+                return Some(t);
             }
         }
         None
@@ -158,13 +171,13 @@ impl<'a> Typechecker<'a> {
     // let x
     // if false { x = 5 }
     // println!("{x}")  // should Error, because x was not initialized in all branches of the if statement
-    fn snapshot_vars_init_state(&mut self, only_uninitialized: bool) -> SnapshotInitVars {
+    fn snapshot_vars_init_state(&self, only_uninitialized: bool) -> SnapshotInitVars {
         // iterate over all currently in scope variables
         let mut vars_state = HashMap::new();
         for scope in &self.scopes {
             for var_id in scope.vars.values() {
                 let var = self.var_lookup.get(var_id).unwrap();
-                if !only_uninitialized || var.is_initialized == InitializedState::No {
+                if !only_uninitialized || var.is_initialized == InitState::No {
                     vars_state.insert(*var_id, var.is_initialized);
                 }
             }
@@ -172,10 +185,10 @@ impl<'a> Typechecker<'a> {
         vars_state
     }
 
-    pub(super) fn snapshot_first_vars_init_state(&mut self) -> SnapshotInitVars {
+    pub(super) fn snapshot_first_vars_init_state(&self) -> SnapshotInitVars {
         self.snapshot_vars_init_state(true)
     }
-    pub(super) fn snapshot_branch_vars_init_state(&mut self, branch_was_never: bool) -> Option<SnapshotInitVars> {
+    pub(super) fn snapshot_branch_vars_init_state(&self, branch_was_never: bool) -> Option<SnapshotInitVars> {
         // if the branch has type Never it should not be included in the later merge
         if branch_was_never {
             None
@@ -201,14 +214,14 @@ impl<'a> Typechecker<'a> {
             for branch_snap in &actual_branch_snaps {
                 let branch_state = branch_snap.get(&var_id).unwrap();
                 match branch_state {
-                    InitializedState::Yes => {
+                    InitState::Yes => {
                         any_branch_init = true; 
                     }
-                    InitializedState::Maybe => {
+                    InitState::Maybe => {
                         any_branch_init = true;
                         all_branches_init = false; // "Maybe" kills definite initialization
                     }
-                    InitializedState::No => {
+                    InitState::No => {
                         all_branches_init = false; // "No" kills definite initialization
                     }
                 }                
@@ -216,13 +229,13 @@ impl<'a> Typechecker<'a> {
 
             let final_state = if all_branches_init {
                 // Every single branch initialized this var -> var is initialized.
-                InitializedState::Yes
+                InitState::Yes
             } else if any_branch_init {
                 // Some branches did, some didn't (or were Maybe) -> uncertain...
-                InitializedState::Maybe
+                InitState::Maybe
             } else {
                 // No branch touched it -> uninitialized
-                InitializedState::No
+                InitState::No
             };
             self.var_lookup.get_mut(&var_id).unwrap().is_initialized = final_state;
         }
@@ -232,7 +245,7 @@ impl<'a> Typechecker<'a> {
         if let Some(label) = label {
             let block_break_type = self.new_inference_type();
             self.current_break_types.push(BreakTypeInfo {
-                label: label.to_string(),
+                label: label.clone(),
                 typ: block_break_type,
                 snapshots_from_breaks: Vec::new(),
             });

@@ -74,37 +74,90 @@ Boolean Operators:
 
 ## Tuples
 1. `(0, "hi")` has type: `(num, str)`
-2. Tuples can be named or unnamed: `(0, "hi")` or `(.x = 0, .y = 1)`
-3. `(.x = 0, .y = 1)` is the same as `(.y = 1, .x = 0)`
+2. Tuples can be named or unnamed: `(0, "hi")` or `(x: 0, y: 1)`
+3. `(x: 0, y: 1)` is the same as `(y: 1, x: 0)`
 4. MAYBE tuples can be extended using spreading `(...old_tuple, 3)`
 
 ## Variable Bindings
 1. `let a = 5`
     - a can then be used anywhere: `let b = a + 2`
+    - a can't be modified.
 2. `let mut b = 3`
     - b can then be modified: `b += 51`
 3. Destructuring:
     - `let [var1, _, var2] = [1, 2, 3]`  // _ means ignore
     - `let (x, y) = (1, "string")`
-    - `let (.id = x, .y) = (.y = 1, .id = 30)`
+    - `let (id: x, y:) = (y: 1, id: 30)`
     - `let x..y = 1..5`
+
+
+## Ownership / Borrowing
+1. defaults for type annotation: Owning `own` / Borrowing `ref`:
+    - function arguments: **Borrow**
+        - `fn print_list(list: Vec<num>) { ... }` (ref to a Vec of owned nums)
+    - function return type: **Owned**
+        - `fn make_list() -> Vec<num> { ... }` (owned Vec)
+    - type fields: **Owned**
+        - `type Grid<T> = (h: num, w: num, grid: [[T]])` (all fields are owned)
+    - let binding: **Owned**
+        - `let x: Vec<num> = [1, 2]` (owned Vec)
+        - `let y: ref Vec<num> = x` (ref to a Vec)
+
+2. any binding can also be mut
+    - e.g. `fn append_elem(list: mut Vec<num>) { ... }`
+    - would be called: `append_elem(mut numbers, 3)`
+    - MAYBE mut on the callside can be left out if the expression is owned anyways
+        - `append_elem([1, 2, 3], 4)`
+        - `append_elem(x^, 4)` this would clone/move x and discard afterwards 
+
+## Lifetimes
+```thrum
+{
+    let mut x = [1, 2, 3]
+    let y = mut x  // equivalent to: let ref y = mut x
+    y[1] = 5
+    x[0] = 2  // error: cannot mutate x because it is already mut borrowed by y.
+}
+{
+    let mut x = [1, 2, 3]
+    let y = x  // equivalent to: let ref y = x
+    y[1] = 5  // error: cannot mutate what y references because it wasn't declared mut. 
+    x[2] = 4  // error: cannot mutate x because it is borrowed by y.
+}
+// these errors might not actually happen, because in both error-cases y could have been dropped before x was used. (automatically by the compiler)
+```
+- Lifetime annotation:
+    - fn returns a pointer: `fn get<#a>(ref#a self, key: K) -> ref#a V`
+    - fn returns a mut pointer: `fn get_mut<#a>(mut ref#a self, key: K) -> mut ref#a V`
+        - can technically be elided
+    - type with pointers: `type Pet<#a> = (ref#a owner: str)`
+
+## Moving Ownership `^`
+```thrum
+let x = [1, 2]
+let nested_arr = [x^, [2, 3]]
+// [2, 3] doesnt need ^ because it doesn't have an owner yet.
+
+// if x was used here, the ^ above would mean clone instead of move ownership.
+// ^ will be colored by the ide depending on if it clones or moves.
+```
 
 
 ## If Statements
 - {} are required on the if block, but else {} can be omitted.
 - returns the value of both if/else arms -> meaning they have to match types.
-    - `let x: str? = if (var1 == "123") 123 else null`
+    - `let x: num? = if var1 == "123" { 123 } else null`
 - Nullish operators (maybe):
-    - ?. `let x_option = point_option?.x`  
-        - desugared from: `point_option.map_some(|p -> p.x)`
-        - allthough this can just be `if case ?p = point_option { p.x } else null`
-    - ?? `let point = point_option ?? Point { .x = 1, .y = 4 }`
+    - ?. `let x_option = point_option?.x`
+        - desugared from `if point_option ~> ?p { p.x } else null`
+    - ?? `let point = point_option ?? Point { x: 1, y: 4 }`
+        - desugared from `if point_option ~> ?p { p } else Point { x: 1, y: 4 }`
 
 
 ## Functions
-2. named: `fn greet(p: str) { print"Hello {p}" }`, `fn square = (x) -> x * x`
+2. named: `fn greet(p: str) { print"Hello {p}" }`, `fn square = |x -> x * x`
 3. a function parameter can be left out if it has a default 
-    - `fn math(x: num, y: num? = null) -> x*y` can be called with `math(2)`, y will be null
+    - `fn math(x: num, y: num? = null) -> ...` can be called with `math(2)`, y will be null
 ```thrum
 fn point(x: num, y:num) -> { "{x}, {y}" }
 point(2, 3)  //-> "2, 3"
@@ -114,7 +167,7 @@ point(...[1, 42])  //-> "1, 42"
 point(...[1, 2, 3]) //-> "1, 2"  // 3 gets discarded
 
 // calling using named parameters:
-point(y = 3, x = 5)  //-> "5, 3"
+point(y: 3, x: 5)  //-> "5, 3"
 ```
 5. anonymous functions / closure syntax is `|param1, param2, ... -> body`:
     - `(0..10).map(|x -> x + 2).collect<Vec>() //-> [2, 3, 4, 5, ..., 12]`
@@ -167,7 +220,7 @@ print("{elem}")
 
 ## Type Definitions
 1. types can be defined anywhere, but they have the same scoping as variables.
-    - `type Point = ( .x = num, .y = num)`
+    - `type Point = ( x: num, y: num)`
     - `enum Directions { North, East, West, South(num) }`
     - enum types can have extra Tuples as data on them.
 2. types can have `impl Point { ... }` blocks. any variables/functions implemented here can then be accessed using `Point::distance()`.
