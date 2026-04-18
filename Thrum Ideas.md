@@ -1,19 +1,21 @@
 # Thrum Language
-Thrum is a very scripty language that takes inspiration from Rust, Javascript, Swift, Zig and probably more!
-Its Syntax is simple, but still compiles down to efficient code (hopefully.)
-It is strictly typed, which means that its harder to write at first, but incredibly easy refactoring later on.
-It has very expressive Pattern-matching, which makes for some very satisfying code.
+Thrum is a very scripty language that takes inspiration mainly from Rust, but also Swift, Zig, Javascript and probably more!  
+The Syntax is simple, but still compiles to just as efficient code as rust (in the future, for now its a vm) because it uses rusts memory model. No GC, no RC.  
+It has a borrow checker, which can be made less strict than Rusts for single-threaded code.  
+It is strictly typed, which means that it might be slightly harder to write at first, but incredibly easy to refactor later on.  
+Since languages that have really fun and nice pattern-matching are usually really fun and nice, pattern-matching is a main-focus (for now).  
 
-## Compiler Types
-1. num - f64 // there is gonna be u{n}, i{n}, f{n} for any n later on
-2. bool - false / true
-3. slice\<T> - has data and length.
-4. dict\<K, V> - Map/Object in one maybe seperate Set
-5. range - 0..10 (inclusive 0-10) or 0..<10 (exclusive 0-9)
-
-## Default Types
-1. Vec\<T> - has data length and a capacity. you can push and pop values here.
-2. str - one string type for everything, (maybe? it effectively is just a Vec\<u8> though)
+## Types
+- num - f64
+    - there is gonna be u{n}, i{n}, f{16 * n} for any n later on
+- bool - false / true
+- tup - (num, num) or named (x: num, y: num)
+    - allthough the () might change to {} later
+    - () is nicer for unnamed tuples
+    - {} is nicer for named tuples
+- [T] or Vec\<T> - behaves like a rust Vec. can be created with just `let x = [1, 2, 3]`
+- &[T] - slice of a Vec.
+- Range - 0..10 (exclusive 0-9) or 0..=10 (exclusive 0-9)
 
 ## Operators
 - Plus +
@@ -35,6 +37,8 @@ Boolean Operators:
 - And &
 - Or |
 - Not !
+
+Comparison Operators:
 - Less <
 - Greater >
 - Less (inclusive) <=
@@ -51,32 +55,35 @@ Boolean Operators:
 3. Type Annotations are required if the language can't figure them out itself.
 
 
-## Nullable ?Types
-1. nullable types are types with a ? before them:
-    - `let maybe_str: ?str = ?"hello"`
-2. the language can automatically put ? before expressions if needed.
-    - `let maybe_str: ?str = "hello"`
-3. internally these are just an `Option` enum. you can also just type `Option::Some("hello")` instead of `?"hello"` if you really wanted to.
+## Option
+1. Options can be autoboxed:
+    - `let maybe_str: Option<str> = "hello"`
+    - `let maybe_str: Option<str> = .None`
+    - any enum/struct can implement this autobox behaviour.
+2. you can be explicit for the some case if needed.
+    - `let maybe_str: Option<str> = .Some("hello")`
+3. MAYBE pattern matching with ?
+    - `if maybe_str is ?str { ... }`
 
 
 ## Strings
-1. `"this is a string"`
-2. string interpolation:
-    - variables can be put into {}.
+- `"this is a string"`
+- string interpolation:
     - `"1 + 1 = {1 + 1}" //-> "1 + 1 = 2"`
-    - if the expression is too long, you can put it into parentheses after the string. These arguments will then fill the empty `{}` in order.
+    - empty `{}` get ignored by interpolation. This is so you can use a standard str function if stuff ends up too long. These arguments will then fill the empty `{}` in order.
 ```thrum
-"hello {} and {other_name}, today is {}"(
+"hello {} and {other_name}, today is {}".fmt(
     System.name.hack
     System.calender.hack.getCurrentDayAsWeekday(),
 )
 ```
 
 ## Tuples
-1. `(0, "hi")` has type: `(num, str)`
-2. Tuples can be named or unnamed: `(0, "hi")` or `(x: 0, y: 1)`
-3. `(x: 0, y: 1)` is the same as `(y: 1, x: 0)`
-4. MAYBE tuples can be extended using spreading `(...old_tuple, 3)`
+- `(0, "hi")` has type: `(num, str)`
+- Tuples can be named or unnamed: `(0, "hi")` or `(x: 0, y: 1)`
+- `(x: 0, y: 1)` is the same as `(y: 1, x: 0)`
+- MAYBE tuples can be extended using spreading `(...old_tuple, 3)`
+- MAYBE tuple types can have defaults: `let tup: (x: num, y: num = 3) = (x: 2)`
 
 ## Variable Bindings
 1. `let a = 5`
@@ -88,157 +95,162 @@ Boolean Operators:
     - `let [var1, _, var2] = [1, 2, 3]`  // _ means ignore
     - `let (x, y) = (1, "string")`
     - `let (id: x, y:) = (y: 1, id: 30)`
-    - `let x..y = 1..5`
 
 
 ## Ownership / Borrowing
-1. defaults for type annotation: Owning `own` / Borrowing `ref`:
+1. MAYBE defaults for type annotation: Owning `own` / Borrowing `ref`:
     - function arguments: **Borrow**
-        - `fn print_list(list: Vec<num>) { ... }` (ref to a Vec of owned nums)
+        - `fn print_list(list: [num]) { ... }` (ref to a Vec of owned nums)
     - function return type: **Owned**
-        - `fn make_list() -> Vec<num> { ... }` (owned Vec)
+        - `fn make_list() -> [num] { ... }` (owned Vec)
     - type fields: **Owned**
         - `type Grid<T> = (h: num, w: num, grid: [[T]])` (all fields are owned)
     - let binding: **Owned**
-        - `let x: Vec<num> = [1, 2]` (owned Vec)
-        - `let y: ref Vec<num> = x` (ref to a Vec)
+        - `let x: [num] = [1, 2]` (owned Vec)
+        - `let y: ref [num] = x` (ref to a Vec)
 
 2. any binding can also be mut
-    - e.g. `fn append_elem(list: mut Vec<num>) { ... }`
-    - would be called: `append_elem(mut numbers, 3)`
-    - MAYBE mut on the callside can be left out if the expression is owned anyways
+    - e.g. `fn append_elem(list: mut [num]) { ... }`
+    - would be called:
+        - `append_elem(mut numbers, 3)`
         - `append_elem([1, 2, 3], 4)`
-        - `append_elem(x^, 4)` this would clone/move x and discard afterwards 
+        - `append_elem(x^, 4)` this would move x (quite useless here because it will be discarded after the function returns)
 
-## Lifetimes
-```thrum
-{
-    let mut x = [1, 2, 3]
-    let y = mut x  // equivalent to: let ref y = mut x
-    y[1] = 5
-    x[0] = 2  // error: cannot mutate x because it is already mut borrowed by y.
-}
-{
-    let mut x = [1, 2, 3]
-    let y = x  // equivalent to: let ref y = x
-    y[1] = 5  // error: cannot mutate what y references because it wasn't declared mut. 
-    x[2] = 4  // error: cannot mutate x because it is borrowed by y.
-}
-// these errors might not actually happen, because in both error-cases y could have been dropped before x was used. (automatically by the compiler)
-```
-- Lifetime annotation:
-    - fn returns a pointer: `fn get<#a>(ref#a self, key: K) -> ref#a V`
-    - fn returns a mut pointer: `fn get_mut<#a>(mut ref#a self, key: K) -> mut ref#a V`
-        - can technically be elided
+## References
+- In thrum everytime you use a variable, under the hood its a reference to that variable.
+    - `arr[2]` is getting a reference to arr and indexing into it
+    - `a + 2` + and other operators can dereference referebces automatically
+    - `let b = true; if b { ... }` the if-condition expects a boolean, so it automatically derefs here aswell.
+    - `x = 5` the left side of = needs a mut reference that it assigns to. the compiler automatically changes this to `mut x = 5` because the mut here is quite obvious.
+    - `let a = x` a stores a reference to x
+- to create a mut reference, put `mut` before the variable name:
+    - `let a = mut x`
+    - `double_num(mut x)`
+    - MAYBE rust-like-sugar for `let a = mut 5`
+
+## Borrow checking
+- normal rust rules:
+    - you can have any amount of refs,
+    - XOR
+    - you can have 1 mutref
+- you can opt out to less strict rules with `alias ref`s
+    - you can have refs and mutrefs to the same variable at the same time.
+    - you CAN'T have a `alias mutref` to the left of an enum-boundary OR a heap-boundary.
+        - example:
+        ```thrum
+        let vec = [1, 2, 3]
+        let x = loose vec[0]
+        vec[1] = 5  // works perfectly fine
+        vec.push(5)  //! ERROR, `x` is across a heap-boundary, so you can't get a mutref of vec
+        ```
+- MAYBE Lifetime annotation:
+    - fn returns a pointer: `fn get(ref#a self, key: K) -> ref#a V`
+    - fn returns a mut pointer: `fn get_mut(mut ref#a self, key: K) -> mut ref#a V`
+        - in these cases annotation wouldn't even be required because of elision
     - type with pointers: `type Pet<#a> = (ref#a owner: str)`
 
 ## Moving Ownership `^`
 ```thrum
 let x = [1, 2]
-let nested_arr = [x^, [2, 3]]
-// [2, 3] doesnt need ^ because it doesn't have an owner yet.
-
-// if x was used here, the ^ above would mean clone instead of move ownership.
-// ^ will be colored by the ide depending on if it clones or moves.
+let y = x^  // moved owner
+let nested_arr = [x, [2, 3]]
+// collections always want ownership, unless you explicitely say that they should be pointers. x^ is moved and owned, [2, 3] is owned, perfect!
 ```
+- `vec.iter()` -> iters normally
+- `mut vec.iter()` -> iters mutrefs
+- `vec^.iter()` -> consuming iter
+- DEFINITELY NOT if x was used here, the ^ above would mean clone instead of move ownership.
+
 
 
 ## If Statements
-- {} are required on the if block, but else {} can be omitted.
+- {} or => are required on the if block, but on else those can be omitted.
+    - `if x > 5 => total += 1`
 - returns the value of both if/else arms -> meaning they have to match types.
-    - `let x: num? = if var1 == "123" { 123 } else null`
-- Nullish operators (maybe):
+    - `let x: Option<num> = if var1 == "123" { 123 } else .None`
+- Nullish operators:
     - ?. `let x_option = point_option?.x`
-        - desugared from `if point_option ~> ?p { p.x } else null`
+        - desugared from `if point_option is ?p { p.x^ } else .None`
     - ?? `let point = point_option ?? Point { x: 1, y: 4 }`
-        - desugared from `if point_option ~> ?p { p } else Point { x: 1, y: 4 }`
+        - desugared from `if point_option is ?p { p^ } else Point { x: 1, y: 4 }`
 
 
 ## Functions
-2. named: `fn greet(p: str) { print"Hello {p}" }`, `fn square = |x -> x * x`
-3. a function parameter can be left out if it has a default 
-    - `fn math(x: num, y: num? = null) -> ...` can be called with `math(2)`, y will be null
+- `fn greet(p: str) { print("Hello {p}") }`, `fn square = |x => x * x`
+- the fn arguments are just 1 tuple, so anything that works for them will work here
+    - named calling `add_nums(num2: 3, num1: 4)`
+    - defaults `fn math(x: num, y: Option<num> = null) -> ...` can be called with `math(2)`
+    - spreading `add_nums(...(1, 2))`
+
+- anonymous functions / closure syntax `|param1, param2, ... => body`:
+    - `(0..10).iter().map(|x => x + 2).collect<Vec>() //-> [2, 3, 4, 5, ..., 11]`
+- can be called right at creation: `(|x => x + 1)(5)` -> 6
+
+
+## Pattern Matching
 ```thrum
-fn point(x: num, y:num) -> { "{x}, {y}" }
-point(2, 3)  //-> "2, 3"
-
-// destructuring into function parameters:
-point(...[1, 42])  //-> "1, 42"
-point(...[1, 2, 3]) //-> "1, 2"  // 3 gets discarded
-
-// calling using named parameters:
-point(y: 3, x: 5)  //-> "5, 3"
+match response
+is 200 | 202 => "Success";
+is 404 => { "Not Found" }
+is 500..600 => "500s!";
+is _ => "default"
 ```
-5. anonymous functions / closure syntax is `|param1, param2, ... -> body`:
-    - `(0..10).map(|x -> x + 2).collect<Vec>() //-> [2, 3, 4, 5, ..., 12]`
-    - ranges themselves are iterators, so this works.
-6. can be called right at creation: `(|x -> x+1)(5)` -> 6
+- all patterns are:
+    - literals: `3`, `true`
+    - wildcard: `_`
+    - tuple `(x, y)`, `(x: 2, y: 3)`, `(x, ...)`
+    - enum `.North`, `.Some(x: 2)`, `?sugar`
+    - or `pattern | other`
+    - conditional `pattern and cond`, e.g. `x is let y and y > 5`
+- quick one line matches can be done using an `is`-expression.
+    - `if x is 40 { ... }`
+    - `if num_option is let ?x and x > 100 { ... }`
+    - is-expressions that bind variables can only be used in if/while conditions.
+        - fine: `let matched = x is 3..40`
+        - BAD: `let matched = y_option is let ?y` conditionally binds y
+    - `x is y` basically does x == y
+    - `x is (y, _)` basically does x.0 == y
+    - `x is (let y, _)` binds y
 
-
-## Match
-```thrum
-// not valid, since these are 3 different types, just for show
-match response {
-    (200, 202) -> "Success";
-    404 -> { "Not Found" }
-    500..600 -> "500s!";
-    _ -> "default"
-}
-```
-1. quick one line matches can be done using a `case`-expression.
-    - `if case 40 = x { /* x was 40. */ }`
-    - `if case ?x = num_option && x > 100 { /* unwrapped num_option and it was greater than 100*/ }`
-    - case expressions can be used if they are the last expression of a block. They are mostly used within `if`/`while` though. They can also be chained with `&&`, but NOT with `||`, `!`.
-    - `let matched = { case 30 = x }; ...` this only works because of the {}
-
-2. i was thinking about making this case-syntax even shorter, but i'm not so sure about it, as the syntax would be inverted (`expression ~> pattern` instead of `case pattern = expression`). It does however get rid of the `=`, which can be confusing.
-    - `while case ?x = queue.pop() { ... }`
-    - `while queue.pop() ~> ?x { ... }` 4 chars shorter
-    - `if case 0..10 = num { ... }`
-    - `if num ~> 0..10 { ... }`
-
-## Ensure
-```thrum
-if case ?elem = arr.get(10) {
-    print("{elem}")
-}
-else { return }
-
-// is the same as
-ensure case ?elem = arr.get(10) else {
-    return // something that has type never
-}
-print("{elem}")
-```
+    - other old syntaxes before `is` i went through:
+        - `case 0..5 = x` (swift)
+        - `x ~> 0..5`
+        - `x matches 0..5`
+        - but now its `x is 0..5`
 
 ## Labeled Loops and Break/Continue
-1. loops can be given labels like so: `for #outer i in 0..10 { ... }`
-2. these labels can then be used in `break #outer` or `continue #outer`
-3. each loop has a default label so you can just type `break #for` to break the nearest for-loop without a custom label
-4. inside infinite `loop`s break can return values: `break 10` or `break #outer 10`
+- loops can be given labels like so: `for #outer i in 0..10 { ... }`
+- these labels can then be used in `break #outer` or `continue #outer`
+- each loop has a default label so you can just type `break #for` to break the nearest for-loop without a custom label
+- inside infinite `loop`s break can return values: `break 10` or `break #outer 10`
 
 
-## Type Definitions
-1. types can be defined anywhere, but they have the same scoping as variables.
-    - `type Point = ( x: num, y: num)`
-    - `enum Directions { North, East, West, South(num) }`
+## Constants
+- constants are evaluated at compile time.
+- `const x = 5 * 3`
+- `const x = { let y = 5; y * 3 }`
+
+## Types are values
+- types can be defined anywhere, but they have the same scoping as variables.
+    - `type Point = (x: num, y: num)`
+    - `type Directions = enum { North, East, West, South(num) }`
     - enum types can have extra Tuples as data on them.
-2. types can have `impl Point { ... }` blocks. any variables/functions implemented here can then be accessed using `Point::distance()`.
+- types can have `impl Point { ... }` blocks. any variables/functions implemented here can then be accessed using `Point::distance()`.
 
 ## Special Syntax
-1. `expression_Type`:
+- `expression_Type`:
     - `[1, 2, 3]_Vec` desugars to `Vec::new(data = [1, 2, 3])`
     - `let complex_number = 1 + 2_Complex` this syntax would be really cool, and very scripty, which is the goal. `1 + 2_I` would be even better, but i doubt it would work with this system.
-2. special panicky sugared syntax:
+- special panicky sugared syntax:
     - .get(...) can be called using struct[...].
     - .insert(..., ...) can be called using struct[...] = ... 
-3. MAYBE pipe operator: `users.filter(x -> x.isAdmin) |> sort(^) |> print"sorted: {^}"`
-    - extreme example: `numbers.map(n -> n**2) |> { even: ^.where(x -> x%2 == 0), odd: ^.where(x -> x%2 == 1) }`
-4. MAYBE a function called with only 1 string argument can be called without parantheses.
+- defer for end of scope logic
+- ensure for inverted binding-if's: `ensure x_option is ?x else { return }`
+- PROBABLYNOT a function called with only 1 string argument can be called without parantheses.
     - `"a=b=c".split"=" //-> ["a", "b", "c"]`
     - `print"{} + {} = {}"(1, 1, 2) //-> 1 + 1 = 2` this does look weird though...
     - `print("{} + {} = {}"(1, 1, 2)) //-> 1 + 1 = 2`
-5. slice, Vec, Set, range, str all implement .iter()
+- slice, Vec, Set, range, str all implement .iter()
 
 
 # Motivations

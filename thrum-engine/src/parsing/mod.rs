@@ -1,132 +1,170 @@
-use std::{iter::Peekable, vec::IntoIter};
+use crate::{ErrType, ProgramError, ProgramErrorData, WarnType, lexing::tokens::{AssignOp, Span, TokenKind, TokenSpan}, parsing::ast_structure::{AstArena, Expr, ExprId, Pattern, PatternId}};
 
-use crate::{ErrType, Program, ProgramError, lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::Span};
-
-mod parse_expressions;
-mod parse_patterns;
-mod parse_type_annotations;
 pub mod ast_structure;
 pub mod desugar;
-
-
-
-pub fn parse_program(program: &mut Program) {
-    let mut parser = Parser::new(program);
-
-    program.ast = Some(parser.parse_block_expression(TokenType::EndOfFile, Span::default()));
-}
+mod parse_expressions;
+mod parse_patterns;
 
 
 
 pub struct Parser<'a> {
-    errors: &'a mut Vec<ProgramError>,
-    tokens: Peekable<IntoIter<TokenSpan>>,
-    prev_token_line: usize,
-    pipe_operators_active: usize,
+    error_data: &'a mut ProgramErrorData,
+    source: &'a str,
+    tokens: &'a [TokenSpan],
+    curr_token_pos: usize,
+    ast: &'a mut AstArena,
+    prev_token_span: Span,
 }
 
 impl<'a> Parser<'a> {
-    fn new(program: &'a mut Program) -> Self {
+    pub fn start(error_data: &mut ProgramErrorData, source: &str, tokens: &[TokenSpan]) -> AstArena {
+        let mut ast = AstArena::default();
+        // reserve the first slot of the ast
+        ast.exprs.push(Expr::ParserError);
+        ast.expr_spans.push(Span::invalid());
+
         Parser {
-            errors: &mut program.errors,
-            // lexer tokens will be gone after parsing!!!
-            tokens: std::mem::take(&mut program.lexer_tokens).into_iter().peekable(),
-
-            prev_token_line: 0,
-            pipe_operators_active: 0,
+            error_data, source, tokens,
+            curr_token_pos: 0,
+            ast: &mut ast,
+            prev_token_span: Span::default()
         }
+        .parse_block_expression(TokenKind::EndOfFile, Span::default());
+
+        // swap the last expression (which is the main block expression)
+        // into the reserved first slot.
+        ast.exprs.swap_remove(0);
+        ast.expr_spans.swap_remove(0);
+
+        ast
     }
 
-    fn peek(&mut self) -> &TokenSpan {
-        self.tokens.peek().unwrap_or(&TokenSpan::END_TOKEN)
+    fn peek(&self) -> &'a TokenSpan {
+        self.tokens.get(self.curr_token_pos).unwrap_or(&TokenSpan::END_TOKEN)
+    }
+    fn peek_one_further(&self) -> &'a TokenSpan {
+        // needed for tuple label parsing (x: 2, y: 3) vs (2, 3)
+        // we never peek further than this though, the language is designed to be easy to parse
+        self.tokens.get(self.curr_token_pos + 1).unwrap_or(&TokenSpan::END_TOKEN)
     }
 
-    fn next(&mut self) -> TokenSpan {
-        let next = self.tokens.next().unwrap_or(TokenSpan::END_TOKEN);
-        self.prev_token_line = next.span.line;
+    fn next(&mut self) -> &'a TokenSpan {
+        let next = self.tokens.get(self.curr_token_pos).unwrap_or(&TokenSpan::END_TOKEN);
+        self.curr_token_pos += 1;
+        self.prev_token_span = next.span;
         next
     }
 
-    fn peek_is_on_same_line(&mut self) -> bool {
-        self.peek().span.line == self.prev_token_line
+    fn peek_is_on_same_line(&self) -> bool {
+        self.peek().span.line == self.prev_token_span.line
+    }
+    fn peek_further_is_on_same_line(&self) -> bool {
+        self.peek_one_further().span.line == self.prev_token_span.line
     }
 
-    fn peek_is_expression_start(&mut self) -> bool {
-        match self.peek().token {
-            // these should match parse_prefix function
-            TokenType::Identifier(_) | TokenType::Number(_) | TokenType::StringFrag(_) | TokenType::StringStart | TokenType::Bool(_) | TokenType::Null
-            | TokenType::Minus | TokenType::Exclamation | TokenType::BitNot
-            | TokenType::LeftBrace | TokenType::LeftParen
-            | TokenType::Let | TokenType::If | TokenType::Fn => true,
-            _ => false
-        }
+    fn peek_spaces_infront(&self) -> usize {
+        self.peek().span.byte_offset - (self.prev_token_span.byte_offset + self.prev_token_span.length)
+    }
+    fn peek_spaces_after(&self) -> usize {
+        self.peek_one_further().span.byte_offset - (self.peek().span.byte_offset + self.peek().span.length)
     }
 
+    #[track_caller]
     fn error(&mut self, err_type: ErrType) {
         let span = self.peek().span;
         self.error_with_span(err_type, span);
     }
+    #[track_caller]
     fn error_with_span(&mut self, err_type: ErrType, span: Span) {
-        self.errors.push(ProgramError {
-            line: span.line,
-            byte_offset: span.byte_offset,
-            length: span.length,
-            typ: err_type
+        self.error_data.errors.push(ProgramError {
+            span,
+            err_type,
+            compiler_location: std::panic::Location::caller()
+        });
+    }
+    #[track_caller]
+    fn warn(&mut self, warn_type: WarnType) {
+        let span = self.peek().span;
+        self.warn_with_span(warn_type, span);
+    }
+    #[track_caller]
+    fn warn_with_span(&mut self, warn_type: WarnType, span: Span) {
+        self.error_data.warnings.push(ProgramError {
+            span,
+            err_type: warn_type,
+            compiler_location: std::panic::Location::caller()
         });
     }
 
-    fn expect_token(&mut self, expected: TokenType, error_msg: &str) -> Span {
-        let token = self.peek();
-        if token.token == expected {
-            self.next().span
+    fn add_expr(&mut self, start: Span, expr: Expr) -> ExprId {
+        self.ast.add_expr(start.merge(self.prev_token_span), expr)
+    }
+    fn add_pattern(&mut self, start: Span, pattern: Pattern) -> PatternId {
+        self.ast.add_pattern(start.merge(self.prev_token_span), pattern)
+    }
+
+    fn expect_token(&mut self, expected: TokenKind, error_msg: &str) {
+        let peek = self.peek().clone();
+        if peek.token == expected {
+            self.next();
         } else {
-            let found_instead = self.peek().clone();
-            self.error(ErrType::ParserExpectToken { expected, err_msg: error_msg.to_string(), found: found_instead.token });
-            found_instead.span
+            self.error(ErrType::ParserExpectToken { expected: [expected].into(), err_msg: error_msg.to_string(), found: peek.token });
         }
     }
-    fn expect_identifier(&mut self, error_msg: &str) -> (Span, String) {
-        if let TokenType::Identifier(text) = &self.peek().token {
-            let text = text.clone();
-            (self.next().span, text)
+    fn expect_identifier(&mut self, err_msg: &str) -> String {
+        let peek = self.peek();
+        if peek.token == TokenKind::Identifier {
+            self.next();
+            self.get_from_source(peek.span).to_string()
         } else {
-            let found_instead = self.peek().clone();
-            self.error(ErrType::ParserExpectToken { expected: TokenType::Identifier(String::new()), err_msg: error_msg.to_string(), found: found_instead.token });
-            (found_instead.span, String::new())
+            self.error(ErrType::ParserExpectToken { expected: [TokenKind::Identifier].into(), err_msg: err_msg.to_string(), found: peek.token });
+            String::new()
         }
     }
 
-    fn parse_optional_label(&mut self) -> Option<(Span, String)> {
-        let is_on_same_line = self.peek_is_on_same_line();
-        if self.optional_token(TokenType::Hashtag).is_some() {
-            if !is_on_same_line {
-                self.error(ErrType::ParserLabelsHaveToBeOnSameLine);
-            }
-            let next_token = self.next();
-            let label = 
-                match next_token.token {
-                    TokenType::Identifier(s) => s,
-                    x => x.to_string()
-                };
-            Some((next_token.span, label))
+    fn expect_identifier_relaxed(&mut self, err_msg: &str) -> String {
+        // can be a normal identifier, keyword or number
+        let peek = self.peek().clone();
+        if peek.token == TokenKind::Number {
+            self.next();
+            self.get_from_source(peek.span).to_string()
+        } else if let Some((s, _)) = TokenKind::KEYWORDS.into_iter().find(|(_, kind)| peek.token == *kind) {
+            self.next();
+            s.to_string()
         } else {
-            None
+            self.expect_identifier(err_msg)
         }
     }
 
-    fn optional_token(&mut self, expected: TokenType) -> Option<Span> {
-        if self.peek().token == expected {
-            Some(self.next().span)
+    fn optional_token(&mut self, expected: TokenKind) -> bool {
+        let matched = self.peek().token == expected;
+        if matched {
+            self.next();
         }
-        else { None }
+        matched
     }
 
-    pub(super) fn parse_comma_separated<T>(
+    fn optional_label(&mut self) -> Option<String> {
+        let label_on_same_line = self.prev_token_span.line == self.peek().span.line;
+        self.optional_token(TokenKind::Hashtag)
+            .then(|| {
+                if !label_on_same_line {
+                    self.error(ErrType::ParserLabelsHaveToBeOnSameLine);
+                }
+                self.expect_identifier_relaxed("to name the label")
+            })
+    }
+
+    fn get_from_source(&self, span: Span) -> &str {
+        &self.source[span.byte_offset..(span.byte_offset + span.length)]
+    }
+
+    fn parse_comma_separated<T>(
         &mut self,
-        end_token: TokenType,
+        end_token: TokenKind,
         parse_element: impl Fn(&mut Self, i32) -> T,
         err_msg: &str
-    ) -> (Span, Vec<T>)
+    ) -> Vec<T>
     {
         let mut list = Vec::new();
         
@@ -134,105 +172,64 @@ impl<'a> Parser<'a> {
         for i in 0.. {
             if self.peek().token == end_token { break }
             list.push(parse_element(self, i));
-            if self.optional_token(TokenType::Comma).is_none() { break; }
+            if !self.optional_token(TokenKind::Comma) { break; }
         }
-        let span = self.expect_token(end_token, err_msg);
-        (span, list)
+        self.expect_token(end_token, err_msg);
+        list
     }
 
-    pub(super) fn parse_line_seperated<T>(
+    fn parse_line_seperated<T>(
         &mut self,
-        end_token: TokenType,
+        end_token: TokenKind,
         parse_element: impl Fn(&mut Self) -> T,
-        on_semicolon: impl Fn(Span) -> Option<T>,
-    ) -> (Span, Vec<T>)
+        on_semicolon: impl Fn(&mut Self) -> Option<T>,
+    ) -> Vec<T>
     {
         let mut list = Vec::new();
 
         // handles empty lists immediately
-        while self.peek().token != end_token && self.peek().token != TokenType::EndOfFile {
+        while self.peek().token != end_token && self.peek().token != TokenKind::EndOfFile {
             list.push(parse_element(self));
-            if let Some(semi_span) = self.optional_token(TokenType::Semicolon) {
-                if let Some(semicolon_elem) = on_semicolon(semi_span) {
+            if self.optional_token(TokenKind::Semicolon) {
+                if let Some(semicolon_elem) = on_semicolon(self) {
                     list.push(semicolon_elem);
                 }
             }
             else {
-                // no semicolon -> next expression can't be on the same line.
+                // no semicolon -> next expression (if its actually an expression and not just '}')
+                // can't be on the same line.
                 if self.peek_is_on_same_line() && self.peek_is_expression_start() {
                     self.error(ErrType::ParserUnexpectedExpression);
                 }
             }
         }
-        let span = self.expect_token(end_token, "to close the block");
-        (span, list)
+        if end_token != TokenKind::EndOfFile {
+            self.expect_token(end_token, "to close the block");
+        }
+        list
     }
 
-    fn recover(&mut self, recover_tokens: &[TokenType]) {
-        while self.peek().token != TokenType::EndOfFile {
-            if recover_tokens.contains(&self.peek().token) {
+    fn peek_is_expression_start(&self) -> bool {
+        // should match self.parse_prefix()
+        matches!(self.peek().token,
+            TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus | AssignOp::Star)
+            | TokenKind::Identifier | TokenKind::Number | TokenKind::Bool(_) | TokenKind::StringStart
+            | TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::LeftBracket
+            | TokenKind::Let | TokenKind::If | TokenKind::Ensure | TokenKind::While
+            | TokenKind::Loop | TokenKind::Match | TokenKind::Enum | TokenKind::Fn | TokenKind::Pipe
+            | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Mut
+        )
+    }
+
+    fn recover(&mut self, recover_after_tokens: &[TokenKind], recover_on_tokens: &[TokenKind]) {
+        while self.peek().token != TokenKind::EndOfFile {
+            if recover_after_tokens.contains(&self.peek().token) {
                 self.next();
                 return;
-            }
-            if self.peek_is_expression_start() {
+            } else if recover_on_tokens.contains(&self.peek().token) {
                 return;
             }
             self.next();
-        }
-    }
-}
-
-
-
-
-
-
-
-#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
-pub enum Precedence {
-    Lowest,
-    Assign,     // =, +=, -=, etc.
-    Pipe,       // |>
-    Range,      // 1..2
-    Nullish,    // ??
-    Or,         // |
-    And,        // &
-    TildeArrow, // ~>
-    BitwiseOr,  // ~|
-    BitwiseXor, // ~^
-    BitwiseAnd, // ~&
-    Equals,     // ==, !=
-    LessGreater,// <, >, <=, >=
-    Shift,      // <<, >>
-    Sum,        // +, -
-    Product,    // *, /, %
-    Power,      // **
-    Postfix,    // ^
-    Prefix,     // !, ~!, -
-    CallIndex,  // square(X), array[i], dict {1, 2}
-}
-impl Precedence {
-    pub const fn get_precedence(token_type: &TokenType) -> Self {
-        match token_type {
-            TokenType::Equal { .. } => Self::Assign,
-            TokenType::DotDot | TokenType::DotDotLess => Self::Range,
-            TokenType::Quest => Self::Nullish,
-            TokenType::PipeGreater => Self::Pipe,
-            TokenType::Pipe => Self::Or,
-            TokenType::Ampersand => Self::And,
-            TokenType::TildeArrow => Self::TildeArrow,
-            TokenType::BitOr => Self::BitwiseOr,
-            TokenType::BitXor => Self::BitwiseXor,
-            TokenType::BitAnd => Self::BitwiseAnd,
-            TokenType::EqualEqual | TokenType::NotEqual => Self::Equals,
-            TokenType::Less | TokenType::Greater | TokenType::LessEqual | TokenType::GreaterEqual => Self::LessGreater,
-            TokenType::LeftShift | TokenType::RightShift => Self::Shift,
-            TokenType::Plus | TokenType::Minus => Self::Sum,
-            TokenType::Star | TokenType::Slash | TokenType::Percent => Self::Product,
-            TokenType::StarStar => Self::Power,
-            TokenType::Caret => Self::Postfix,
-            TokenType::LeftParen | TokenType::LeftBracket | TokenType::Dot(_) | TokenType::ColonColon | TokenType::QuestDot => Self::CallIndex,
-            _ => Self::Lowest,
         }
     }
 }

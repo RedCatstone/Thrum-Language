@@ -1,4 +1,5 @@
-match (false, false, false) {
-    (false, false, false) -> "a"
-    (false, _, true) -> "b"
+fn fib(n: num) -> num {
+    if n < 2 { return n }
+    return fib(n-1) + fib(n-2)
 }
+fib(8)

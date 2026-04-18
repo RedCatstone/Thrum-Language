@@ -1,169 +1,180 @@
-#![allow(clippy::option_if_let_else, clippy::equatable_if_let, clippy::or_fun_call, clippy::must_use_candidate)]
+#![warn(clippy::all, clippy::complexity, clippy::perf,
+    // clippy::pedantic, clippy::nursery, clippy::style,
+)]
+#![allow(
+    clippy::missing_panics_doc, clippy::missing_errors_doc, clippy::too_many_lines,
+    clippy::derive_partial_eq_without_eq, clippy::equatable_if_let
+)]
 
-use std::{collections::HashMap, time::Instant};
+use std::{fmt::Display, time::Instant};
 
-use thiserror::Error;
+use derive_more::Display;
 
-use crate::{lexing::tokens::{TokenSpan, TokenType}, parsing::ast_structure::{ExprInfo, PatternSpace, TypeKind, Value}, pretty_printing::{format_program_error, join_slice_to_string}, typing::{TypeID, VarID}, vm_compiling::{BytecodeChunk, Compiler}, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast_structure::{ExprId, Pattern}, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_environment::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
 
 pub mod lexing;
-pub mod parsing;
 pub mod typing;
 pub mod pretty_printing;
 pub mod nativelib;
 pub mod vm_compiling;
 pub mod vm_evaluating;
+pub mod parsing;
 
 
 
 
-#[derive(Debug, PartialEq)]
-pub enum CodeResultError {
-    LexerError,
-    ParserError,
-    TypecheckError,
-    RuntimeError,
+pub struct ProgramErrorData {
+    errors: Vec<ProgramError<ErrType>>,
+    warnings: Vec<ProgramError<WarnType>>,
+}
+impl ProgramErrorData {
+    const fn none() -> Self {
+        Self { errors: Vec::new(), warnings: Vec::new() }
+    }
+    const fn new() -> Self {
+        Self { errors: Vec::new(), warnings: Vec::new() }
+    }
+}
+pub struct ProgramSourceData<'a> {
+    source_code: &'a str,
+    line_lookup: &'a [usize]
 }
 
 
-pub struct ProgramError {
-    pub line: usize,
-    pub byte_offset: usize,
-    pub length: usize,
-    pub typ: ErrType,
+pub struct ProgramError<T: Display> {
+    pub span: Span,
+    pub err_type: T,
+
+    // for debugging: where in this source code did the error happen
+    pub compiler_location: &'static std::panic::Location<'static>
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug, Display, Clone)]
+#[display("Error: {_variant}")]
 pub enum ErrType {
-    #[error("Unexpected character '~'. Did you mean '~!' (Bitwise Not)?")]
-    LexerTilde,
-    #[error("Unexpected character '{c}'.")]
+    #[display("Unexpected character: {c}")]
     LexerUnexpectedCharacter { c: char },
-    #[error("Unterminated string.")]
+    #[display("Unterminated string.")]
     LexerUnterminatedString,
-    #[error("Could not parse number '{text}'.")]
-    LexerNumberParseError { text: String },
 
-    #[error("Expected '{expected}' {err_msg}. Found '{found}' instead.")]
-    ParserExpectToken { expected: TokenType, err_msg: String, found: TokenType },
-    #[error("Unexpected expression start.")]
+    #[display("Expected {} {err_msg}. Found '{found}' instead.",
+        slice_to_or_string(&expected.iter().map(|x| format!("'{x}'")).collect::<Vec<String>>(), "or")
+    )]
+    ParserExpectToken { expected: Box<[TokenKind]>, err_msg: String, found: TokenKind },
+    #[display("Unexpected expression start.")]
     ParserUnexpectedExpression,
-    #[error("Expected an expression.")]
-    ParserExpectedAnExpression,
-    #[error("Incorrect '::'-path Syntax.")]
-    ParserUnexpectedPathToken,
-    #[error("Template strings are not allowed in match patterns.")]
-    ParserPatternTemplateString,
-    #[error("Invalid syntax in match pattern.")]
-    ParserPatternInvalidSyntax,
-    #[error("Labels have to be on the same line with the labeled thing.")]
+    #[display("Expected an expression. Found {found}")]
+    ParserExpectedAnExpression { found: TokenKind },
+    #[display("Expected a binding pattern. Found {found}")]
+    ParserExpectedABindingPattern { found: TokenKind },
+    #[display("Labels have to be on the same line with the labeled thing.")]
     ParserLabelsHaveToBeOnSameLine,
+    #[display("Arrow expressions have to be on the same line with the '=>'.")]
+    ParserArrowExprsHaveToBeOnSameLine,
+    #[display("Could not parse number.")]
+    ParserNumberParseError,
 
-    #[error("Expected type: {}, found: {}", expected, found)]
-    TyperMismatch { expected: TypeKind, found: TypeKind },
-    #[error("Name {name} is already defined in this scope.")]
+    #[display("Expected type: {expected}, found: {found}")]
+    TyperMismatch { expected: Type, found: Type },
+    #[display("Name {name} is already defined in this scope.")]
     TyperNameAlreadyDefined { name: String },
-    #[error("Undefined identifier: {name}")]
+    #[display("Undefined identifier: {name}")]
     TyperUndefinedIdentifier { name: String },
-    #[error("Can't infer type {}", typ)]
-    TyperCantInferType { typ: TypeKind },
-    #[error("Type {} must be known at this point.", typ)]
-    TyperTypeMustBeKnownHere { typ: TypeKind },
-    #[error("Pattern doesn't cover all cases. Missing cases: {}", join_slice_to_string(remaining, ", "))]
+    #[display("Can't infer type {}", typ)]
+    TyperCantInferType { typ: Type },
+    #[display("Type {typ} must be known at this point.")]
+    TyperTypeMustBeKnownHere { typ: Type },
+    #[display("Pattern doesn't cover all cases. Missing cases: {}", slice_to_string(remaining, ", "))]
     TyperPatternDoesntCoverAllCases { remaining: Vec<PatternSpace> },
-    #[error("Pattern can't be reached.")]
+    #[display("Pattern can't be reached.")]
     TyperPatternCantBeReached,
-    #[error("Failable pattern in let-expression. Missing cases: {}", join_slice_to_string(remaining, ", "))]
-    TyperFailableLetPattern { remaining: Vec<PatternSpace> },
-    #[error("Failable patterns are not allowed in function parameters.")]
-    TyperFailableFnParamPatterns,
-    #[error("Requires type annotation.")]
+    #[display("Failable pattern in let-expression. Missing cases: {}", slice_to_string(remaining, ", "))]
+    TyperFailableAssignPattern { remaining: Vec<PatternSpace> },
+    #[display("Requires type annotation.")]
     TyperRequiresTypeAnnotation,
-    #[error("Case-expressions that bind variables aren't allowed here.")]
+    #[display("Is-expressions that bind variables aren't allowed here.")]
     TyperInvalidBindingCaseExpr,
-    #[error("break is not allowed outside of loops.")]
+    #[display("break is not allowed outside of loops.")]
     TyperBreakOutsideLoop,
-    #[error("could not find the label #{label}. Current labels in scope: {}", available.join(", "))]
+    #[display("could not find the label #{label}. Current labels in scope: {}", available.join(", "))]
     TyperUndefinedLoopLabel { label: String, available: Vec<String> },
-    #[error("Expected {} arguments, found {}.", expected, found)]
-    TyperTooManyArguments { expected: usize, found: usize },
-    #[error("Can't call a non-function type: {}.", typ)]
-    TyperCantCallNonFnType { typ: TypeKind },
-    #[error("member .{member} does not exist on tuple: {}", tup)]
-    TyperTupleDoesntHaveMember { tup: TypeKind, member: String },
-    #[error("Infix operation {type_a} {op} {type_b} is not defined.")]
-    TyperInvalidOperatorOnType { op: TokenType, type_a: TypeKind, type_b: TypeKind },
-    #[error("{} is not allowed in patterns.", TypeKind::Never)]
+    #[display("Expected {expected} arguments, found {found}.")]
+    TyperWrongNumberOfArguments { expected: usize, found: usize },
+    #[display("Can't call a non-function type: {typ}.")]
+    TyperCantCallNonFnType { typ: Type },
+    #[display("member .{member} does not exist on tuple: {tup}")]
+    TyperTupleDoesntHaveMember { tup: Type, member: String },
+    #[display("Infix operation {type_a} {op} {type_b} is not defined.")]
+    TyperInvalidOperatorOnType { op: TokenKind, type_a: Type, type_b: Type },
+    #[display("{} is not allowed in patterns.", Type::Never)]
     TyperPatternNeverType,
-    #[error("All or-patterns must bind the same variables. This pattern binds {}.", join_slice_to_string(vars, ", "))]
+    #[display("All or-patterns must bind the same variables. This pattern binds {}.", slice_to_string(vars, ", "))]
     TyperOrPatternBindsVarsTooMuch { vars: Vec<String> },
-    #[error("All or-patterns must bind the same variables. This pattern doesn't bind {}.", join_slice_to_string(vars, ", "))]
+    #[display("All or-patterns must bind the same variables. This pattern doesn't bind {}.", slice_to_string(vars, ", "))]
     TyperOrPatternDoesntBindVars { vars: Vec<String> },
-    #[error("Pattern binds {} twice.", join_slice_to_string(vars, ", "))]
+    #[display("Pattern binds {} twice.", slice_to_string(vars, ", "))]
     TyperPatternVarBoundTwice { vars: Vec<String> },
-    #[error("Variable ({var:?}) cannot be re-assigned, because it isn't declared mutable.")]
-    TyperVarIsntDeclaredMut { var: VarID },
-    #[error("Can't use ({var:?}) because it isn't initialized yet.")]
-    TyperCantUseUninitializedVar { var: VarID },
-    #[error("Can't use ({var:?}) because it isn't initialized in every possible branch.")]
-    TyperCantUseMaybeInitializedVar { var: VarID },
-    #[error("Can't use ({var:?}) because it was moved.")]
-    TyperCantUseMovedVar { var: VarID },
-    #[error("Can't dereference non-pointer type: {typ}")]
-    TyperCantDerefNonPointerType { typ: TypeKind },
-    #[error("Can't borrow because already borrowed mutably.")]
-    TyperCantBorrowBecauseAlreadyBorrowedMut,
-    #[error("Can't borrow mutably because already borrowed.")]
-    TyperCantBorrowMutBecauseAlreadyBorrowed,
-    #[error("Can't borrow mutably because already borrowed mutably.")]
-    TyperCantBorrowMutBecauseAlreadyBorrowedMut,
+    #[display("Variable {var} cannot be re-assigned, because it isn't declared mutable.")]
+    TyperVarIsntDeclaredMut { var: TypeVar },
+    #[display("Can't use {var} because it isn't initialized yet.")]
+    TyperCantUseUninitializedVar { var: TypeVar },
+    #[display("Can't use {var} because it isn't initialized in every possible branch.")]
+    TyperCantUseMaybeInitializedVar { var: TypeVar },
+    #[display("Can't use {var} because it was moved.")]
+    TyperCantUseMovedVar { var: TypeVar },
+    #[display("Can't dereference non-pointer type: {typ}")]
+    TyperCantDerefNonPointerType { typ: Type },
+    #[display("Can't dereference immutable pointer: {typ}")]
+    TyperCantDerefNonMutPointerType { typ: Type },
+    #[display("Can't index non array type: {typ}")]
+    TyperCantIndexNonArrType { typ: Type },
+    #[display("Return is only allowed inside functions.")]
+    TyperReturnOutsideFunction,
+    #[display("Can't index heterogenous tuple: {typ}")]
+    TyperCantIndexHeterogenousTuple { typ: Type },
+    #[display("Can't index empty tuple: {typ}")]
+    TyperCantIndexEmptyTuple { typ: Type },
+    #[display("Must be a newtype, found: {typ}")]
+    TyperCantInstantiateNonNewtypeType { typ: Type },
+
+    #[display("Can't resolve const because it depends on itself.")]
+    TyperConstResolvingCycle,
+    #[display("Const items can't be mutable.")]
+    TyperConstCantBeMutable,
+
+    #[display("Expected a meta-type, found: {typ}")]
+    TyperExpectedMetaType { typ: Type },
+    #[display("Expected type is not an enum. Can't infer the enum variant here.")]
+    TyperExpectedTypeIsntAnEnum { typ: Type },
+    #[display("Enum {enum_} doesn't have variant: .{variant}")]
+    TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },
+
+    #[display("Can't is-compare pattern {left:?} with {right:?}")]
+    TyperCantCompareIsPatterns { left: Pattern, right: Pattern },
+
+    // #[display("Can't borrow because already borrowed mutably.")]
+    // TyperCantBorrowBecauseAlreadyBorrowedMut,
+    // #[display("Can't borrow mutably because already borrowed.")]
+    // TyperCantBorrowMutBecauseAlreadyBorrowed,
+    // #[display("Can't borrow mutably because already borrowed mutably.")]
+    // TyperCantBorrowMutBecauseAlreadyBorrowedMut,
+
+    #[display("RuntimeError: {msg}")]
+    RuntimeError { msg: String },
 
 
     // this case should not be used, every error should have its own entry in this enum!
-    #[error("{0}")]
+    #[display("{_0}")]
     DefaultString(String),
 }
 
 
-#[derive(Default)]
-pub struct Program<'a> {
-    source_code: &'a str,
-    // v
-    // Lexing
-    // v
-    lexer_tokens: Vec<TokenSpan>,
-    // v
-    // Parsing
-    // v
-    ast: Option<ExprInfo>,
-    // v
-    // Compiling
-    // v
-    compiled_bytecode: Vec<BytecodeChunk>,
 
-    // this tells me at which byte line 3 starts for example
-    line_starts_lookup: Vec<usize>,
-
-    // extra data the type_checker adds
-    type_lookup: HashMap<TypeID, TypeKind>,
-
-    errors: Vec<ProgramError>,
-}
-impl Program<'_> {
-    pub fn stage_complete(&mut self, stage: &str) -> bool {
-        println!("--- {stage} Stage Complete! ---");
-
-        let print_stages = ["Lexing", "Parsing", /* "Desugar after Parsing", */ "Typechecking", /* "Compiling" */];
-
-        if print_stages.contains(&stage) {
-            println!("{self}\n");
-        }
-
-        if self.errors.is_empty() { true } else {
-            println!("--- {stage} Errors ---\n{}", self.errors.iter().map(|e| format_program_error(e, self) + "\n").collect::<String>());
-            false
-        }
-    }
+#[derive(Debug, Display, Clone)]
+#[display("Warning: {_variant}")]
+pub enum WarnType {
+    #[display("Incosistent spacing around infix {op}")]
+    ParserInconsistentSpacingAroundInfixOp { op: TokenKind }
 }
 
 
@@ -171,53 +182,58 @@ impl Program<'_> {
 
 
 
+pub fn run_code(source_code: &str) -> Result<RuntimeValue, Vec<ErrType>> {
+    let mut err_data = ProgramErrorData::new();
+
+    let (lexer_tokens, line_lookup) = lexing::Lexer::start(&mut err_data, source_code);
+    let source_data = ProgramSourceData { source_code, line_lookup: &line_lookup };
+    stage_complete("Lexer", &slice_to_string(&lexer_tokens, ", "), &err_data, &source_data)?;
+
+    let mut ast = parsing::Parser::start(&mut err_data, source_code, &lexer_tokens);
+    drop(lexer_tokens);
+    stage_complete("Parser", &ast.display_expr(ExprId(0)), &err_data, &source_data)?;
+
+    parsing::desugar::desugar_after_parsing(&mut ast);
+    stage_complete("Desugar", &ast.display_expr(ExprId(0)), &ProgramErrorData::none(), &source_data)?;
+
+    let (typed_ast, mut compiled_functions) = typing::TypeChecker::start(&mut err_data, &ast);
+    stage_complete("Typechecker", &format!("{typed_ast}\ncompiled_functions: {compiled_functions:?}"), &err_data, &source_data)?;
+
+    vm_compiling::VmCompiler::start(&ast, &typed_ast, &mut compiled_functions);
+    stage_complete("VmCompiler", &format!("{compiled_functions:?}"), &ProgramErrorData::none(), &source_data)?;
 
 
-
-pub fn run_code(source_code: &str) -> Result<Value, CodeResultError> {
-    let mut program = Program { source_code, ..Default::default() };
-
-    lexing::tokenize_code(&mut program);
-    if !program.stage_complete("Lexing") {
-        return Err(CodeResultError::LexerError)
-    }
-
-    parsing::parse_program(&mut program);
-    if !program.stage_complete("Parsing") {
-        return Err(CodeResultError::ParserError)
-    }
-
-    parsing::desugar::desugar_after_parsing(&mut program);
-    if !program.stage_complete("Desugar after Parsing") {
-        unreachable!()
-    }
-
-    typing::typecheck_program(&mut program);
-    if !program.stage_complete("Typechecking") {
-        return Err(CodeResultError::TypecheckError)
-    }
-
-    Compiler::compile_program(&mut program);
-    program.stage_complete("Compiling");
-
-
-    println!("\n--- Execution ---");
-    let mut vm = VM::new();
-    vm.load_bytecodes(program.compiled_bytecode);
-    let time_took = Instant::now();
-
-    let result = unsafe { vm.run(cfg!(debug_assertions)) };
+    let start_execution_time = Instant::now();
+    let result = unsafe { VM::start(&mut compiled_functions) };
     match result {
-        Ok(()) => {
-            println!("\n--- Execution Successfull ({:?}) ---", time_took.elapsed());
-            println!("{}", join_slice_to_string(&vm.value_stack, ", "));
+        Ok(r) => {
+            println!("\n--- Execution Successfull ({:?}) ---", start_execution_time.elapsed());
+            println!("{r}");
+            Ok(r)
         }
         Err(err) => {
-            println!("\n--- Runtime Error ({:?}) ---", time_took.elapsed());
+            println!("\n--- Runtime Error ({:?}) ---", start_execution_time.elapsed());
             println!("{err}");
-            return Err(CodeResultError::RuntimeError);
+            Err(vec![err])
         }
     }
+}
 
-    Ok(vm.value_stack[0].clone())
+
+fn stage_complete(stage: &str, msg: &str, err_data: &ProgramErrorData, source_data: &ProgramSourceData) -> Result<(), Vec<ErrType>> {
+    println!("--- {stage} complete! ---");
+    if !msg.is_empty() {
+        println!("{msg}\n");
+    }
+
+    if !err_data.warnings.is_empty() {
+        println!("--- WARNINGS ---\n{}", err_data.warnings.iter().map(|e| format_program_error(e, source_data) + "\n").collect::<String>());
+    }
+
+    if err_data.errors.is_empty() {
+        Ok(())
+    } else {
+        println!("--- Errors ---\n{}", err_data.errors.iter().map(|e| format_program_error(e, source_data) + "\n").collect::<String>());
+        Err(err_data.errors.iter().map(|x| x.err_type.clone()).collect())
+    }
 }

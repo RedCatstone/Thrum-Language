@@ -1,168 +1,286 @@
 use std::collections::HashMap;
 
-use crate::{ErrType, nativelib::{ThrumModule, ThrumType}, parsing::ast_structure::{Span, TypeKind}, typing::{BreakTypeInfo, Typechecker, VarID}};
+use derive_more::Display;
+
+use crate::{
+    ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast_structure::{AstEnumExpression, AstIds, Expr, ExprId},
+    typing::{EnumDefinition, EnumId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
+};
 
 
 
-
-#[derive(Default)]
-pub struct TypecheckScope {
-    pub vars: HashMap<String, VarID>,
-    pub types: HashMap<String, ThrumType>,
-}
-#[derive(Clone, Debug)]
-pub struct TypecheckVar {
-    pub var_id: VarID,
+#[derive(Debug, Display, Clone)]
+#[display("{name}: {typ:?}")]
+pub struct TypeVar {
     pub name: String,
-    pub typ: TypeKind,
-    
-    // Source code location - for error messages
-    pub declared_at: Span,
+    pub typ: TypeId,
+
+    pub declared_at: Span,  // Source code location - for error messages
     pub is_declared_mut: bool,
-    pub is_initialized: InitState,
+    pub is_init: InitState,
+    pub const_val: TypeVarConstVal,
+
     pub is_used: bool,
     pub is_used_mut: bool,
-    pub borrows_count: usize,
+
+    pub immut_borrows_count: usize,
     pub mut_borrows_count: usize,
-    pub is_moved: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeVarConstVal {
+    /// its a runtime variable
+    No,
+    // all others are consts
+    NotYetTypechecked(ExprId),
+    CurrTypechecking,
+    NotYetEvaluated(ExprId),
+    Evaluated(RuntimeValue),
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum InitState {
     No, Yes, Maybe
 }
 
 
-pub type SnapshotInitVars = HashMap<VarID, InitState>;
+pub type SnapshotVarsState = HashMap<TypeVarId, InitState>;
+// pub struct SnapshotVar {
+//     init: InitState,
+//     moved: bool
+// }
 
-impl Typechecker<'_> {
-    // e.g. for a block or function
+
+impl<'ast> TypeChecker<'ast> {
+    // when entering a block a new scope gets added
     pub(super) fn enter_scope(&mut self) {
-        self.scopes.push(TypecheckScope::default());
+        self.var_scopes.push(HashMap::default());
+    }
+    pub(super) fn exit_scope(&mut self) {
+        self.var_scopes.pop().unwrap();
     }
 
-    pub(super) fn exit_scope(&mut self) -> Vec<VarID> {
-        let dropped_scope = self.scopes.pop().unwrap();
-        dropped_scope.vars.into_values().collect()
-        
-    }
-
-    pub(super) fn define_variable(&mut self, name: String, mutable: bool, is_init: bool, typ: TypeKind, span: Span) -> TypecheckVar {
-        if self.name_exists_already(&name) {
-            self.error(ErrType::TyperNameAlreadyDefined { name: name.clone() }, span);
-        }
-
+    pub(super) fn define_variable(&mut self, name: &'ast str, typ: TypeId, mutable: bool, is_init: bool, span: Span, const_val: TypeVarConstVal) -> TypeVarId {
         // make the new var
-        let var_id = VarID(self.next_var_id);
-        self.next_var_id += 1;
-        let new_var = TypecheckVar {
-            var_id,
+        let new_var = TypeVar {
             typ,
-            name: name.clone(),
+            const_val,
+            name: name.to_string(),
             declared_at: span,
             is_declared_mut: mutable,
-            is_initialized: if is_init { InitState::Yes } else { InitState::No },
+            is_init: if is_init { InitState::Yes } else { InitState::No },
             is_used: false,
             is_used_mut: false,
-            borrows_count: 0,
+            immut_borrows_count: 0,
             mut_borrows_count: 0,
-            is_moved: false,
         };
-
-        // and insert into both maps.
-        self.var_lookup.insert(var_id, new_var.clone());
-        self.scopes
-            .last_mut().expect("there should always be a scope here")
-            .vars.insert(name, var_id);
         
-        new_var
+        let var_id = TypeVarId(AstIds::try_from(self.typed_ast.vars.len()).unwrap());
+        self.typed_ast.vars.push(new_var);
+        self.var_scopes.last_mut().unwrap().insert(name, var_id);
+        
+        var_id
     }
 
-    pub(super) fn lookup_variable(&mut self, name: &str, var_id_to_fill: &mut Option<VarID>) -> Option<&mut TypecheckVar> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(id) = scope.vars.get_mut(name) {
-                *var_id_to_fill = Some(*id);
-                let var = self.var_lookup.get_mut(id).unwrap();
-                return Some(var);
+    pub(super) fn lookup_variable(&mut self, name: &str) -> Option<TypeVarId> {
+        for i in (0..self.var_scopes.len()).rev() {
+            if let Some(&variable_id) = self.var_scopes[i].get(name) {
+
+                // it needs to ensure that the var was typechecked and compiled
+                let var = self.typed_ast.get_var_mut(variable_id);
+                match var.const_val {
+                    TypeVarConstVal::NotYetTypechecked(expr) => {
+                        // and resolve it!
+                        self.check_evaluate_and_bind_const(expr);
+                    }
+                    TypeVarConstVal::CurrTypechecking => {
+                        let span = var.declared_at;
+                        self.error(ErrType::TyperConstResolvingCycle, span);
+                    }
+                    TypeVarConstVal::NotYetEvaluated(expr) => {
+                        self.evaluate_and_bind_const(expr);
+                    }
+                    TypeVarConstVal::No
+                    | TypeVarConstVal::Evaluated(_) =>  {/* all good, do nothing */}
+                }
+                return Some(variable_id)
             }
         }
         None
     }
 
-    pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, span: Span, var_id_to_fill: &mut Option<VarID>) -> TypeKind {
-        if let Some(var) = self.lookup_variable(name, var_id_to_fill) {
-            let mut errors = Vec::new();
 
-            if mutable {
-                if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
-                if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
-                var.mut_borrows_count += 1;
-            } else {
-                if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
-                var.borrows_count += 1;
+    /// this function actually evaluates a const-expr
+    /// in the typechecker itself this is used in:
+    /// `const x = ...`
+    /// `let x: ... = 5`  (probably shouldn't here tho)
+    pub(super) fn evaluate_expr(&mut self, expr: ExprId) -> Option<RuntimeValue> {
+        // if there were any errors, don't evaluate consts anymore.
+        // this fixes compiler crashes, but its definitely not the best
+        if !self.error_data.errors.is_empty() {
+            return None
+        }
+
+        match self.ast.get_expr(expr) {
+            // the typechecker needs to handle NewType because the
+            // vm can't add types. so special case this.
+            Expr::Newtype { expr } => {
+                self.evaluate_expr(*expr).map(|val| {
+                    let RuntimeValue::Type(id) = val else {
+                        unreachable!("type mismatch at runtime??!")
+                    };
+                    let new_type = self.add_type(Type::NewType(id));
+                    RuntimeValue::Type(new_type)
+                })
             }
-            let var_typ = TypeKind::Pointer {
-                mutable,
-                inner: Box::new(var.typ.clone()),
-                borrows_var: *var_id_to_fill
-            };            
-            for e in errors { self.error(e, span); }
-            var_typ
-        } else {
-            self.error(ErrType::TyperUndefinedIdentifier { name: name.to_string() }, span)
+
+            // also needs to handle EnumDefinitions
+            Expr::EnumDefinition { variants } => {
+                let variants = variants.iter().map(|AstEnumExpression { variant_name, attached_tuple }| {
+                    let attached_tuple_type = attached_tuple.map_or_else(
+                        || TypeId::VOID,
+                        |tup| self.check_annotation_meta_type_id(tup)
+                    );
+                    (variant_name.clone(), attached_tuple_type)
+                }).collect();
+                
+                // add a new defined enum type, which stores all enum .Variants and their attached data type 
+                let enum_id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
+                self.typed_ast.enum_defs.push(EnumDefinition { variants });
+                let enum_type = self.add_type(Type::Enum(enum_id));
+                Some(RuntimeValue::Type(enum_type))
+            }
+
+            _ => {
+                match VmCompiler::compile_and_run_comptime_expr(self.ast, &self.typed_ast, &mut self.compiled_functions, expr) {
+                    Ok(val) => Some(val),
+                    Err(e) => {
+                        self.error(e, self.ast.get_expr_span(expr));
+                        None
+                    }
+                }
+            }
         }
     }
 
 
-    pub(super) fn update_variable(&mut self, var_id: Option<VarID>, span: Span) {
-        let var = self.var_lookup.get_mut(&var_id.unwrap()).unwrap();
+
+    pub(super) fn evaluate_and_bind_const(&mut self, expr: ExprId) {
+        match self.ast.get_expr(expr) {
+            Expr::Const { pattern, value } => {
+                match self.ast.get_expr(*value) {
+                    Expr::Closure { closure, requires_type_annotation: _ } => {
+                        // closures can have cyclic dependencies, so:
+                        // 1. bind the RuntimeValue to the pattern
+                        let closure_val = RuntimeValue::Fn {
+                            slot: self.typed_ast.resolved_closure_fn_id[value]
+                        };
+                        self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::Evaluated(closure_val));
+        
+                        // 2. typecheck the body
+                        let fn_type = self.typed_ast.get_expr_type(*value);
+                        self.check_fn_expression(closure, fn_type);
+                    }
+
+                    // all other expressions can just be evaluated as normal
+                    _ => {
+                        // now distribute the new runtime value across the pattern (if it didn't error)
+                        if let Some(val) = self.evaluate_expr(*value) {
+                            self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::Evaluated(val));
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("not a const expr")
+        }
+    }
+
+
+    pub(super) fn check_evaluate_and_bind_const(&mut self, expr: ExprId) {
+        match self.ast.get_expr(expr) {
+            Expr::Const { pattern, value } => {
+                // mark the pattern as curr typechecking, so it can detect cycles
+                self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::CurrTypechecking);
+
+                // typecheck it:
+                // remove these while typechecking consts so it literally can't break/return
+                let prev_fn = self.curr_function_return_type.take();
+                let prev_labels = std::mem::take(&mut self.curr_label_infos);
+
+                self.check_assign_pattern_and_value(
+                    *pattern, Some(*value), &mut false, true, false,
+                    Some(TypeVarConstVal::NotYetEvaluated(expr))
+                );
+
+                self.curr_function_return_type = prev_fn;
+                self.curr_label_infos = prev_labels;
+
+                // evaluate and bind it:
+                self.evaluate_and_bind_const(expr);
+            }
+            _ => unreachable!("not a const expr")
+        }
+    }
+
+    pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, expr: ExprId) -> TypeId {
+        if let Some(var_id) = self.lookup_variable(name) {
+            self.typed_ast.resolved_expr_var.insert(expr, var_id);
+            let var = self.typed_ast.get_var_mut(var_id);
+            if mutable {
+                // if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
+                // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
+                var.mut_borrows_count += 1;
+            } else {
+                // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
+                var.immut_borrows_count += 1;
+            }
+            let inner = var.typ;
+            self.add_type(Type::Pointer { mutable, inner, borrows_var: var_id })
+        } else {
+            let expr_span = self.ast.get_expr_span(expr);
+            self.error(ErrType::TyperUndefinedIdentifier { name: name.to_string() }, expr_span)
+        }
+    }
+
+
+    pub(super) fn update_variable(&mut self, var_id: TypeVarId, span: Span) {
+        let var = self.typed_ast.get_var_mut(var_id);
         let mut errors = Vec::new();
         
         var.is_used = true;
         var.is_used_mut = true;
-        var.is_moved = false;  // if variable was moved, doing `a = ...` unmoves it again.
 
-        match var.is_initialized {
-            InitState::No => var.is_initialized = InitState::Yes,
-            InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.var_id }),
-            InitState::Yes => if !var.is_declared_mut { errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.var_id }); }
+        if !var.is_declared_mut {
+            match var.is_init {
+                InitState::No => { /* perfectly fine, do nothing */ },
+                InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+                InitState::Yes => errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.clone() })
+            }
         }
+        var.is_init = InitState::Yes;  // if variable was moved, doing `a = ...` unmoves it again.
         
         for e in errors { self.error(e, span); }
     }
 
-    pub(super) fn move_variable(&mut self, var_id: &Option<VarID>, span: Span) {
-        let var = self.var_lookup.get_mut(&var_id.unwrap()).unwrap();
+    pub(super) fn clone_variable(&mut self, var_id: TypeVarId, span: Span) {
+        let var = self.typed_ast.get_var_mut(var_id);
         let mut errors = Vec::new();
 
-        if var.is_moved {
-            errors.push(ErrType::TyperCantUseMovedVar { var: var.var_id });
+        match var.is_init {
+            InitState::No => errors.push(ErrType::TyperCantUseUninitializedVar { var: var.clone() }),
+            InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+            InitState::Yes => { /* perfectly fine, do nothing */ },
         }
-        var.is_moved = true;
 
         for e in errors { self.error(e, span); }
     }
 
-
-
-    pub(super) fn define_type(&mut self, name: String, typ: ThrumType, span: Span) {
-        if self.name_exists_already(&name) {
-            self.error(ErrType::TyperNameAlreadyDefined { name: name.clone() }, span);
-        }
-        self.scopes.last_mut().unwrap().types.insert(name, typ);
-    }
-    pub(super) fn lookup_type(&mut self, name: &str) -> Option<&mut ThrumType> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(t) = scope.types.get_mut(name) {
-                return Some(t);
-            }
-        }
-        None
+    pub(super) fn move_variable(&mut self, var_id: TypeVarId, span: Span) {
+        self.clone_variable(var_id, span);
+        let var = self.typed_ast.get_var_mut(var_id);
+        var.is_init = InitState::No;
     }
 
-    pub(super) fn name_exists_already(&mut self, name: &str) -> bool {
-        self.lookup_variable(name, &mut None).is_some() || self.lookup_type(name).is_some()
-    }
 
 
 
@@ -170,97 +288,94 @@ impl Typechecker<'_> {
     // logic for "definite assignment analysis", for example:
     // let x
     // if false { x = 5 }
-    // println!("{x}")  // should Error, because x was not initialized in all branches of the if statement
-    fn snapshot_vars_init_state(&self, only_uninitialized: bool) -> SnapshotInitVars {
+    // println!("{x}")  //-> Error, because x is not initialized in all branches of the if statement
+    pub(super) fn snapshot_vars_state(&self) -> SnapshotVarsState {
         // iterate over all currently in scope variables
         let mut vars_state = HashMap::new();
-        for scope in &self.scopes {
-            for var_id in scope.vars.values() {
-                let var = self.var_lookup.get(var_id).unwrap();
-                if !only_uninitialized || var.is_initialized == InitState::No {
-                    vars_state.insert(*var_id, var.is_initialized);
-                }
+        for scope in &self.var_scopes {
+            for &var_id in scope.values() {
+                let var_init = self.typed_ast.get_var(var_id).is_init;
+                vars_state.insert(var_id, var_init);
             }
         }
         vars_state
     }
-
-    pub(super) fn snapshot_first_vars_init_state(&self) -> SnapshotInitVars {
-        self.snapshot_vars_init_state(true)
-    }
-    pub(super) fn snapshot_branch_vars_init_state(&self, branch_was_never: bool) -> Option<SnapshotInitVars> {
+    pub(super) fn snapshot_branch_vars_state(&self, branch_was_never: bool) -> Option<SnapshotVarsState> {
         // if the branch has type Never it should not be included in the later merge
-        if branch_was_never {
-            None
-        } else {
-            Some(self.snapshot_vars_init_state(false))
+        (!branch_was_never).then(|| self.snapshot_vars_state())
+    }
+
+    pub(super) fn restore_vars_state(&mut self, snap: &SnapshotVarsState) {
+        for (&var_id, is_init) in snap {
+            self.typed_ast.get_var_mut(var_id).is_init = *is_init;
         }
     }
 
-    pub(super) fn restore_vars_init_state(&mut self, snap: &SnapshotInitVars) {
-        for (var_id, is_init) in snap {
-            self.var_lookup.get_mut(var_id).unwrap().is_initialized = *is_init;
-        }
-    }
-
-    pub(super) fn merge_vars_init_states(&mut self, original_snap: SnapshotInitVars, branch_snaps: &[Option<SnapshotInitVars>]) {
-        // filter the None's out (the branches that had Never type)
-        let actual_branch_snaps = branch_snaps.iter().filter_map(|x| x.as_ref()).collect::<Vec<_>>();
-
-        for (var_id, _old_is_init) in original_snap {
+    pub(super) fn merge_vars_states(&mut self, original_snap: SnapshotVarsState, branch_snaps: &[Option<SnapshotVarsState>]) {
+        for original_snap_var_id in original_snap.into_keys() {
             let mut any_branch_init = false;
             let mut all_branches_init = true;
+            
+            // filter the None's out (the branches that had Never type)
+            for branch_snap in branch_snaps.iter().filter_map(|x| x.as_ref()) {
+                let branch_state = branch_snap.get(&original_snap_var_id).unwrap();
 
-            for branch_snap in &actual_branch_snaps {
-                let branch_state = branch_snap.get(&var_id).unwrap();
-                match branch_state {
-                    InitState::Yes => {
-                        any_branch_init = true; 
-                    }
-                    InitState::Maybe => {
-                        any_branch_init = true;
-                        all_branches_init = false; // "Maybe" kills definite initialization
-                    }
-                    InitState::No => {
-                        all_branches_init = false; // "No" kills definite initialization
-                    }
-                }                
+                if let InitState::Yes | InitState::Maybe = branch_state { any_branch_init = true; }
+                if let InitState::Maybe | InitState::No = branch_state { all_branches_init = false; }
             }
 
-            let final_state = if all_branches_init {
-                // Every single branch initialized this var -> var is initialized.
-                InitState::Yes
-            } else if any_branch_init {
-                // Some branches did, some didn't (or were Maybe) -> uncertain...
-                InitState::Maybe
-            } else {
-                // No branch touched it -> uninitialized
-                InitState::No
-            };
-            self.var_lookup.get_mut(&var_id).unwrap().is_initialized = final_state;
+            self.typed_ast.get_var_mut(original_snap_var_id).is_init = match (all_branches_init, any_branch_init) {
+                (true, true) => InitState::Yes,       // every single branch initialized this var -> var is initialized.
+                (false, true) | (true, false) => InitState::Maybe, // some branches did, some didn't -> uncertain...
+                (false, false) => InitState::No,   // no branch touched it -> uninitialized
+            }
         }
     }
-    
-    pub(super) fn snap_label_before(&mut self, label: &mut Option<String>) -> Option<SnapshotInitVars> {
-        if let Some(label) = label {
-            let block_break_type = self.new_inference_type();
-            self.current_break_types.push(BreakTypeInfo {
-                label: label.clone(),
-                typ: block_break_type,
-                snapshots_from_breaks: Vec::new(),
-            });
-            Some(self.snapshot_first_vars_init_state())
-        } else {
+
+
+
+    pub(super) fn before_check_label_logic(&mut self, expr: ExprId, label: &'ast str) -> SnapshotVarsState {
+        let typ = self.new_infer_type();
+        self.curr_label_infos.push(LabelInfo { label, expr, typ, break_snapshots: Vec::new() });
+        self.snapshot_vars_state()
+    }
+
+
+
+    pub(super) fn find_loop_label(&mut self, label: Option<&str>, span: Span) -> Option<&mut LabelInfo<'ast>> {
+        if self.curr_label_infos.is_empty() {
+            self.error(ErrType::TyperBreakOutsideLoop, span);
             None
         }
+        else if let Some(target_label) = label {
+            // rposition to search from the back (innermost loop out).
+            let found_index = self.curr_label_infos.iter()
+                .rposition(|info| info.label == target_label);
+
+            if let Some(idx) = found_index {
+                // found the label, return the break type
+                Some(&mut self.curr_label_infos[idx])
+            } else {
+                // couldn't find the label -> report error
+                self.error(ErrType::TyperUndefinedLoopLabel {
+                    label: target_label.to_string(),
+                    available: self.curr_label_infos.iter().map(|info| info.label.to_string()).collect()
+                }, span);
+
+                None
+            }
+        } else {
+            // Break without label -> grab the last one
+            Some(self.curr_label_infos.last_mut().unwrap())
+        }
     }
 
 
-
-    pub(super) fn load_prelude_from_lib(&mut self, module: &ThrumModule) {
+    pub(super) fn load_prelude_from_lib(&mut self, module: &'ast ThrumModule) {
         for (name, value) in &module.values {
             if value.is_prelude {
-                self.define_variable(name.clone(), false, true, value.typ.clone(), Span::invalid());
+                let id = self.add_type(value.typ.clone());
+                self.define_variable(name, id, false, true, Span::invalid(), TypeVarConstVal::Evaluated(value.val.clone()));
             }
         }
         // Recursion

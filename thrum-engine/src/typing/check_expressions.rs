@@ -1,330 +1,371 @@
-use std::collections::HashMap;
-
 use crate::{
-    ErrType,
-    lexing::tokens::TokenType,
-    nativelib::ThrumType,
-    parsing::ast_structure::{DefinedTypeKind, Expr, ExprInfo, MatchPatternInfo, Span, TupleElement, TupleType, TypeKind, Value}, typing::{BreakTypeInfo, Typechecker, check_patterns::CheckPatternMode}
+    ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
+    parsing::ast_structure::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
+    typing::{EnumId, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::{CheckPatternVars, PatternSpace},
+    type_environment::TypeVarConstVal}
 };
 
 
 
 
 #[derive(Default, Clone)]
-pub struct ExprContext {
-    expected_type: Option<TypeKind>,
-    allow_conditional_bindings: bool,
+pub struct CheckExprCtx {
+    expected_type: Option<TypeId>,
+
+    // e.g. `if option is let .Some(x) { ... }`
+    allow_is_expr_bindings: bool,
+
+    // e.g. `x = 4` -> `mut x = 4`
+    // or `x^` -> `mut x^`
+    // this setting starts from move expressions and place-pointer patterns
+    // and sifts through array[access], member.access
+    auto_borrow_mut: bool,
+
+    // (1, x) - tuples are mode Once, x is gonna be autoderefed
+    // x()    - function calls are fully derefed, so even if x is a pointer to a pointer to a pointer to a pointer to a pointer to a pointer it will still work
+    deref_mode: AutoDerefMode,
 }
-impl ExprContext {
-    pub fn expect(&self, typ: TypeKind) -> Self {
-        Self {
-            expected_type: Some(typ),
-            ..self.clone()
-        }
+#[derive(Default, Clone)]
+pub enum AutoDerefMode {
+    #[default]
+    None, Once, Fully, LeaveOnePointer
+}
+impl CheckExprCtx {
+    pub fn expect(&self, typ: TypeId) -> Self {
+        Self { expected_type: Some(typ), ..self.clone() }
+    }
+    pub fn maybe_expect(&self, typ: Option<TypeId>) -> Self {
+        Self { expected_type: typ, ..self.clone() }
     }
     pub fn allow_conditional_bindings(&self) -> Self {
-        Self {
-            allow_conditional_bindings: true,
-            ..self.clone()
-        }
+        Self { allow_is_expr_bindings: true, ..self.clone() }
+    }
+    pub fn auto_borrow_mut(&self) -> Self {
+        Self { auto_borrow_mut: true, ..self.clone() }
+    }
+    pub fn auto_deref(&self, mode: AutoDerefMode) -> Self {
+        Self { deref_mode: mode, ..self.clone() }
     }
 }
 
 
 
-impl Typechecker<'_> {
-    pub(super) fn check_expression(&mut self, expr: &mut ExprInfo, old_ctx: &ExprContext) {
-        let mut ctx = ExprContext::default();
-        let mut is_never = false;
+impl TypeChecker<'_> {
+    pub(super) fn check_expression(&mut self, check_expr: ExprId, is_never: &mut bool, old_ctx: &CheckExprCtx) -> TypeId {
+        let mut ctx = CheckExprCtx::default();
 
-        let inferred_type = match &mut expr.expression {
-            Expr::Literal(val) => self.check_literal(val),
+        let span = self.ast.get_expr_span(check_expr);
+        let expr_expr = self.ast.get_expr(check_expr);
 
-            Expr::IdentifierRef { name, mutable, var_id } => {
-                self.make_variable_ref(name, *mutable, expr.span, var_id)
+        let mut inferred_type = match expr_expr {
+            Expr::Literal { val } => self.check_literal(val),
+
+            Expr::IdentifierRef { name, mutable } => {
+                let mutable = *mutable || old_ctx.auto_borrow_mut;
+                self.make_variable_ref(name, mutable, check_expr)
             }
 
-            Expr::TemplateString(parts) => {
-                for part in parts {
-                    self.check_expression(part, &ctx);
-                    if self.prune(&part.typ, None).is_never() { is_never = true }
+            Expr::TemplateString { elems } => {
+                for &elem in elems {
+                    self.check_expression(elem, is_never, &ctx);
                 }
-                TypeKind::Str
+                TypeId::STR
             }
 
-            Expr::Tuple(elements) => {
-                let mut tuple_types = Vec::new();
-
-                for TupleElement { label, expr } in elements {
-                    self.check_expression(expr, &ctx);
-                    self.insert_deref_if_pointer(expr);
-                    if self.prune(&expr.typ, None).is_never() { is_never = true }
-                    tuple_types.push(TupleType { label: label.clone(), typ: expr.typ.clone() });
-                }
-
-                TypeKind::Tup(tuple_types)
+            Expr::Tuple { elems } => {
+                let tuple_types = elems.iter()
+                    .map(|AstTupleElement { label, expr }| TypeTuple {
+                        label: label.clone(),
+                        typ: self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Once))
+                    })
+                    .collect();
+                    
+                self.add_type(Type::Tup(tuple_types))
             }
 
-            Expr::Array(elements) => {
-                let mut arr_types = Vec::new();
+            Expr::TupleArr { elem, length } => {
+                let elem_type = self.check_expression(*elem, is_never, &ctx.auto_deref(AutoDerefMode::Once));
+                self.check_expression(*length, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM));
 
-                for element in elements {
-                    self.check_expression(element, &ctx);
-                    arr_types.push(element.typ.clone());
-                }
+                let const_length = match self.ast.get_expr(*length) {
+                    Expr::Literal { val: AstValue::Num(num) } => *num as usize,
+                    _ => 0
+                };
 
-                let arr_type = self.unify_type_vec(&arr_types, expr.span);
-                if arr_type.is_never() { is_never = true }
-                TypeKind::Arr(Box::new(arr_type))
+                self.add_type(Type::TupArr(elem_type, const_length))
             }
 
             Expr::Index { left, index } => {
-                let arr_element_type = self.new_inference_type();
-                self.check_expression(left, &ctx.expect(TypeKind::Arr(Box::new(arr_element_type.clone()))));
-                self.check_expression(index, &ctx.expect(TypeKind::Num));
-                if self.prune(&left.typ, None).is_never() { is_never = true }
-                if self.prune(&index.typ, None).is_never() { is_never = true }
-                arr_element_type
+                let arr_ctx = if old_ctx.auto_borrow_mut { &ctx.auto_borrow_mut() } else { &ctx };
+                let left_pointer_type = self.check_expression(*left, is_never, &arr_ctx.auto_deref(AutoDerefMode::LeaveOnePointer));
+
+                let left_span = Some(self.ast.get_expr_span(*left));
+                match self.prune_type_once(left_pointer_type, left_span) {
+                    Type::Pointer { inner, mutable, borrows_var } => {
+
+                        let arr_inner_type = match self.prune_type_once(inner, left_span) {
+                            Type::TupArr(inner, _) => inner,
+                            Type::Tup(elems) => {
+                                if elems.is_empty() {
+                                    self.error(ErrType::TyperCantIndexEmptyTuple { typ: Type::Tup(elems) }, span)
+                                } else {
+                                    // tuple indexing is allowed if all types are equal
+                                    let first_typ = elems[0].typ;
+                                    if elems.iter().all(|e| e.typ == first_typ) {
+                                        first_typ
+                                    } else {
+                                        self.error(ErrType::TyperCantIndexHeterogenousTuple { typ: Type::Tup(elems) }, span)
+                                    }
+                                }
+                            }
+                            Type::Error => TypeId::ERROR,
+                            typ => self.error(ErrType::TyperCantIndexNonArrType { typ }, span)
+                        };
+        
+                        self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
+        
+                        self.add_type(Type::Pointer { inner: arr_inner_type, mutable, borrows_var })
+                    },
+                    _ => TypeId::ERROR
+                }
             }
 
-            Expr::Block { exprs, label, drops_vars } => {
+            Expr::Block { exprs, label } => {
                 self.enter_scope();
 
-                // 1. define FnDefinitions
-                for expr in exprs.iter_mut() {
-                    if let Expr::FnDefinition { name, params, return_type_annotation, var_id, .. } = &mut expr.expression {
-                        let fn_typ = self.get_fn_type(params, &mut return_type_annotation.typ);
-                        let var = self.define_variable(name.clone(), false, true, fn_typ, expr.span);
-                        *var_id = Some(var.var_id);
-                    }
-                }
+                // this collects type information for enums, fndefinitions, and more probably
+                self.hoisting_pass(exprs);
 
                 // normal pass
-                let mut is_never = false;
-                let block_drop_type = if let Some((last_expr, other_exprs)) = exprs.split_last_mut() {
+                let last_type = if let Some((&last_expr, other_exprs)) = exprs.split_last() {
                     // label logic
-                    let snap_before_block = self.snap_label_before(label);
+                    let snap_before_block = label.as_ref().map(|l| self.before_check_label_logic(check_expr, l));
 
                     // actual expression compiling
-                    for expr in other_exprs {
-                        self.check_expression(expr, &ctx);
-                        if expr.typ.is_never() { is_never = true }
+                    for &expr in other_exprs {
+                        self.check_expression(expr, is_never, &ctx);
                     }
-                    // conditional bindings are allowed in the last expression of a block, because the current scope is gonna end after this expression anyways.
-                    // this isn't reeeaally needed, but it definitely can't hurt to allow.
-                    // let x = { case ?x = ... and x > 3 }
-                    self.check_expression(last_expr, &ctx.allow_conditional_bindings());
-                    if last_expr.typ.is_never() { is_never = true }
+
+                    let last_type = self.check_expression(last_expr, is_never, &ctx.allow_conditional_bindings());
 
                     // label logic again
                     if let Some(label) = label {
-                        let mut break_type_info = self.current_break_types.pop().unwrap();
-                        assert_eq!(break_type_info.label, *label);
-                        self.unify_types(&last_expr.typ, &break_type_info.typ, last_expr.span);
+                        let mut label_info = self.curr_label_infos.pop().unwrap();
+                        assert_eq!(label_info.label, *label);
+                        self.unify_types(last_type, label_info.typ, self.ast.get_expr_span(last_expr));
 
                         // 1 more snapshot after the full block executed
-                        break_type_info.snapshots_from_breaks.push(self.snapshot_branch_vars_init_state(is_never));
-                        self.merge_vars_init_states(snap_before_block.unwrap(), &break_type_info.snapshots_from_breaks);
+                        label_info.break_snapshots.push(self.snapshot_branch_vars_state(*is_never));
+                        self.merge_vars_states(snap_before_block.unwrap(), &label_info.break_snapshots);
                     }
 
-                    if is_never { TypeKind::Never } else { last_expr.typ.clone() }
+                    last_type
                 } else {
-                    // Empty block returns Void
-                    TypeKind::Void
+                    // Empty block drops Void
+                    TypeId::VOID
                 };
-
-                *drops_vars = self.exit_scope();
-                block_drop_type
+                self.exit_scope();
+                last_type
             },
 
-            Expr::Prefix { operator, right } => {
-                match operator {
-                    TokenType::Exclamation => {
-                        self.check_expression(right, &ctx.expect(TypeKind::Bool));
-                        right.typ.clone()
-                    }
-                    TokenType::Minus => {
-                        self.check_expression(right, &ctx.expect(TypeKind::Num));
-                        right.typ.clone()
-                    }
-                    _ => unreachable!("Unsupported prefix operator: {}", operator)
+            Expr::Prefix { op, right } => {
+                match op {
+                    TokenKind::Exclamation =>         self.check_expression(*right, is_never, &ctx.expect(TypeId::BOOL)),
+                    TokenKind::Op(AssignOp::Minus) => self.check_expression(*right, is_never, &ctx.expect(TypeId::NUM)),
+                    _ => unreachable!("Unsupported prefix op: {op} (Parser Issue)")
                 }
             }
 
-            Expr::Infix { operator, left, right } => {
-                if let TokenType::Ampersand = operator.token && old_ctx.allow_conditional_bindings {
-                    ctx.allow_conditional_bindings = true;
+            Expr::Infix { op, op_span, left, right } => {
+                if let TokenKind::And = op && old_ctx.allow_is_expr_bindings {
+                    ctx = ctx.allow_conditional_bindings();
                 }
-                self.check_expression(left, &ctx);
-                self.check_expression(right, &ctx);
-                self.fully_deref_expression(left);
-                self.fully_deref_expression(right);
-                self.check_infix(&operator.token, operator.span, &left.typ, &right.typ)
+                let left_type = self.check_expression(*left, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+
+                // because of short-circuiting right is not always evaluated, meaning that a Never-expr might not trigger
+                let right_is_never = &mut false;
+                let right_type = self.check_expression(*right, right_is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                if *right_is_never && !matches!(op, TokenKind::And | TokenKind::Or) { *is_never = true; }
+
+                self.check_infix(*op, *op_span, left_type, right_type)
             }
 
             Expr::If { condition, then, alt } => {
-                let ctx: &ExprContext = &ctx;
-                self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
+                self.check_expression(*condition, is_never, &ctx.expect(TypeId::BOOL).allow_conditional_bindings());
 
-                let snap = self.snapshot_first_vars_init_state();
+                let snap = self.snapshot_vars_state();
 
-                self.check_expression(then, ctx);
-                let then_snap = self.snapshot_branch_vars_init_state(then.typ.is_never());
-                self.restore_vars_init_state(&snap);
+                let mut then_is_never = false;
+                let then_typ = self.check_expression(*then, &mut then_is_never, &ctx);
+                let then_snap = self.snapshot_branch_vars_state(then_is_never);
+                self.restore_vars_state(&snap);
+                
+                let mut alt_is_never = false;
+                let alt_ctx = if then_is_never { ctx.clone() } else { ctx.expect(then_typ) };
+                let alt_typ = self.check_expression(*alt, &mut alt_is_never, &alt_ctx);
+                let alt_snap = self.snapshot_branch_vars_state(alt_is_never);
+                self.merge_vars_states(snap, &[then_snap, alt_snap]);
 
-                self.check_expression(alt, &ctx.expect(then.typ.clone()));
-                let alt_snap = self.snapshot_branch_vars_init_state(alt.typ.is_never());
-                self.restore_vars_init_state(&snap);
-
-                self.merge_vars_init_states(snap, &[then_snap, alt_snap]);
-
-                then.typ.clone()
+                // determine the final type:
+                match (then_is_never, alt_is_never) {
+                    (true, true) => TypeId::NEVER,
+                    (true, false) => alt_typ,
+                    (false, true) => then_typ,
+                    (false, false) => {
+                        self.unify_types(then_typ, alt_typ, span);
+                        then_typ
+                    }
+                }
             },
 
             Expr::Ensure { condition, alt, then } => {
-                self.check_expression(condition, &ctx.expect(TypeKind::Bool).allow_conditional_bindings());
+                self.check_expression(*condition, is_never, &ctx.expect(TypeId::BOOL).allow_conditional_bindings());
 
-                let snap = self.snapshot_first_vars_init_state();
+                let snap = self.snapshot_vars_state();
 
-                self.check_expression(alt, &ctx);
-                if !alt.typ.is_never() {
-                    self.type_mismatch(TypeKind::Never, alt.typ.clone(), alt.span);
+                let alt_type = self.check_expression(*alt, &mut false, &ctx);
+                if alt_type != TypeId::NEVER {
+                    let pruned_alt_type = self.prune_type_once(alt_type, None);
+                    self.type_mismatch(Type::Never, pruned_alt_type, self.ast.get_expr_span(*alt));
                 }
 
-                // since alt.typ is supposed to always be TypeKind::Never only the then branch snapshot matters
-                self.restore_vars_init_state(&snap);
+                // since alt.typ is always be Type::Never only the then branch snapshot matters
+                self.restore_vars_state(&snap);
 
-                self.check_expression(then, &ctx);
-                then.typ.clone()
+                self.check_expression(*then, is_never, &ctx)
             }
 
             Expr::Match { match_value, arms } => {
-                self.check_expression(match_value, &ctx);
+                let match_val_type = self.check_expression(*match_value, is_never, &ctx);
 
-                let original_snap = self.snapshot_first_vars_init_state();
+                let original_snap = self.snapshot_vars_state();
                 let mut arm_snapshots = Vec::new();
 
-                let arm_drop_type = self.new_inference_type();
+                let mut arm_expr_types = Vec::new();
                 let mut covered_cases = Vec::new();
+
+                let mut all_arms_never = true;
 
                 for arm in arms {
                     self.enter_scope();
 
-                    self.check_match_pattern(&mut arm.pattern, &match_value.typ, CheckPatternMode::Set, &mut None);
-                    covered_cases.extend(std::mem::take(&mut arm.pattern.covered_cases));
-
-                    self.check_expression(&mut arm.body, &ctx.expect(arm_drop_type.clone()));
-
-                    arm_snapshots.push(self.snapshot_branch_vars_init_state(arm.body.typ.is_never()));
-
-                    // ignoring dropped vars here because patterns store what vars they define themselves.
+                    let (_, arm_covered) = self.check_match_pattern(
+                        arm.pattern, Some(match_val_type), true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
+                    );
+                    covered_cases.extend(arm_covered);
+                    
+                    let mut arm_never = false;
+                    arm_expr_types.push(self.check_expression(arm.body, &mut arm_never, &ctx));
+                    if !arm_never { all_arms_never = false }
                     self.exit_scope();
+                    
+                    arm_snapshots.push(self.snapshot_branch_vars_state(arm_never));
 
-                    self.restore_vars_init_state(&original_snap);
+                    self.restore_vars_state(&original_snap);
                 }
 
-                let missing_cases = self.convert_to_missing_cases(&covered_cases);
+                if all_arms_never { *is_never = true; }
+
+                let missing_cases = PatternSpace::covered_to_missing_cases(&covered_cases);
                 if !missing_cases.is_empty() {
-                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases { remaining: missing_cases }, expr.span);
+                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases { remaining: missing_cases }, span);
                 }
 
-                self.merge_vars_init_states(original_snap, &arm_snapshots);
-                arm_drop_type
+                self.merge_vars_states(original_snap, &arm_snapshots);
+                self.unify_type_vec(&arm_expr_types, span)
             },
 
             Expr::Loop { body, label } => {
-                let loop_break_type = self.new_inference_type();
+                let loop_break_type = self.new_infer_type();
 
-                let snap_before_loop = self.snap_label_before(&mut Some(label.clone()));
+                let snap_before_loop = self.before_check_label_logic(check_expr, label);
 
                 // check expression
-                self.check_expression(body, &ctx.expect(TypeKind::Void));
+                self.check_expression(*body, &mut false, &ctx.expect(TypeId::VOID));
 
                 // label logic again
-                let break_type_info = self.current_break_types.pop().unwrap();
-                assert_eq!(break_type_info.label, *label);
-                if loop_break_type == self.prune(&loop_break_type, None) {
-                    // loop doesn't have any breaks -> infinite loop -> TypeKind::Never
-                    self.unify_types(&loop_break_type, &TypeKind::Never, expr.span);
+                let label_info = self.curr_label_infos.pop().unwrap();
+                assert_eq!(label_info.label, *label);
+                if loop_break_type == self.prune_id_once(loop_break_type) {
+                    // loop doesn't have any breaks -> infinite loop -> Type::Never
+                    self.unify_types(loop_break_type, TypeId::NEVER, span);
                 }
-                self.merge_vars_init_states(snap_before_loop.unwrap(), &break_type_info.snapshots_from_breaks);
+                self.merge_vars_states(snap_before_loop, &label_info.break_snapshots);
 
                 loop_break_type
             },
 
-            Expr::Assign { pattern, value, extra_operator: _ /* desugared */, op_span: _ } => {
-                if let Some(val) = value {
-                    self.check_expression(val, &ctx);
-                    if val.typ.is_never() { is_never = true }
+            Expr::Assign { pattern, value, extra_op, op_span } => {
+                let pattern_type = self.check_assign_pattern_and_value(
+                    *pattern, Some(*value), is_never, true, false, None
+                );
 
-                    self.check_match_pattern(pattern, &val.typ, CheckPatternMode::Set, &mut None);
+                if let Some(extra_op) = extra_op {
+                    let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, pattern_type, pattern_type);
+                    self.unify_types(pattern_type, infixed_typ, *op_span);
                 }
-                else {
-                    let value_typ = self.new_inference_type();
-                    self.check_match_pattern(pattern, &value_typ, CheckPatternMode::NoInit, &mut None);
-                }
-
-                let missing_cases = self.convert_to_missing_cases(&pattern.covered_cases);
-                if !missing_cases.is_empty() {
-                    self.error(ErrType::TyperFailableLetPattern { remaining: missing_cases }, expr.span);
-                }
-                TypeKind::Void
+                TypeId::VOID
             },
 
-            Expr::Case { pattern, value } => {
-                self.check_expression(value, &ctx);
-                if value.typ.is_never() { is_never = true }
-                self.check_match_pattern(pattern, &value.typ, CheckPatternMode::Set, &mut None);
+            Expr::EmptyLet { pattern } => {
+                self.check_assign_pattern_and_value(*pattern, None, is_never, true, false, None);
+                TypeId::VOID
+            }
 
-                if !pattern.vars_defined.is_empty() && !old_ctx.allow_conditional_bindings {
-                    self.error(ErrType::TyperInvalidBindingCaseExpr, expr.span);
-                }
-                TypeKind::Bool
+            Expr::Is { value, pattern } => {
+                self.check_assign_pattern_and_value(
+                    *pattern, Some(*value), is_never, old_ctx.allow_is_expr_bindings, true, None
+                );
+
+                TypeId::BOOL
             },
 
-            Expr::Move { expr, auto_clone } => {
-                self.check_expression(expr, &ctx);
+            Expr::Move { expr } => {
+                let expr_type = self.check_expression(*expr, is_never, &ctx.auto_borrow_mut());
+                let expr_type = self.prune_type_once(expr_type, Some(span));
 
-                if let TypeKind::Pointer { mutable, inner, borrows_var } = &mut expr.typ {
-                    *auto_clone = self.prune(inner, Some(expr.span)).is_auto_clone();
-                    if !*auto_clone {
-                        self.move_variable(borrows_var, expr.span);
+                if let Type::Pointer { mutable, inner, borrows_var } = expr_type {
+                    let pruned_inner = self.prune_type_once(inner, Some(span));
+                    let auto_clone = self.is_auto_clone(&pruned_inner, span);
+                    if auto_clone {
+                        self.clone_variable(borrows_var, span);
+                    } else {
+                        self.move_variable(borrows_var, span);
+                        self.typed_ast.move_expr.insert(check_expr);
                     }
-                    *inner.clone()
-                }
-                else {
-                    self.error(ErrType::TyperCantDerefNonPointerType { typ: expr.typ.clone() }, expr.span)
+                    if !mutable {
+                        self.error(ErrType::TyperCantDerefNonMutPointerType { typ: expr_type }, span);
+                    }
+                    inner
+                } else {
+                    self.error(ErrType::TyperCantDerefNonPointerType { typ: expr_type }, span)
                 }
             },
 
-            Expr::FnDefinition { params, return_type_annotation, body, .. } => {
-                self.check_fn_expression(params, &mut return_type_annotation.typ, body, &ctx);
-                if body.typ.is_never() { is_never = true }
-                TypeKind::Void
+            
+            Expr::Closure { closure, requires_type_annotation } => {
+                let id = self.compiled_functions.reserve_slot(check_expr);
+                self.typed_ast.resolved_closure_fn_id.insert(check_expr, id);
+                
+                self.get_fn_type(closure, *requires_type_annotation)
             }
-            Expr::Closure { params, return_type_annotation: return_value, body } => {
-                self.check_fn_expression(params, &mut return_value.typ, body, &ctx)
-            }
 
-            Expr::Return(ret) => {
-                let curr_return_type = self.current_function_return_type.clone()
-                    .unwrap_or_else(|| TypeKind::Never/* self.error("'return' is only allowed inside functions.".to_string()) */);
+            Expr::Return { expr } => {
+                let curr_return_type = self.curr_function_return_type
+                    .unwrap_or_else(|| self.error(ErrType::TyperReturnOutsideFunction, span));
 
-                self.check_expression(ret, &ctx.expect(curr_return_type));
+                self.check_expression(*expr, &mut false, &ctx.expect(curr_return_type));
 
-                TypeKind::Never
+                TypeId::NEVER
             },
 
             Expr::Break { expr, label } => {
                 // this is None if it couldn't find where to break to (already errored)
-                let break_info = self.find_loop_label(label, expr.span);
-
-                let ctx = if let Some(info) = break_info {
-                    &ctx.expect(info.typ.clone())
-                } else {
-                    &ctx
-                };
-                self.check_expression(expr, ctx);
+                if let Some(info) = self.find_loop_label(label.as_deref(), span) {
+                    ctx = ctx.expect(info.typ);
+                }
+                let mut expr_is_never = false;
+                self.check_expression(*expr, &mut expr_is_never, &ctx);
 
                 // the current init var states need to be pushed here to correctly handle stuff like this:
                 // let x
@@ -338,232 +379,362 @@ impl Typechecker<'_> {
                 //     }
                 // }
                 // x  // x is initialized in every possible branch ->
-                let snap = self.snapshot_branch_vars_init_state(expr.typ.is_never());
+                let snap = self.snapshot_branch_vars_state(expr_is_never);
 
                 // refind break_info to make the borrow checker happy
-                let break_info = self.find_loop_label(label, expr.span);
-                if let Some(break_info) = break_info {
-                    break_info.snapshots_from_breaks.push(snap);
+                if let Some(info) = self.find_loop_label(label.as_deref(), span) {
+                    info.break_snapshots.push(snap);
+                    let break_to = info.expr;
+                    self.typed_ast.resolved_labels.insert(check_expr, break_to);
                 }
 
-                TypeKind::Never
+                TypeId::NEVER
             },
 
             Expr::Continue { label } => {
-                if let Some(continue_label) = label
-                    && !self.current_break_types
-                        .iter().rev()
-                        .any(|x| x.label == *continue_label) {
-                            self.error(ErrType::TyperUndefinedLoopLabel {
-                                label: continue_label.clone(),
-                                available: self.current_break_types.iter().map(|x| x.label.clone()).collect()
-                            }, expr.span);
-                        }
-                TypeKind::Never
+                if let Some(info) = self.find_loop_label(label.as_deref(), span) {
+                    let break_to = info.expr;
+                    self.typed_ast.resolved_labels.insert(check_expr, break_to);
+                }
+                TypeId::NEVER
             }
 
             Expr::Call { callee, arguments } => {
-                self.check_expression(callee, &ctx);
-                self.fully_deref_expression(callee);
+                let callee_type = self.check_expression(*callee, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                let callee_span = self.ast.get_expr_span(*callee);
 
-                let mut call_param_types = Vec::new();
-                for arg in arguments {
-                    self.check_expression(arg, &ctx);
-                    call_param_types.push(arg.typ.clone());
-                }
+                let call_param_types: Vec<TypeId> = arguments.iter()
+                    .map(|&arg| self.check_expression(arg, is_never, &ctx))
+                    .collect();
 
-                match self.prune(&callee.typ, Some(callee.span)) {
-                    TypeKind::Fn { param_types, return_type } => {
-                        if param_types.len() != call_param_types.len() {
-                            self.error(ErrType::TyperTooManyArguments { expected: param_types.len(), found: call_param_types.len() }, expr.span)
-                        }
-                        else {
-                            for (param_type, arg_type) in param_types.iter().zip(call_param_types.iter()) {
-                                self.unify_types(param_type, arg_type, callee.span);
+                match self.prune_type_once(callee_type, Some(callee_span)) {
+                    Type::Fn { param_types, return_type } => {
+                        if param_types.len() == call_param_types.len() {
+                            for (param_type, arg_type) in param_types.into_iter().zip(call_param_types) {
+                                self.unify_types(param_type, arg_type, callee_span);
                             }
-                            *return_type
+                            return_type
+                        } else {
+                            self.error(ErrType::TyperWrongNumberOfArguments { expected: param_types.len(), found: call_param_types.len() }, span)
                         }
                     }
-                    _ => self.error(ErrType::TyperCantCallNonFnType { typ: callee.typ.clone() }, callee.span)
+                    Type::Error => TypeId::ERROR,
+                    typ => self.error(ErrType::TyperCantCallNonFnType { typ }, callee_span)
                 }
             },
 
 
-            Expr::MemberAccess { left, member, resolved_index } => {
-                self.check_expression(left, &ctx);
-                if let TypeKind::Tup(elements) = self.prune(&left.typ, Some(expr.span)) {
-                    let member_index = elements.iter().position(|elem| elem.label == *member);
-                    *resolved_index = member_index;
+            Expr::MemberAccess { left, member } => {
+                if old_ctx.auto_borrow_mut { ctx.auto_borrow_mut = true }
+                let left_type = self.check_expression(*left, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                let left_span = self.ast.get_expr_span(*left);
+                
+                match self.prune_type_once(left_type, Some(left_span)) {
+                    Type::Tup(elems) => {
+                        let member_index = elems.iter().position(|elem| elem.label == *member);
 
-                    match member_index {
-                        Some(i) => elements[i].typ.clone(),
-                        None => self.error(ErrType::TyperTupleDoesntHaveMember { tup: TypeKind::Tup(elements), member: member.clone() }, expr.span)
+                        match member_index {
+                            Some(i) => {
+                                // modify the ast
+                                self.typed_ast.resolved_tuple_indices.insert(check_expr, i);
+                                elems[i].typ
+                            }
+                            None => self.error(ErrType::TyperTupleDoesntHaveMember { tup: Type::Tup(elems), member: member.clone() }, span)
+                        }
                     }
+                    _ => todo!("dot operator on other types...")
                 }
-                else { todo!() }
             }
 
-            Expr::TypePath(segments) => self.check_path_expression(segments, expr.span),
+            Expr::EnumVariant { data: AstEnumExpression { variant_name, attached_tuple } } => {
+                // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
+                if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(variant_name, old_ctx.expected_type, span) {
+                    if let Some(tup) = attached_tuple {
+                        self.check_expression(*tup, is_never, &ctx.expect(attached_type));
+                    } else {
+                        // if the variant had no data, then the defined variant shouldn't have data either!
+                        self.unify_types(TypeId::VOID, attached_type, span);
+                    }
+                    self.typed_ast.resolved_enum_variant.insert(check_expr, (enum_id, variant_index));
 
-            Expr::EnumDefinition { name, variants } => {
-                self.define_type(name.clone(), ThrumType {
-                    typ: DefinedTypeKind::Enum {
-                        name: name.clone(),
-                        variants: variants.clone()
-                    },
-                    values: HashMap::new()
-                }, expr.span);
-                TypeKind::Void
-            },
+                    old_ctx.expected_type.unwrap()
+                } else {
+                    TypeId::ERROR
+                }
+            }
 
-            Expr::Void => TypeKind::Void,
+            Expr::TypeInstantiation { typ, data } => {
+                let meta_id = self.check_annotation_meta_type_id(*typ);
+                match self.prune_type_once(meta_id, Some(span)) {
+                    Type::NewType(inner_new_type) => {
+                        // for now i only support 1 piece of data in here
+                        let [first_data] = data.as_slice() else {
+                            panic!("multiple things here not yet implemented")
+                        };
+                        // now check the data with the expected type
+                        self.check_expression(*first_data, is_never, &ctx.expect(inner_new_type));
+                        meta_id
+                    }
+                    Type::Error => TypeId::ERROR,
+                    t => self.error(ErrType::TyperCantInstantiateNonNewtypeType { typ: t }, self.ast.get_expr_span(*typ))
+                }
+            }
 
-            Expr::While { .. } => unreachable!("should be desugared already..."),
+            Expr::TypeMemberAccess { .. } => todo!(),
+
+            Expr::ParserError => TypeId::ERROR,
+            Expr::Void
 
 
+            // --- CONST STUFF ---
+            // already handled in the hoisting phase
+            | Expr::Const { .. } => TypeId::VOID,
+            Expr::Newtype { expr } => {
+                self.check_expression(*expr, is_never, &ctx.expect(TypeId::TYPE));
+                TypeId::TYPE
+            }
+            Expr::EnumDefinition { variants } => {
+                for variant in variants {
+                    if let Some(tup) = variant.attached_tuple {
+                        self.check_expression(tup, is_never, &ctx);
+                    }
+                }
+                TypeId::TYPE
+            }
+
+            // should be desugared stuff
+            Expr::While { .. } | Expr::FnDefinition { .. } => unreachable!("should be desugared already..."),
         };
 
-        expr.typ = if is_never { TypeKind::Never } else { inferred_type };
+        if inferred_type == TypeId::NEVER { *is_never = true; }
+        
+        // insert the inferred_type into the typed_ast
+        inferred_type = if *is_never { TypeId::NEVER } else { inferred_type };
+        self.typed_ast.expr_types[check_expr.0 as usize] = inferred_type;
 
-        if let Some(expected) = &old_ctx.expected_type {
-            // if type is know we can do auto-deref stuff. otherwise just unify
-            if matches!(self.prune(expected, None), TypeKind::Inference(_)) {
-                self.unify_types(expected, &expr.typ, expr.span);
-            } else {
-                self.unify_expression_with_type(expr, expected);
+        // handle AutoDerefModes
+        match old_ctx.deref_mode {
+            AutoDerefMode::None => {/* do nothing */}
+            AutoDerefMode::Once => {
+                self.deref_if_pointer(check_expr);
+                inferred_type = self.typed_ast.expr_types[check_expr.0 as usize];
             }
-        }
-    }
-
-
-
-    fn find_loop_label(&mut self, label: &mut Option<String>, span: Span) -> Option<&mut BreakTypeInfo> {
-        if self.current_break_types.is_empty() {
-            self.error(ErrType::TyperBreakOutsideLoop, span);
-            None
-        }
-        else if let Some(target_label) = label {
-            // rposition to search from the back (innermost loop out).
-            let found_index = self.current_break_types
-                .iter()
-                .rposition(|info| info.label == *target_label);
-
-            if let Some(idx) = found_index {
-                // found the label, return the break type
-                Some(&mut self.current_break_types[idx])
-            } else {
-                // couldn't find the label -> report error
-                let available_labels = self.current_break_types.iter().map(|info| info.label.clone()).collect();
-                self.error(ErrType::TyperUndefinedLoopLabel {
-                    label: target_label.clone(),
-                    available: available_labels
-                }, span);
-
-                None
+            AutoDerefMode::Fully => {
+                while self.deref_if_pointer(check_expr) { }
+                inferred_type = self.typed_ast.expr_types[check_expr.0 as usize];
             }
-        } else {
-            // Break without label -> grab the last one
-            Some(self.current_break_types.last_mut().unwrap())
-        }
-    }
-
-
-
-    pub(super) fn check_literal(&self, val: &Value) -> TypeKind {
-        match val {
-            Value::Num(_) => TypeKind::Num,
-            Value::Str(_) => TypeKind::Str,
-            Value::Bool(_) => TypeKind::Bool,
-            _ => unreachable!() // other values are not used in the parser
-        }
-    }
-
-
-
-
-
-    fn check_infix(&mut self, operator: &TokenType, op_span: Span, left: &TypeKind, right: &TypeKind) -> TypeKind {
-        match operator {
-            // num/str operators
-            TokenType::Plus | TokenType::Greater | TokenType::Less /* | TokenType::GreaterEqual | TokenType::LessEqual */ => {
-                self.unify_types(left, right, op_span);
-                let pruned_left = self.prune(left, Some(op_span));
-                let pruned_right = self.prune(right, None);
-                let returned_type = if let TokenType::Plus = operator { pruned_left.clone() } else { TypeKind::Bool };
-                match pruned_left {
-                    TypeKind::Num | TypeKind::Str => returned_type,
-                    _ => self.error(ErrType::TyperInvalidOperatorOnType { op: operator.clone(), type_a: pruned_left, type_b: pruned_right }, op_span)
+            AutoDerefMode::LeaveOnePointer => {
+                if 0 == self.count_initial_pointers(inferred_type, span).0 {
+                    let pruned_infered = self.prune_type_once(inferred_type, None);
+                    self.type_mismatch(
+                        Type::Pointer { inner: TypeId::ERROR, mutable: false, borrows_var: TypeVarId(0) },
+                        pruned_infered, span
+                    );
                 }
+                while 1 < self.count_initial_pointers(self.typed_ast.expr_types[check_expr.0 as usize], span).0 {
+                    self.deref_if_pointer(check_expr);
+                }
+            }
+        }
+
+        // unify it with the expected type (if something was expected)
+        if let Some(expected) = old_ctx.expected_type {
+            // if type is know we can do auto-deref stuff. otherwise just unify
+            match self.prune_type_once(expected, None) {
+                Type::Infer(_) => self.unify_types(expected, inferred_type, span),
+                Type::Error => {}
+                _ => {
+                    self.unify_expression_with_type(check_expr, expected);
+                    inferred_type = self.typed_ast.expr_types[check_expr.0 as usize];
+                }
+            }
+        }
+
+        // return the new updated infered type
+        inferred_type
+    }
+
+
+
+    fn check_literal(&mut self, val: &AstValue) -> TypeId {
+        match val {
+            AstValue::Num(_) => self.add_type(Type::Num),
+            AstValue::Str(_) => self.add_type(Type::Str),
+            AstValue::Bool(_) => self.add_type(Type::Bool),
+        }
+    }
+
+
+
+
+
+    fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId) -> TypeId {
+        match op {            
+            TokenKind::EqualEqual | TokenKind::Greater | TokenKind::Less /*| TokenType::GreaterEqual | TokenType::LessEqual */ => {
+                self.unify_types(left, right, op_span);
+                TypeId::BOOL
             }
 
             // num operators
-            TokenType::Minus | TokenType::Star | TokenType::Slash | TokenType::Percent | TokenType::StarStar => {
-                self.unify_types(left, &TypeKind::Num, op_span);
-                self.unify_types(right, &TypeKind::Num, op_span);
-                TypeKind::Num
-            }
-
-            // comparison operators
-            TokenType::EqualEqual /* | TokenType::NotEqual */ => {
-                self.unify_types(left, right, op_span);
-                let pruned_left = self.prune(left, Some(op_span));
-                let pruned_right = self.prune(right, None);
-                match pruned_left {
-                    TypeKind::Num | TypeKind::Str | TypeKind::Bool | TypeKind::Arr(_) | TypeKind::Tup {.. } | TypeKind::Void => TypeKind::Bool,
-                    _ => self.error(ErrType::TyperInvalidOperatorOnType { op: operator.clone(), type_a: pruned_left, type_b: pruned_right }, op_span)
-                }
+            TokenKind::Op(AssignOp::Plus | AssignOp::Minus | AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => {
+                self.unify_types(TypeId::NUM, left, op_span);
+                self.unify_types(TypeId::NUM, right, op_span);
+                TypeId::NUM
             }
 
             // boolean operators
-            TokenType::Ampersand | TokenType::Pipe => {
-                self.unify_types(&TypeKind::Bool, left, op_span);
-                self.unify_types(&TypeKind::Bool, right, op_span);
-                TypeKind::Bool
+            TokenKind::And | TokenKind::Or => {
+                self.unify_types(TypeId::BOOL, left, op_span);
+                self.unify_types(TypeId::BOOL, right, op_span);
+                TypeId::BOOL
             }
-            _ => unreachable!("Unsupported infix operator: {:?}", operator)
+            _ => unreachable!("Unsupported infix operator: {:?}", op)
         }
     }
 
 
-    fn get_fn_type(&mut self, params: &mut [MatchPatternInfo], return_type: &mut TypeKind) -> TypeKind {
-        let mut param_types = Vec::new();
-        for param in params.iter_mut() {
-            param_types.push(self.get_match_pattern_type(param));
+
+    fn hoisting_pass(&mut self, exprs: &[ExprId]) {
+        // 1. it collects all const exprs and defines them as Unresolved.
+        for &expr in exprs {
+            if let Expr::Const { pattern, value: _ } = self.ast.get_expr(expr) {
+                self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked(expr));
+            }
         }
-        if *return_type == TypeKind::ParserUnknown {
-            *return_type = self.new_inference_type();
-        }
-        TypeKind::Fn {
-            param_types,
-            return_type: Box::new(return_type.clone()),
+
+        // 2. typechecks all collected Unresolved vars.
+        // if one depends on another, typecheck another first, then back to first.
+        // if there is a self-dependency-cycle, throw an error
+        while let Some(expr) = self.var_scopes.last().unwrap()
+        .values()
+        .find_map(|&var_id| if let TypeVarConstVal::NotYetTypechecked(x) = self.typed_ast.get_var(var_id).const_val { Some(x) } else { None }) {
+            
+            self.check_evaluate_and_bind_const(expr);
         }
     }
 
 
-    fn check_fn_expression(&mut self, params: &mut [MatchPatternInfo], return_type: &mut TypeKind, body: &mut ExprInfo, ctx: &ExprContext) -> TypeKind {
+    pub(super) fn check_assign_pattern_and_value(
+        &mut self, pattern: PatternId, value: Option<ExprId>, is_never: &mut bool, can_bind_vars: bool, can_fail: bool, const_update: Option<TypeVarConstVal>
+    ) -> TypeId {
+        let mut pattern_type = self.get_pattern_type(pattern);
+
+        if let Some(val) = value {
+            let check_typ = self.check_expression(val, is_never, &CheckExprCtx::default().maybe_expect(pattern_type));
+            pattern_type = Some(check_typ);
+        }
+
+        let mut vars_defined = Vec::new();
+        let (pattern_type, covered) = self.check_match_pattern(
+            pattern, pattern_type, value.is_some(), const_update,
+            &mut CheckPatternVars::Collect(&mut vars_defined)
+        );
+
+        let span = self.ast.get_pattern_span(pattern);
+        let remaining = PatternSpace::covered_to_missing_cases(&covered);
+        if !can_fail && !remaining.is_empty() {
+            self.error(ErrType::TyperFailableAssignPattern { remaining }, span);
+        }
+        if !can_bind_vars && !vars_defined.is_empty() {
+            self.error(ErrType::TyperInvalidBindingCaseExpr, span);
+        }
+        pattern_type
+    }
+
+
+
+    pub(super) fn get_fn_type(&mut self, closure: &AstClosure, type_annotation_required: bool) -> TypeId {
+        let param_types = closure.params.iter()
+            .map(|&param| {
+                    if let Some(typ) = self.get_pattern_type(param) {
+                        typ
+                    } else {
+                        if type_annotation_required {
+                            self.error(ErrType::TyperRequiresTypeAnnotation, self.ast.get_pattern_span(param));
+                        }
+                        self.new_infer_type()
+                    }
+                }
+            )
+            .collect();
+
+        let return_type = if let Some(ret) = closure.return_type {
+            self.check_annotation_meta_type_id(ret)
+        } else if type_annotation_required {
+            TypeId::VOID
+        } else {
+            self.new_infer_type()
+        };
+        self.add_type(Type::Fn { param_types, return_type })
+    }
+
+
+    pub(super) fn check_fn_expression(&mut self, closure: &AstClosure, fn_type: TypeId) -> TypeId {
+        // check the fn_type in a new scope to also define the function parameters
         self.enter_scope();
 
-        // check the fn_type in a new scope to also define the function parameters
-        let fn_type = self.get_fn_type(params, return_type);
-        for param in params {
-            let expected_type = self.new_inference_type();
-            self.check_match_pattern(param, &expected_type, CheckPatternMode::Set, &mut None);
+        let Type::Fn { param_types, return_type } = self.typed_ast.get_type(fn_type) else {
+            unreachable!("this function should only be called with valid function types")
+        };
+        assert_eq!(param_types.len(), closure.params.len());
+
+        for (&param_pattern, param_type) in closure.params.iter().zip(param_types) {
+            let (_, covered) = self.check_match_pattern(
+                param_pattern, Some(param_type), true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
+            );
+            let remaining = PatternSpace::covered_to_missing_cases(&covered);
+            if !remaining.is_empty() {
+                let param_span = self.ast.get_pattern_span(param_pattern);
+                self.error(ErrType::TyperPatternDoesntCoverAllCases { remaining }, param_span);
+            }
         }
 
         // set the return context to this functions return type
-        let previous_function_return_type = self.current_function_return_type.clone();
-        self.current_function_return_type = Some(return_type.clone());
-
-        self.check_expression(body, &ctx.expect(return_type.clone()));
-
-        // drop all param vars
+        let backup = self.curr_function_return_type;
+        self.curr_function_return_type = Some(return_type);
+        
+        self.check_expression(closure.body, &mut false,  &CheckExprCtx::default().expect(return_type));
         self.exit_scope();
 
         // reset return context
-        self.current_function_return_type = previous_function_return_type;
+        self.curr_function_return_type = backup;
 
-        if body.typ.is_never() { TypeKind::Never }
-        else { fn_type }
+        fn_type
+    }
+
+
+
+
+    pub(super) fn check_enum_variant(&mut self, variant_name: &str, expected_type: Option<TypeId>, span: Span) -> Option<(EnumId, usize, TypeId)> {
+        // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
+        let Some(expected) = expected_type else {
+            self.error(ErrType::TyperRequiresTypeAnnotation, span);
+            return None
+        };
+        let pruned_expected = self.prune_type_once(expected, Some(span));
+
+        // make sure that the expected tpye is an Enum
+        match pruned_expected {
+            Type::Enum(enum_id) => {
+                let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
+
+                // try to find the correct .Variant
+                let find_variant = enum_def.variants.iter().position(|(name, _)| **name == *variant_name);
+                let Some(variant_index) = find_variant else {
+                    self.error(ErrType::TyperEnumDoesntHaveVariant { 
+                        enum_: pruned_expected, 
+                        variant: variant_name.into()
+                    }, span);
+                    return None;
+                };
+
+                let attached_type = enum_def.variants[variant_index].1;
+
+                Some((enum_id, variant_index, attached_type))
+            }
+            Type::Error => None,
+            typ => { self.error(ErrType::TyperExpectedTypeIsntAnEnum { typ }, span); None }
+        }
     }
 
 
@@ -571,125 +742,96 @@ impl Typechecker<'_> {
     // this function allows auto-deref to autoclone types
     // e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 moves
     // e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 move
-    fn unify_expression_with_type(&mut self, expr: &mut ExprInfo, expected_type: &TypeKind) {
-        let (expr_p_count, is_auto_clone_after) = self.count_initial_pointers(&expr.typ, expr.span);
-        let (expected_p_count, _) = self.count_initial_pointers(expected_type, expr.span);
+    fn unify_expression_with_type(&mut self, expr: ExprId, expected_type: TypeId) {
+        let expr_type = self.typed_ast.get_expr_type(expr);
+        let span = self.ast.get_expr_span(expr);
+        
+        let (expr_p_count, is_auto_clone_after) = self.count_initial_pointers(expr_type, span);
+        let (expected_p_count, _) = self.count_initial_pointers(expected_type, span);
 
-        let before_typ = self.prune(&expr.typ, None);
+        let before_typ = self.prune_type_once(expr_type, None);
 
         // if we have more pointers than the expected_type, AND everything that needs to be derefed is auto_clone
         if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {
             for _ in 0..(expr_p_count - expected_p_count) {
-                match self.prune(&expr.typ, Some(expr.span)) {
-                    TypeKind::Pointer { mutable: _, inner, borrows_var: _ } => {
-                        self.insert_deref(expr, *inner, true);
+                match self.prune_type_once(expr_type, Some(span)) {
+                    Type::Pointer { inner, mutable: _, borrows_var: _ } => {
+                        self.insert_deref(expr, false, inner);
                     }
                     _ => unreachable!("i just checked the amount of pointers, so this is unreachable \
-                        ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({expected_type}, {before_typ})")
+                        ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({expected_type:?}, {before_typ:?})")
                 }
             }
         }
         // just unify after dereferencing pointers
-        self.unify_types(expected_type, &expr.typ, expr.span);
+        let new_expr_type = self.typed_ast.get_expr_type(expr);
+        self.unify_types(expected_type, new_expr_type, span);
     }
 
-    fn count_initial_pointers(&mut self, typ: &TypeKind, err_span: Span) -> (usize, bool) {
-        let mut curr_typ = typ.clone();
+    fn count_initial_pointers(&mut self, typ: TypeId, err_span: Span) -> (usize, bool) {
+        let mut curr_typ = typ;
         let mut count = 0;
 
-        while let TypeKind::Pointer { inner, .. } = self.prune(&curr_typ, Some(err_span)) {
-            curr_typ = *inner.clone();
+        while let Type::Pointer { inner, .. } = self.prune_type_once(curr_typ, Some(err_span)) {
+            curr_typ = inner;
             count += 1;
         }
 
-        let typ_after_pointers_auto_clone = self.prune(&curr_typ, Some(err_span)).is_auto_clone();
-        (count, typ_after_pointers_auto_clone)
+        let final_pruned = self.prune_type_once(curr_typ, Some(err_span));
+        let final_pruned_auto_clone = self.is_auto_clone(&final_pruned, err_span);
+        (count, final_pruned_auto_clone)
     }
 
-
-    fn fully_deref_expression(&mut self, expr: &mut ExprInfo) {
-        while let TypeKind::Pointer { mutable: _, inner, borrows_var: _ }
-            = self.prune(&expr.typ, Some(expr.span)) {
-                let auto_clone = self.prune(&inner, Some(expr.span)).is_auto_clone();
-                self.insert_deref(expr, *inner, auto_clone);
-        }
-    }
-
-
-    pub fn dereference_typ(&mut self, typ:  &TypeKind, span: Span) -> TypeKind {
-        match self.prune(typ, Some(span)) {
-            TypeKind::Pointer { mutable: _, inner, borrows_var: _ } => *inner,
-            x => self.error(ErrType::TyperCantDerefNonPointerType { typ: x }, span),
-        }
-    }
-
-    fn insert_deref_if_pointer(&mut self, expr: &mut ExprInfo) -> bool {
-        match self.prune(&expr.typ, Some(expr.span)) {
-            TypeKind::Pointer { mutable: _, inner, borrows_var } => {
-                let auto_clone = self.prune(&inner, Some(expr.span)).is_auto_clone();
-                if !auto_clone {
-                    self.move_variable(&borrows_var, expr.span);
+    pub fn deref_if_pointer(&mut self, expr: ExprId) -> bool {
+        let span = self.ast.get_expr_span(expr);
+        let typ = self.typed_ast.get_expr_type(expr);
+        match self.prune_type_once(typ, Some(span)) {
+            Type::Pointer { inner, mutable: _, borrows_var } => {
+                let prune_inner = self.prune_type_once(inner, Some(span));
+                let auto_clone = self.is_auto_clone(&prune_inner, span);
+                if auto_clone {
+                    self.clone_variable(borrows_var, span);
+                } else {
+                    self.move_variable(borrows_var, span);
                 }
-                self.insert_deref(expr, *inner, auto_clone);
+                self.insert_deref(expr, !auto_clone, inner);
                 true
             }
-            _ => { false /* do nothing */ }
+            _ => false
         }
     }
 
-    fn insert_deref(&self, expr: &mut ExprInfo, inner: TypeKind, auto_clone: bool) {
-        *expr = ExprInfo {
-            span: expr.span,
-            typ: inner,
-            expression: Expr::Move {
-                // replace with random junk
-                // thrum supports this without the random junk ;p
-                expr: Box::new(std::mem::replace(expr, Expr::Void.to_info(Span::invalid()))),
-                auto_clone
-            }
-        };
+    fn insert_deref(&mut self, expr: ExprId, moves: bool, new_type: TypeId) {
+        *self.typed_ast.auto_derefs.entry(expr).or_default() += 1;
+        self.typed_ast.expr_types[expr.0 as usize] = new_type;
+        if moves {
+            self.typed_ast.move_expr.insert(expr);
+        }
+        // println!("derefed: {:?}", self.ast.get_expr(expr));
     }
 
+    fn is_auto_clone(&mut self, typ: &Type, span: Span) -> bool {
+        match typ {
+            Type::Num
+            | Type::Bool
+            | Type::Pointer { .. }
+            | Type::Fn { .. }
+            | Type::MetaType
+            | Type::Error => true,
 
+            Type::Str
+            | Type::TupArr(_, _)
+            | Type::Tup(_)
+            | Type::Void
+            | Type::Never
+            | Type::Enum(_) => false,
 
-    fn check_path_expression(&mut self, segments: &[String], span: Span) -> TypeKind {
-        let mut curr_module = &self.library;
-
-        for (i, segment) in segments.iter().enumerate() {
-            // try to go into a sub module
-            if let Some(sub_module) = curr_module.sub_modules.get(segment) {
-                curr_module = sub_module;
-                continue;
+            Type::NewType(id) => {
+                let inner = self.prune_type_once(*id, Some(span));
+                self.is_auto_clone(&inner, span)
             }
 
-            // else check for types (e.g. str::len)
-            else if let Some(module_type) = curr_module.types.get(segment) {
-                let remaining_segments = &segments[(i + 1)..];
-                match remaining_segments {
-                    // 0 remaining segments -> type
-                    [] => return TypeKind::CustomType { name: segment.clone(), generic_types: vec![/* TODO */] },
-                    // 1 remaining, meaning its a value defined on that type.
-                    [last_segment] => {
-                        if let Some(type_val) = module_type.values.get(last_segment) {
-                            return type_val.typ.clone()
-                        }
-                    }
-                    // 2 or more remaining segments
-                    _ => return self.error(ErrType::DefaultString("type path had 2 or more remaining segments.".to_string()), span)
-                }
-            }
-
-            // else check for consts/functions (e.g. io::print)
-            else if let Some(module_val) = curr_module.values.get(segment) {
-                if i == segments.len() - 1 {
-                    return module_val.typ.clone()
-                }
-                return self.error(ErrType::DefaultString("value path too long.".to_string()), span)
-            }
-
-            return self.error(ErrType::DefaultString(format!("segment {segment} could not be found...")), span);
+            Type::Infer(_) => unreachable!("is_auto_clone() should not be called with type {typ:?}")
         }
-
-        self.error(ErrType::DefaultString(format!("'{}' could not be found...", segments.join("::"))), span)
     }
 }

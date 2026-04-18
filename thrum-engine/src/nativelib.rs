@@ -1,31 +1,18 @@
 use std::collections::HashMap;
 
-use crate::{parsing::ast_structure::{DefinedTypeKind, TypeKind, Value}, vm_evaluating::RuntimeError};
+use crate::{ErrType, typing::{Type, TypeId}, vm_compiling::RuntimeValue};
 
-pub type NativeFn = fn(&mut [Value]) -> Result<Value, RuntimeError>;
-
-// this can be a function or a const
-#[derive(Clone)]
 pub struct ThrumValue {
-    pub typ: TypeKind,
-    pub val: Value,
+    pub typ: Type,
+    pub val: RuntimeValue,
     pub is_prelude: bool,
-}
-pub struct ThrumType {
-    pub typ: DefinedTypeKind,
-    pub values: HashMap<String, ThrumValue>
 }
 
 #[derive(Default)]
 pub struct ThrumModule {
     pub sub_modules: HashMap<String, Self>,
     pub values: HashMap<String, ThrumValue>,
-    pub types: HashMap<String, ThrumType>,
 }
-
-
-
-
 
 
 
@@ -34,51 +21,40 @@ pub fn get_native_lib() -> ThrumModule {
 
     let mut io_module = ThrumModule::default();
     io_module.values.insert("print".to_string(), ThrumValue {
-        typ: TypeKind::Fn { param_types: vec![TypeKind::Str], return_type: Box::new(TypeKind::Void) },
-        val: Value::NativeFn(native_print),
+        typ: Type::Fn { param_types: vec![TypeId::STR], return_type: TypeId::VOID },
+        val: RuntimeValue::NativeFn(native_print),
         is_prelude: true,
     });
     io_module.values.insert("panic".to_string(), ThrumValue {
-        typ: TypeKind::Fn { param_types: vec![TypeKind::Str], return_type: Box::new(TypeKind::Never) },
-        val: Value::NativeFn(native_panic),
+        typ: Type::Fn { param_types: vec![TypeId::STR], return_type: TypeId::NEVER },
+        val: RuntimeValue::NativeFn(native_panic),
         is_prelude: true,
     });
     std_module.sub_modules.insert("io".to_string(), io_module);
 
-    
-    let str_type = ThrumType {
-        typ: DefinedTypeKind::Native(TypeKind::Str),
-        values: vec![
-            ("len".to_string(), ThrumValue {
-                typ: TypeKind::Fn { param_types: vec![TypeKind::Str], return_type: Box::new(TypeKind::Num) },
-                val: Value::NativeFn(native_str_len),
-                is_prelude: false,
-            })
-        ].into_iter().collect(),
-    };
-
-    std_module.types.insert("str".to_string(), str_type);
+    std_module.values.insert("num".to_string(), ThrumValue { typ: Type::MetaType, val: RuntimeValue::Type(TypeId::NUM), is_prelude: true });
+    std_module.values.insert("bool".to_string(), ThrumValue { typ: Type::MetaType, val: RuntimeValue::Type(TypeId::BOOL), is_prelude: true });
 
     std_module
 }
 
 
 
-pub fn native_print(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
+pub fn native_print(val: &[RuntimeValue]) -> Result<RuntimeValue, ErrType> {
+    let RuntimeValue::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
     println!("{str}");
 
-    Ok(Value::Void)
+    Ok(RuntimeValue::Void)
 }
 
-pub fn native_panic(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
+pub fn native_panic(val: &[RuntimeValue]) -> Result<RuntimeValue, ErrType> {
+    let RuntimeValue::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
     println!("{str}");
 
-    Err(RuntimeError { message: str.clone() })
+    Err(ErrType::RuntimeError { msg: str.clone() })
 }
 
-pub fn native_str_len(val: &mut [Value]) -> Result<Value, RuntimeError> {
-    let Value::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
-    Ok(Value::Num(str.len() as f64))
+pub fn native_str_len(val: &[RuntimeValue]) -> Result<RuntimeValue, ErrType> {
+    let RuntimeValue::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
+    Ok(RuntimeValue::Num(str.len() as f64))
 }

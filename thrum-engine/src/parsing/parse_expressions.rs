@@ -1,118 +1,172 @@
-use crate::{ErrType, lexing::tokens::{TokenSpan, TokenType}, parsing::{Parser, Precedence, ast_structure::{EnumExpression, Expr, ExprInfo, MatchArm, MatchPattern, Span, TupleElement, TypeKind, TypeKindInfo, Value}}};
+use crate::{
+    ErrType, WarnType, lexing::{self, tokens::{AssignOp, Span, TokenKind, TokenSpan}},
+    parsing::{Parser, ast_structure::{AstClosure, AstEnumExpression, AstMatchArm, AstTupleElement, AstValue, Expr, ExprId}}
+};
+
+
+
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
+pub enum Precedence {
+    Lowest,
+    Assign,     // =, +=, -=, etc.
+    Range,      // 1..2
+    // Nullish,    // ??
+    Or,         // |
+    And,        // &
+    Comparison, // ==, !=
+    LessGreater,// <, >, <=, >=
+    Is,         // is
+    Sum,        // +, -
+    Product,    // *, /, %
+    Prefix,     // ! -
+    CallIndex,  // square(X), array[i], arr.len, Option::Some
+    Postfix,    // ^
+}
+impl Precedence {
+    pub const fn get_precedence(token_type: TokenKind) -> Self {
+        match token_type {
+            TokenKind::Assign { .. } => Self::Assign,
+            TokenKind::DotDot | TokenKind::DotDotEqual => Self::Range,
+            TokenKind::Or => Self::Or,
+            TokenKind::And => Self::And,
+            TokenKind::EqualEqual | TokenKind::NotEqual => Self::Comparison,
+            TokenKind::Less | TokenKind::Greater | TokenKind::LessEqual | TokenKind::GreaterEqual => Self::LessGreater,
+            TokenKind::Is => Self::Is,
+            TokenKind::Op(AssignOp::Plus | AssignOp::Minus) => Self::Sum,
+            TokenKind::Op(AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => Self::Product,
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::Dot | TokenKind::ColonColon => Self::CallIndex,
+            TokenKind::Caret => Self::Postfix,
+            _ => Self::Lowest,
+        }
+    }
+}
+
 
 impl Parser<'_> {
-    pub(super) fn parse_expression(&mut self, precedence: Precedence) -> ExprInfo {
+    pub(super) fn parse_expression_default(&mut self) -> ExprId {
+        self.parse_expression(Precedence::Lowest)
+    }
+
+    pub(super) fn parse_expression(&mut self, precedence: Precedence) -> ExprId {
         // examples of prefixes:
         // 1
         // !(1 + 2)
         // Vec::new(data = [1, 2, 3])
         // if x { 1 } else { 2 }
-        let first_token = self.next();
-        let mut left_expr = self.parse_prefix(first_token);
+        let mut left_expr = self.parse_prefix();
 
         // Pratt parser loop
         loop {
-            let op_token = self.peek().clone();
-            let mut op_precedence = Precedence::get_precedence(&op_token.token);
+            let peek_op = self.peek().clone();
+            let op_precedence = Precedence::get_precedence(peek_op.token);
             
             // Not an infix operator.
             if op_precedence == Precedence::Lowest { break }
 
             // only includes the next operator if it binds stronger than the current one.
             // 1 + 2 * 3   -> this would consume until * and only afterwards process +
-            // 1 + 2 * 3   -> this would stop before * and only afterwards process it
+            // 1 * 2 + 3   -> this would stop at * and process + afterwards
             if precedence >= op_precedence { break }
             
             // 1 level lower for right associativity
             // ** is special because 2**3**2 should get parsed as: 2**(3**2)
-            if op_token.token == TokenType::StarStar { op_precedence = Precedence::Product }
+            // if op_token.token == TokenKind::StarStar { op_precedence = Precedence::Product }
 
             // operators that are not allowed to be line-split.
             // this is so semicolons are actually not needed in the language,
             // for example here the parser would normally want to keep consuming the ( as a function call
-            // let (a, b) = (0, 1)
+            // let a = 1
             // (a, b) = (b, a + b)
-            if let TokenType::LeftParen | TokenType::LeftBracket | TokenType::ColonColon | TokenType::Star = op_token.token
-                && !self.peek_is_on_same_line() {
+            if let TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::ColonColon | TokenKind::Is = peek_op.token
+            && !self.peek_is_on_same_line() {
+                break;
+            }
+
+            // special handling for normal Ops: + - * / ...
+            if let TokenKind::Op(_) = peek_op.token {
+                // this - is an infix operator.
+                // 5
+                // - 2
+
+                // this - is not an infix operator => break
+                // 5
+                // -2
+                if !self.peek_is_on_same_line() && self.peek_spaces_after() == 0 {
                     break;
                 }
+
+                if self.peek_is_on_same_line() && self.peek_further_is_on_same_line() {
+                    // warnings:
+                    if self.peek_spaces_infront() != self.peek_spaces_after() {
+                        self.warn(WarnType::ParserInconsistentSpacingAroundInfixOp { op: peek_op.token });
+                    }
+                }
+            }
 
             self.next(); // consume the operator
 
             // update the left expression with the new infix result.
-            left_expr = self.parse_infix(left_expr, op_token, op_precedence);
+            left_expr = self.parse_infix(left_expr, &peek_op, op_precedence);
         }
         left_expr
     }
 
 
 
-    fn parse_infix(&mut self, left_expr: ExprInfo, op_token: TokenSpan, op_precedence: Precedence) -> ExprInfo {
-        let s_span = left_expr.span;
-        match op_token.token {
-            TokenType::LeftParen => {
-                let (end_span, arguments) = self.parse_comma_seperated_expressions(
-                    TokenType::RightParen,
-                    "to close the function call argument list"
-                );
-                Expr::Call { callee: Box::new(left_expr), arguments }
-                .to_info(s_span.merge(end_span))
-            },
+    fn parse_infix(&mut self, left_expr: ExprId, op: &TokenSpan, op_precedence: Precedence) -> ExprId {
+        let start = self.ast.get_expr_span(left_expr);
 
-            TokenType::LeftBracket => {
-                let right_index_expr = self.parse_expression(Precedence::Lowest);
-                let end_span = self.expect_token(TokenType::RightBracket, "to close the index expression");
-                Expr::Index { left: Box::new(left_expr), index: Box::new(right_index_expr) }
-                .to_info(s_span.merge(end_span))
-            },
+        if let Precedence::And | Precedence::Or | Precedence::Comparison
+            | Precedence::LessGreater | Precedence::Sum | Precedence::Product = op_precedence {
+            let right = self.parse_expression(op_precedence);
+            return self.add_expr(start, Expr::Infix { op: op.token, op_span: op.span, left: left_expr, right })
+        }
 
-            TokenType::Dot(member) => {
+        match op.token {
+            TokenKind::Dot => {
                 // supports both x.member and x.2
-                Expr::MemberAccess { left: Box::new(left_expr), member, resolved_index: None }
-                .to_info(s_span.merge(op_token.span))
+                let member = self.expect_identifier_relaxed("to name the member");
+                self.add_expr(start, Expr::MemberAccess { left: left_expr, member })
             },
 
-            TokenType::TildeArrow => {
-                let pattern = self.parse_binding_match_pattern(false, false);
-                let pattern_span = pattern.span;
-                Expr::Case { pattern: Box::new(pattern), value: Box::new(left_expr) }
-                .to_info(s_span.merge(pattern_span))
+            TokenKind::ColonColon => {
+                let member = self.expect_identifier("to name the path");
+                self.add_expr(start, Expr::TypeMemberAccess { left: left_expr, member })
             }
-
-            TokenType::ColonColon => self.parse_path_operator(left_expr),
             
-            TokenType::Equal { extra_operator: extra_op } => {
-                let pattern = Box::new(self.convert_lhs_assign_into_pattern(left_expr));
+            TokenKind::Assign { extra_op } => {
+                let pattern = self.convert_expr_into_assign_pattern(left_expr);
+                let value = self.parse_expression_default();
 
-                // expression
-                let right = self.parse_expression(Precedence::Lowest);
-                let right_span = right.span;
-
-                Expr::Assign {
-                    pattern,
-                    extra_operator: extra_op.map(|x| *x),
-                    op_span: s_span,
-                    value: Some(Box::new(right))
-                }
-                .to_info(s_span.merge(right_span))
+                self.add_expr(start, Expr::Assign { pattern, value, extra_op, op_span: op.span })
             },
 
-            TokenType::Caret => {
+            TokenKind::Caret => {
                 // move/clone operator
-                Expr::Move { expr: Box::new(left_expr), auto_clone: false }
-                .to_info(s_span.merge(op_token.span))
+                self.add_expr(start, Expr::Move { expr: left_expr })
+            },
+            
+            TokenKind::Is => {
+                let pattern = self.parse_pattern(false);
+
+                self.add_expr(start, Expr::Is { value: left_expr, pattern })
+            }
+            
+            TokenKind::LeftParen => {
+                let arguments = self.parse_comma_seperated_expressions(
+                    TokenKind::RightParen,
+                    "to close the function arguments list"
+                );
+                self.add_expr(start, Expr::Call { callee: left_expr, arguments })
             },
 
-            _ => {  // other operators
-                let right_expr = self.parse_expression(op_precedence);
-                let right_expr_span = right_expr.span;
-                Expr::Infix {
-                    operator: op_token,
-                    left: Box::new(left_expr),
-                    right: Box::new(right_expr)
-                }
-                .to_info(s_span.merge(right_expr_span))
-            }
+            TokenKind::LeftBracket => {
+                let index = self.parse_expression_default();
+                self.expect_token(TokenKind::RightBracket, "to close the index expression");
+                self.add_expr(start, Expr::Index { left: left_expr, index })
+            },
+
+            _ => unreachable!("parse_infix() should not be called with op_token: {op:?}")
         }
     }
 
@@ -124,304 +178,238 @@ impl Parser<'_> {
 
 
 
-    fn parse_prefix(&mut self, first_token: TokenSpan) -> ExprInfo {
-        let s_span = first_token.span;
-        // after advancing:
-        match first_token.token {
-            TokenType::Identifier(name) => Expr::IdentifierRef { name, mutable: false, var_id: None }.to_info(s_span),
-            TokenType::Number(val) => Expr::Literal(Value::Num(val)).to_info(s_span),
-            TokenType::Bool(val) => Expr::Literal(Value::Bool(val)).to_info(s_span),
+    pub(super) fn parse_prefix(&mut self) -> ExprId {
+        let op = self.next();
+        let start = op.span;
 
-            // Prefix operators
-            TokenType::Minus | TokenType::Exclamation | TokenType::BitNot | TokenType::DotDotDot => {
-                let right = Box::new(self.parse_expression(Precedence::Prefix));
-                let right_span = right.span;
-                Expr::Prefix { operator: first_token.token, right }
-                .to_info(s_span.merge(right_span))
-            },
+        match op.token {
+            TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus) => {
+                let right = self.parse_expression(Precedence::Prefix);
+                self.add_expr(start, Expr::Prefix { op: op.token, right })
+            }
 
-            TokenType::Star => {
-                let expr = Box::new(self.parse_expression(Precedence::Prefix));
-                let expr_span = expr.span;
-                Expr::Move { expr, auto_clone: false }
-                .to_info(s_span.merge(expr_span))
-            },
+            TokenKind::Identifier => {
+                let name = self.get_from_source(op.span).to_string();
+                let name_expr = self.add_expr(start, Expr::IdentifierRef { name, mutable: false });
 
-            TokenType::Caret => {
-                Expr::IdentifierRef { name: format!("_pipe_{}", self.pipe_operators_active), mutable: false, var_id: None }
-                .to_info(s_span)
-            },
-
-            TokenType::LeftBrace => self.parse_block_expression(TokenType::RightBrace, s_span),
-
-            TokenType::LeftParen => 'l: {
-                // empty tuple case '()'
-                if let Some(end_span) = self.optional_token(TokenType::RightParen) {
-                    break 'l Expr::Tuple(Vec::new()).to_info(s_span.merge(end_span))
-                }
-
-                let first_elem = self.parse_tuple_element_expression("0".to_string());
-
-                if self.optional_token(TokenType::Comma).is_some() {
-                    // , means its a tuple!
-                    // e.g. (1, 2) (1,) (.x = 1,)
-                    let mut tuple_body = vec![first_elem];
-                    let (end_span, other_tuple_elems) = self.parse_comma_separated(
-                        TokenType::RightParen,
-                        |p, i| {
-                            p.parse_tuple_element_expression((i+1).to_string())
-                        },
-                        "to close the tuple"
+                // Number{ 3 } is only allowed if there is no whitespace after 'Number'
+                if self.peek_spaces_infront() == 0 && self.optional_token(TokenKind::LeftBrace) {
+                    let data = self.parse_comma_seperated_expressions(
+                        TokenKind::RightBrace,
+                        "to close the type creation list"
                     );
-                    tuple_body.extend(other_tuple_elems);
-                    tuple_body.sort_by(|a, b| a.label.cmp(&b.label));
-                    Expr::Tuple(tuple_body)
-                    .to_info(s_span.merge(end_span))
+                    self.add_expr(start, Expr::TypeInstantiation { typ: name_expr, data })
+                } else {
+                    name_expr
+                }
+            }
+            TokenKind::Number => self.extract_number_expr_from_source(start),
+
+            TokenKind::Bool(val) => self.add_expr(start, Expr::Literal { val: AstValue::Bool(val) }),
+
+            TokenKind::Op(AssignOp::Star) => {
+                let expr = self.parse_expression(Precedence::Prefix);
+                self.add_expr(start, Expr::Move { expr })
+            },
+
+            TokenKind::LeftBrace => self.parse_block_expression(TokenKind::RightBrace, start),
+
+            TokenKind::LeftParen => {
+                // empty tuple case '()'
+                if self.optional_token(TokenKind::RightParen) {
+                    self.add_expr(start, Expr::Tuple { elems: Vec::new() })
                 }
                 else {
-                    // normal grouped expression
-                    self.expect_token(TokenType::RightParen, "to close the grouped expression");
-                    // if first_elem_labeled {
-                    //     Err(self.error("If this is supposed to be a tuple, use a trailing comma."))
-                    // }
-                    first_elem.expr
-                }
-            },
+                    let first_elem = self.parse_one_tuple_expression("0".to_string());
+                    if self.optional_token(TokenKind::Comma) {
+                        // , means its a tuple!
+                        // e.g. (1, 2) (1,) (x: 1,)
+                        self.parse_tuple_expression(start, Some(first_elem))
+                    }
+                    else if self.optional_token(TokenKind::Semicolon) {
+                        // ; means its a tuple array
+                        // (0; 4)
+                        let length = self.parse_expression_default();
+                        self.expect_token(TokenKind::RightParen, "to close the array expression");
 
-            TokenType::LeftBracket => {
-                let (end_span, elements) = self.parse_comma_seperated_expressions(
-                    TokenType::RightBracket,
-                    "to close the array"
-                );
-                Expr::Array(elements)
-                .to_info(s_span.merge(end_span))
-            },
-
-            TokenType::StringStart => {
-                let mut parts = Vec::new();
-
-                loop {
-                    let token = self.next();
-                    match token.token {
-                        TokenType::StringFrag(s) => parts.push(Expr::Literal(Value::Str(s)).to_info(token.span)),
-
-                        TokenType::LeftBrace => {
-                            parts.push(self.parse_expression(Precedence::Lowest));
-                            self.expect_token(TokenType::RightBrace, "to close the template string block");
-                        }
-
-                        TokenType::StringEnd => break Expr::TemplateString(parts).to_info(s_span.merge(token.span)),
-
-                        // the lexer should make sure that no other tokens end up here!
-                        _ => unreachable!()
+                        self.add_expr(start, Expr::TupleArr { elem: first_elem.expr, length })
+                    } else {
+                        // normal grouped expression
+                        self.expect_token(TokenKind::RightParen, "to close the grouped expression");
+                        // if first_elem.label == "0" {
+                        //     self.error(ErrType::DefaultString("If this is supposed to be a tuple, use a trailing comma.".to_string()));
+                        // }
+                        first_elem.expr
                     }
                 }
             },
 
-            TokenType::ColonColon => self.parse_path_operator(
-                Expr::TypePath(vec![String::new()]).to_info(s_span)
-            ),
+            TokenKind::StringStart => {
+                let mut elems = Vec::new();
+                let mut had_expr = false;
 
-            TokenType::Let => {
-                let pattern = self.parse_binding_match_pattern(false, false);
-                let mut end_span = pattern.span;
+                while !self.optional_token(TokenKind::StringEnd) {
+                    if self.optional_token(TokenKind::StringFrag) {
+                        // extract the string from the source
+                        // we also need to handle backslashes here
+                        let source_frag = self.get_from_source(self.prev_token_span);
+                        let s = lexing::lex_string_from(source_frag);
 
-                // the value of let-expressions can be optional. for example:
-                // let x;
-                // x = ...
-                let value = if let Some(span) = self.optional_token(TokenType::Equal { extra_operator: None }) {
-                    end_span = span.merge(end_span);
-                    Some(Box::new(self.parse_expression(Precedence::Lowest)))
+                        elems.push(self.add_expr(self.prev_token_span, Expr::Literal { val: AstValue::Str(s) }));
+                    } else {
+                        elems.push(self.parse_expression_default());
+                        had_expr = true;
+                    }
                 }
-                else { None };
 
-                Expr::Assign { pattern: Box::new(pattern), extra_operator: None, op_span: s_span, value }
-                .to_info(s_span.merge(end_span))
+                match elems[..] {
+                    [first] if !had_expr => first,
+                    [] => self.add_expr(start, Expr::Literal { val: AstValue::Str(String::new()) }),
+                    _ => self.add_expr(start, Expr::TemplateString { elems }),
+                }
             },
 
-            TokenType::Case => {
-                let pattern = self.parse_binding_match_pattern(false, false);
-                self.expect_token(TokenType::Equal { extra_operator: None }, "after the case-expression pattern");
-                let value = self.parse_expression(Precedence::And);
-                let value_span = value.span;
+            TokenKind::Let => {
+                // this only adds an EmptyLet expr, because let has multiple use cases
+                // e.g.: `(a, let b) = 2`  `x is let .Some(a)`
+                let pattern = self.parse_pattern(true);
+                self.add_expr(start, Expr::EmptyLet { pattern })
+            },
 
-                Expr::Case { pattern: Box::new(pattern), value: Box::new(value) }
-                .to_info(s_span.merge(value_span))
+            TokenKind::Const => {
+                let pattern = self.parse_pattern(true);
+                self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the const.");
+                let value = self.parse_expression_default();
+
+                self.add_expr(start, Expr::Const { pattern, value })
+            }
+            TokenKind::Type => {
+                let pattern = self.parse_pattern(true);
+                self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the type.");
+                let expr = self.parse_expression_default();
+
+                let value = self.add_expr(start, Expr::Newtype { expr });
+
+                self.add_expr(start, Expr::Const { pattern, value })
             }
 
-            TokenType::If => {
-                let condition = Box::new(self.parse_expression(Precedence::Lowest));
+            TokenKind::If => {
+                let condition = self.parse_expression(Precedence::Lowest);
                 let (then, alt) = self.parse_if_and_else();
-                let alt_span = alt.span;
-                Expr::If { condition, then, alt }
-                .to_info(s_span.merge(alt_span))
+                self.add_expr(start, Expr::If { condition, then, alt })
             },
 
-            TokenType::Ensure => {
-                let condition = Box::new(self.parse_expression(Precedence::Lowest));
-                self.expect_token(TokenType::Else, "after the ensure condition");
-                let alt = Box::new(self.parse_expression(Precedence::Lowest));
-                let alt_span = alt.span;
-                Expr::Ensure { condition, alt, then: Box::new(Expr::Void.to_info(alt_span.to_0_width_right())) }
-                .to_info(s_span.merge(alt_span))
+            TokenKind::Ensure => {
+                let condition = self.parse_expression(Precedence::Lowest);
+                self.expect_token(TokenKind::Else, "after the ensure condition");
+                let alt = self.parse_expression_default();
+                let then = self.add_expr(start.to_0_width_right(), Expr::Void);
+
+                self.add_expr(start, Expr::Ensure { condition, alt, then })
             },
 
-            TokenType::While => {
-                let label = self.parse_optional_label().map_or("while".to_string(), |(_, l)| l);
+            TokenKind::While => {
+                let label = self.optional_label().unwrap_or_else(|| "while".to_string());
+                let condition = self.parse_expression_default();
+                let body = self.parse_arrow_or_block_expression("while");
 
-                let condition = Box::new(self.parse_expression(Precedence::Lowest));
-
-                let block_span = self.expect_token( TokenType::LeftBrace, "to open the while block");
-                let body = Box::new(self.parse_block_expression(TokenType::RightBrace, block_span));
-                let body_span = body.span;
-
-                Expr::While { condition, body, label }
-                .to_info(s_span.merge(body_span))
+                self.add_expr(start, Expr::While { condition, body, label })
             },
 
-            TokenType::Loop => {
-                let label = self.parse_optional_label().map_or("loop".to_string(), |(_, l)| l);
+            TokenKind::Loop => {
+                let label = self.optional_label().unwrap_or_else(|| "loop".to_string());
+                let body = self.parse_arrow_or_block_expression("loop");
 
-                let block_span = self.expect_token( TokenType::LeftBrace, "to open the loop block");
-                let body = Box::new(self.parse_block_expression(TokenType::RightBrace, block_span));
-                let body_span = body.span;
-
-                Expr::Loop { body, label }
-                .to_info(s_span.merge(body_span))
+                self.add_expr(start, Expr::Loop { body, label })
             },
 
-            TokenType::Match => {
-                let match_value = Box::new(self.parse_expression(Precedence::Lowest));
+            TokenKind::Match => {
+                let match_value = self.parse_expression(Precedence::Is);
+                let mut arms = Vec::new();
 
-                self.expect_token( TokenType::LeftBrace, "to open the match block");
+                while self.optional_token(TokenKind::Is) {
+                    let pattern = self.parse_pattern(false);
+                    let body = self.parse_arrow_or_block_expression("match arm");
+                    arms.push(AstMatchArm { pattern, body });
+                }
 
-                let (end_span, arms) = self.parse_line_seperated(
-                    TokenType::RightBrace,
-                    |p| {
-                        // parse the pattern itself
-                        let mut pattern = p.parse_binding_match_pattern(false, false);
-
-                        // optional if after pattern
-                        if p.optional_token(TokenType::If).is_some() {
-                            let body = p.parse_expression(Precedence::Lowest);
-                            let body_span = body.span;
-                            let pattern_span = pattern.span;
-                
-                            pattern = MatchPattern::Conditional { pattern: Box::new(pattern), body }
-                                .to_info(pattern_span.merge(body_span));
-                        }
-                        p.expect_token(TokenType::RightArrow, "after the match arm pattern.");
-                        let body = p.parse_expression(Precedence::Lowest);
-                        MatchArm { pattern, body }
-                    },
-                    |_| None,
-                );
-
-                Expr::Match { match_value, arms }
-                .to_info(s_span.merge(end_span))
+                self.add_expr(start, Expr::Match { match_value, arms })
             },
             
-            TokenType::Enum => {
-                // enum Option { Some(T), None }
-                let (_, name) = self.expect_identifier("to name the enum");
-                self.expect_token(TokenType::LeftBrace, "to open the enum definition block");
-                let (end_span, variants) = self.parse_comma_separated(
-                    TokenType::RightBrace,
-                    |p, _| p.parse_enum_definition_variant(),
+            TokenKind::Enum => {
+                // enum { Some(T), None }
+                self.expect_token(TokenKind::LeftBrace, "to open the enum definition block");
+                let variants = self.parse_comma_separated(
+                    TokenKind::RightBrace,
+                    |p, _| p.parse_enum_variant(),
                     "to close the enum definition block"
                 );
-                Expr::EnumDefinition { name, variants }
-                .to_info(s_span.merge(end_span))
+                self.add_expr(start, Expr::EnumDefinition { variants })
             },
 
-            TokenType::Fn => {
-                let (_, name) = self.expect_identifier("to name the function");
-                self.expect_token(TokenType::LeftParen, "to open the fn definition paramter list");
-                let (_, params) = self.parse_binding_pattern_list(
-                    TokenType::RightParen,
-                    true,
+            TokenKind::Dot => {
+                // enum variant!
+                let data = self.parse_enum_variant();
+                self.add_expr(start, Expr::EnumVariant { data })
+            }
+
+            TokenKind::Fn => {
+                let name = self.expect_identifier("to name the function").into_boxed_str();
+                self.expect_token(TokenKind::LeftParen, "to open the fn definition paramter list");
+
+                let params = self.parse_comma_separated(
+                    TokenKind::RightParen,
+                    |p, _| p.parse_pattern(true),
                     "to close the fn definition parameter list"
-                );
+                )
+                .into_boxed_slice();
 
-                let return_type = if self.optional_token(TokenType::RightArrow).is_some() {
-                    self.parse_type_annotation(false)
-                } else {
-                    TypeKindInfo { span: s_span, typ: TypeKind::Void }
-                };
+                let return_type = self.optional_token(TokenKind::MinusArrow)
+                    .then(|| self.parse_expression(Precedence::Lowest));
 
-                let block_span = self.expect_token(TokenType::LeftBrace, "to open the fn definition block");
-                let body = Box::new(self.parse_block_expression(TokenType::RightBrace, block_span));
-                let body_span = body.span;
+                let body = self.parse_arrow_or_block_expression("function body");
     
-                Expr::FnDefinition { name, params, return_type_annotation: return_type, body, var_id: None }
-                .to_info(s_span.merge(body_span))
+                self.add_expr(start, Expr::FnDefinition { name, closure: AstClosure { params, return_type, body } })
             },
 
-            TokenType::Pipe => {
+            TokenKind::Pipe => {
                 // Closure!
-                let (_, params) = self.parse_binding_pattern_list(
-                    TokenType::RightArrow,
-                    true,
+                let params = self.parse_comma_separated(
+                    TokenKind::EqualArrow,
+                    |p, _| p.parse_pattern(true),
                     "to close the fn definition parameter list"
-                );
+                )
+                .into_boxed_slice();
 
-                let return_type = if self.optional_token(TokenType::Colon).is_some() {
-                    self.parse_type_annotation(false)
-                } else {
-                    TypeKindInfo { span: s_span, typ: TypeKind::ParserUnknown }
-                };
-                
-                let body = Box::new(self.parse_expression(Precedence::Lowest));
-                let body_span = body.span;
+                let body = self.parse_expression_default();
 
-                Expr::Closure { params, return_type_annotation: return_type, body }
-                .to_info(s_span.merge(body_span))
+                self.add_expr(start, Expr::Closure { closure: AstClosure { params, return_type: None, body }, requires_type_annotation: false })
             }
 
-            TokenType::Return => {
-                let expr = Box::new(if self.peek_is_expression_start() && self.peek_is_on_same_line() {
-                    self.parse_expression(Precedence::Lowest)
-                } else {
-                    Expr::Void.to_info(s_span.to_0_width_right())
-                });
-                let expr_span = expr.span;
-
-                Expr::Return(expr)
-                .to_info(s_span.merge(expr_span))
+            TokenKind::Return => {
+                let expr = self.parse_optional_expression();
+                self.add_expr(start, Expr::Return { expr })
             },
 
-            TokenType::Break => {
-                let label = self.parse_optional_label().map(|(_, l)| l);
-
-                let expr = Box::new(if self.peek_is_expression_start() && self.peek_is_on_same_line() {
-                    self.parse_expression(Precedence::Lowest)
-                } else { Expr::Void.to_info(s_span.to_0_width_right()) });
-                let expr_span = expr.span;
-
-                Expr::Break { expr, label }
-                .to_info(s_span.merge(expr_span))
+            TokenKind::Break => {
+                let label = self.optional_label();
+                let expr = self.parse_optional_expression();
+                self.add_expr(start, Expr::Break { expr, label })
             },
 
-            TokenType::Continue => {
-                let mut end_span = s_span;
-                let label = self.parse_optional_label().map(|(span, l)| {
-                    end_span = span;
-                    l
-                });
-                
-                Expr::Continue { label }
-                .to_info(s_span.merge(end_span))
+            TokenKind::Continue => {
+                let label = self.optional_label();
+                self.add_expr(start, Expr::Continue { label })
             }
 
-            TokenType::Mut => {
-                let (end_span, name) = self.expect_identifier(&format!("after {}", TokenType::Mut));
-                Expr::IdentifierRef { name, mutable: true, var_id: None }
-                .to_info(s_span.merge(end_span))
+            TokenKind::Mut => {
+                let name = self.expect_identifier("after mut");
+                self.add_expr(start, Expr::IdentifierRef { name, mutable: true })
             }
 
             _ => {
-                self.error(ErrType::ParserExpectedAnExpression);
-                Expr::Void.to_info(s_span.to_0_width_right())
+                self.error_with_span(ErrType::ParserExpectedAnExpression { found: op.token }, op.span);
+                self.add_expr(start, Expr::ParserError)
             }
         }
     }
@@ -429,117 +417,158 @@ impl Parser<'_> {
 
 
 
-    pub(super) fn parse_block_expression(&mut self, end_token: TokenType, start_span: Span) -> ExprInfo {
-        // '{' already consumed.
-        let label = self.parse_optional_label().map(|(_, l)| l);
 
-        let (end_span, exprs) = self.parse_line_seperated(
+    pub(super) fn parse_block_expression(&mut self, end_token: TokenKind, start: Span) -> ExprId {
+        // '{' already consumed.
+        let label = self.optional_label();
+
+        let exprs = self.parse_line_seperated(
             end_token,
-            |p| p.parse_expression(Precedence::Lowest),
-            |span| Some(Expr::Void.to_info(span))
+            Self::parse_expression_default,
+            |p| Some(p.add_expr(p.prev_token_span, Expr::Void))
         );
 
-        Expr::Block { exprs, label, drops_vars: Vec::new() }.to_info(start_span.merge(end_span))
+        self.add_expr(start, Expr::Block { exprs, label })
+    }
+
+    pub(super) fn parse_arrow_or_block_expression(&mut self, block_name: &str) -> ExprId {
+        if self.optional_token(TokenKind::EqualArrow) {
+            // => ...
+            if !self.peek_is_on_same_line() {
+                self.error(ErrType::ParserArrowExprsHaveToBeOnSameLine);
+            }
+            let expr = self.parse_expression_default();
+            self.add_expr(self.prev_token_span, Expr::Block { exprs: vec![expr], label: None })
+        }
+        else if self.optional_token(TokenKind::LeftBrace) {
+            // { ... }
+            let label = self.optional_label();
+    
+            let exprs = self.parse_line_seperated(
+                TokenKind::RightBrace,
+                Self::parse_expression_default,
+                |p| Some(p.add_expr(p.prev_token_span, Expr::Void))
+            );
+    
+            self.add_expr(self.prev_token_span, Expr::Block { exprs, label })
+        }
+        else {
+            self.error(ErrType::ParserExpectToken {
+                expected: [TokenKind::EqualArrow, TokenKind::LeftBrace].into(),
+                err_msg: format!("to open the {block_name} block"),
+                found: self.peek().token
+            });
+            self.add_expr(self.prev_token_span, Expr::ParserError)
+        }
     }
 
 
-    fn parse_if_and_else(&mut self) -> (Box<ExprInfo>, Box<ExprInfo>) {
-        let if_span = self.expect_token( TokenType::LeftBrace, "to open the if block");
-
-        let then = Box::new(self.parse_block_expression(TokenType::RightBrace, if_span));
-        let alt = Box::new(if self.optional_token(TokenType::Else).is_some() {
-            self.parse_expression(Precedence::Lowest)
+    fn parse_if_and_else(&mut self) -> (ExprId, ExprId) {
+        let then = self.parse_arrow_or_block_expression("if");
+        let alt = if self.optional_token(TokenKind::Else) {
+            self.parse_expression_default()
         } else {
-            Expr::Void.to_info(then.span.to_0_width_right())
-        });
+            let then_span = self.ast.get_expr_span(then);
+            self.add_expr(then_span.to_0_width_right(), Expr::Void)
+        };
 
         (then, alt)
     }
 
-    fn parse_enum_definition_variant(&mut self) -> EnumExpression {
+    fn parse_enum_variant(&mut self) -> AstEnumExpression {
         // Some(T)
-        let (variant_span, name) = self.expect_identifier("to name an enum variant");
+        let variant_name = self.expect_identifier("to name an enum variant").into_boxed_str();
 
-        let attached_tuple = if let Some(s_span) = self.optional_token(TokenType::LeftParen) {
-            self.parse_tuple_type_annotation(s_span, false)
-        } else {
-            TypeKindInfo {
-                span: variant_span,
-                typ: TypeKind::Tup(Vec::new())
-            }
-        };
+        let attached_tuple = self.optional_token(TokenKind::LeftParen).then(|| {
+            self.parse_tuple_expression(self.prev_token_span, None)
+        });
 
-        EnumExpression { variant_name: name, attached_tuple }
+        AstEnumExpression { variant_name, attached_tuple }
     }
 
 
 
 
 
-    fn parse_comma_seperated_expressions(&mut self, end_token: TokenType, error_msg: &str) -> (Span, Vec<ExprInfo>) {
+    fn parse_comma_seperated_expressions(&mut self, end_token: TokenKind, err_msg: &str) -> Vec<ExprId> {
         // '[1, 2, 3]',   '(1, 2)',   dict { 1, 2 }
         self.parse_comma_separated(
             end_token,
-            |p, _| p.parse_expression(Precedence::Lowest),
-            error_msg
+            |p, _| p.parse_expression_default(),
+            err_msg
         )
     }
 
-    pub(super) fn parse_tuple_item<T>(
+    pub(super) fn parse_tuple_item<Id>(
         &mut self,
         default_label: String,
-        parse_item: impl Fn(&mut Self) -> T,
-        is_identifier: impl Fn(&T) -> Option<String>
-    ) -> (String, T) {
-        let item = parse_item(self);
-        if let Some(ident_name) = is_identifier(&item) {
-            if self.optional_token(TokenType::Colon).is_none() {
-                // unlabeled tuple (x, y)
-                (default_label, item)
-            }
-            // else its labeled!
-            else if self.peek_is_expression_start() {
-                // (x: 0, y: 1)
-                (ident_name, parse_item(self))
-            } else {
+        parse_item: impl Fn(&mut Self) -> Id,
+        make_shorthand: impl Fn(&mut Self, String) -> Id,
+    ) -> (String, Id) {
+        if self.peek_one_further().token == TokenKind::Colon {
+            // its labeled!
+            let label = self.expect_identifier("to label the tuple element");
+            self.expect_token(TokenKind::Colon, "unreachable");
+
+            if let TokenKind::Comma | TokenKind::RightParen = self.peek().token {
                 // shorthand (x:, y:)
-                (ident_name, item)
+                (label.clone(), make_shorthand(self, label))
+            } else {
+                // (x: 0, y: 1)
+                (label, parse_item(self))
             }
         } else {
             // unlabeled tuple (1, 2)
-            (default_label, item)
+            (default_label, parse_item(self))
         }
     }
 
-    fn parse_tuple_element_expression(&mut self, default_label: String) -> TupleElement {        
+    fn parse_one_tuple_expression(&mut self, default_label: String) -> AstTupleElement {        
         let (label, expr) = self.parse_tuple_item(
             default_label,
-            |p| p.parse_expression(Precedence::Lowest),
-            |expr| match &expr.expression {
-                Expr::IdentifierRef { name, mutable: false, var_id: _ } => Some(name.clone()),
-                _ => None
-            },
+            Self::parse_expression_default,
+            |p, name| p.add_expr(p.prev_token_span, Expr::IdentifierRef { name, mutable: false }),
         );
-        TupleElement { label, expr }
+        AstTupleElement { label, expr }
+    }
+
+    fn parse_tuple_expression(&mut self, start: Span, first_elem: Option<AstTupleElement>) -> ExprId {
+        let mut tuple_body = vec![];
+        if let Some(x) = first_elem {
+            tuple_body.push(x);
+        }
+        
+        let other_tuple_elems = self.parse_comma_separated(
+            TokenKind::RightParen,
+            |p, i| {
+                p.parse_one_tuple_expression((i+1).to_string())
+            },
+            "to close the tuple"
+        );
+        tuple_body.extend(other_tuple_elems);
+        self.add_expr(start, Expr::Tuple { elems: tuple_body })
     }
 
 
+    pub(super) fn extract_number_expr_from_source(&mut self, span: Span) -> ExprId {
+        let num = self.get_from_source(span)
+            .to_string()
+            .replace('_', "")
+            .parse();
+        if let Ok(val) = num {
+            self.add_expr(span, Expr::Literal { val: AstValue::Num(val) })
+        } else {
+            self.error(ErrType::ParserNumberParseError);
+            self.add_expr(span, Expr::ParserError)
+        }
+    }
 
-    fn parse_path_operator(&mut self, left_expr: ExprInfo) -> ExprInfo {
-        match left_expr.expression {
-            Expr::IdentifierRef { name, mutable: false, var_id: _ } => {
-                let (span, next_path_segment) = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
-                Expr::TypePath(vec![name, next_path_segment]).to_info(left_expr.span.merge(span))
-            }
-            Expr::TypePath(mut segments) => {
-                let (span, next_path_segment) = self.expect_identifier(&format!("after {}", TokenType::ColonColon));
-                segments.push(next_path_segment);
-                Expr::TypePath(segments).to_info(left_expr.span.merge(span))
-            }
-            _ => {
-                self.error(ErrType::ParserUnexpectedPathToken);
-                Expr::Void.to_info(left_expr.span)
-            }
+
+    fn parse_optional_expression(&mut self) -> ExprId {
+        if self.peek_is_on_same_line() && self.peek_is_expression_start() {
+            self.parse_expression_default()
+        } else {
+            self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void)
         }
     }
 }

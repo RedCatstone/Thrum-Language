@@ -2,10 +2,12 @@
 name = "thrum-engine"
 version = "0.1.0"
 edition = "2024"
+authors = ["RedCatstone"]
+license = "MIT"
 
 [dependencies]
-strum_macros = "0.27.2"  # using EnumString for pretty_printing and FromRepr for OpCode conversions
-thiserror = "2.0.18"
+derive_more = { version = "2.1.1", features = ["display", "error"] }
+strum_macros = "0.28.0"  # using EnumString for pretty_printing
 
 [lib]
 name = "thrum_engine"

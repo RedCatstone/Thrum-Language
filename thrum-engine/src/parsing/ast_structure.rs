@@ -1,461 +1,155 @@
-use std::{cmp, collections::HashMap};
-
 use strum_macros::IntoStaticStr;
+use crate::lexing::tokens::{AssignOp, Span, TokenKind};
 
-use crate::{lexing::tokens::{TokenSpan, TokenType}, nativelib::NativeFn, typing::{TypeID, VarID}};
+pub type AstIds = u32;
 
-
-// this is the main struct that builds the AST (Abstract Syntax Tree)
-#[derive(Debug, Clone)]
-pub struct ExprInfo {
-    // the actualy expression info, this is a very long enum.
-    pub expression: Expr,
-
-    // starts out as ParserUnknown, but later gets filled in by the typechecker.
-    pub typ: TypeKind,
-
-    // where its located in the source code, for better errors
-    pub span: Span,
-}
-impl Expr {
-    pub const fn to_info(self, span: Span) -> ExprInfo {
-        ExprInfo { expression: self, span, typ: TypeKind::ParserUnknown }
-    }
-}
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct ExprId(pub AstIds);
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct PatternId(pub AstIds);
 
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Span {
-    pub line: usize,
-    pub byte_offset: usize,
-    pub length: usize,
-}
-impl Span {
-    pub fn merge(self, other: Self) -> Self {
-        // |----------| (span self)
-        // 219029812813 + (12321 * 1259812895)
-        //                 |----------------| (span other)
-        // merged span:
-        // |--------------------------------|
-        let start_byte = cmp::min(self.byte_offset, other.byte_offset);
-        let end_byte = cmp::max(self.byte_offset + self.length, other.byte_offset + other.length);
-        Self {
-            line: cmp::min(self.line, other.line),
-            byte_offset: start_byte,
-            length: end_byte - start_byte,
-        }
-    }
-    pub const fn to_0_width_right(self) -> Self {
-        Self {
-            line: self.line,
-            byte_offset: self.byte_offset + self.length,
-            length: 0
-        }
-    }
-    pub const fn invalid() -> Self {
-        Self { line: usize::MAX, byte_offset: usize::MAX, length: usize::MAX }
-    }
+// this is where the entire Abstract Syntax Tree is stored, just one vec.
+// ast nodes can reference their children with indices
+#[derive(Default, Debug)]
+pub struct AstArena {
+    pub exprs: Vec<Expr>,
+    pub expr_spans: Vec<Span>,
+
+    pub patterns: Vec<Pattern>,
+    pub pattern_spans: Vec<Span>,
 }
 
+impl AstArena {
+    pub fn add_expr(&mut self, span: Span, expr: Expr) -> ExprId {
+        debug_assert_eq!(self.exprs.len(), self.expr_spans.len());
+        let id = AstIds::try_from(self.exprs.len()).unwrap();
+        self.exprs.push(expr);
+        self.expr_spans.push(span);
+        ExprId(id)
+    }
+    #[must_use] pub fn get_expr     (&self, id: ExprId) -> &Expr { &self.exprs    [id.0 as usize] }
+    #[must_use] pub fn get_expr_span(&self, id: ExprId) -> Span  { self.expr_spans[id.0 as usize] }
+
+    pub fn add_pattern(&mut self, span: Span, pattern: Pattern) -> PatternId {
+        debug_assert_eq!(self.patterns.len(), self.pattern_spans.len());
+        let id =  AstIds::try_from(self.patterns.len()).unwrap();
+        self.patterns.push(pattern);
+        self.pattern_spans.push(span);
+        PatternId(id)
+    }
+    #[must_use] pub fn get_pattern     (&self, id: PatternId) -> &Pattern { &self.patterns    [id.0 as usize] }
+    #[must_use] pub fn get_pattern_span(&self, id: PatternId) -> Span     { self.pattern_spans[id.0 as usize] }
+}
 
 
 // Everything is an expression.
 #[derive(Debug, IntoStaticStr, Clone)]
 pub enum Expr {
-    // Primary expressions
-    Literal(Value),
-    IdentifierRef {
-        name: String,
-        mutable: bool,
-        var_id: Option<VarID>,
-    },
+    Literal { val: AstValue },  // 2, "bla", true
+    Prefix { op: TokenKind, right: ExprId },  // !a
+    Infix  { op: TokenKind, op_span: Span, left: ExprId, right: ExprId },  // a + b
 
-    Assign {  // x = 2  or  let x = 2
-        pattern: Box<MatchPatternInfo>,
-        extra_operator: Option<TokenType>,
-        op_span: Span,
-        value: Option<Box<ExprInfo>>,
-    },
+    Block { exprs: Vec<ExprId>, label: Option<String> },  // { ... }
+    IdentifierRef { name: String, mutable: bool },  // x  or  mut x
+    Assign { pattern: PatternId, value: ExprId, extra_op: Option<AssignOp>, op_span: Span }, // x = 2  or  let x = 2
+    EmptyLet { pattern: PatternId },  // let x
+    Const { pattern: PatternId, value: ExprId },  // const x = 5
+    Newtype { expr: ExprId },  // type x = 5  (for now paired with const)
+    Move { expr: ExprId },  // x^
+    MemberAccess { left: ExprId, member: String },  // arr.len
+    TypeMemberAccess { left: ExprId, member: String },  // Option::Some
 
-    Case {  // case ?x = queue.pop()
-        pattern: Box<MatchPatternInfo>,
-        value: Box<ExprInfo>,
-    },
-
-    // { ... }
-    Block {
-        exprs: Vec<ExprInfo>,
-        label: Option<String>,
-        drops_vars: Vec<VarID>,
-    },
-
-    // Operator expressions
-    Prefix {  // !a
-        operator: TokenType,
-        right: Box<ExprInfo>,
-    },
-    Infix {  // a + b
-        operator: TokenSpan,
-        left: Box<ExprInfo>,
-        right: Box<ExprInfo>,
-    },
-
-    // "a{b}c" -> [Literal("a"), Identifier("b"), Literal("c")]
-    TemplateString(Vec<ExprInfo>),
-    Tuple(Vec<TupleElement>),  // (1, 2)
-    Array(Vec<ExprInfo>),  // [1, 2]
-
-
-    Move {  // x^
-        expr: Box<ExprInfo>,
-        auto_clone: bool,
-    },
+    TemplateString { elems: Vec<ExprId> },  // "a{b}c" -> [Literal("a"), IdentifierRef("b"), Literal("c")]
+    Tuple { elems: Vec<AstTupleElement> },  // (1, 2)
+    TupleArr { elem: ExprId, length: ExprId },  // (0; 4)
+    Index { left: ExprId, index: ExprId },  // arr[1]
     
+    If { condition: ExprId, then: ExprId, alt: ExprId },  // if true { ... } else ... (alt is void if not present)
+    Ensure { condition: ExprId, alt: ExprId, then: ExprId },  // ensure true else { ... }
+    Is { value: ExprId, pattern: PatternId },  // queue.pop() is let .Some(x)
+    Match { match_value: ExprId, arms: Vec<AstMatchArm> },  // match response { 2 -> "success", _ -> "nope." }
 
-    MemberAccess { // arr.len
-        left: Box<ExprInfo>,
-        member: String,
-        resolved_index: Option<usize>,
-    },
-    // Option::Some
-    TypePath(Vec<String>),
-
-    Call {  // x(1, 2)
-        callee: Box<ExprInfo>,
-        arguments: Vec<ExprInfo>,
-    },
-
-    Index {  // arr[1]
-        left: Box<ExprInfo>,
-        index: Box<ExprInfo>,
-    },
-
-    If {  // if true { ... } else ...
-        condition: Box<ExprInfo>,
-        then: Box<ExprInfo>,
-        alt: Box<ExprInfo>,  // void if not present
-    },
+    While { condition: ExprId, body: ExprId, label: String, },  // while true { ... }
+    Loop { body: ExprId, label: String },  // loop { ... }
     
-    Ensure {  // ensure true else { ... }
-        condition: Box<ExprInfo>,
-        alt: Box<ExprInfo>,
-        then: Box<ExprInfo>
-    },
-    
-    Match {  // match response { 2 -> "success", _ -> "nope." }
-        match_value: Box<ExprInfo>,
-        arms: Vec<MatchArm>,
-    },
+    FnDefinition { name: Box<str>, closure: AstClosure },  // fn square(x: num) { x**2 }
+    Closure { closure: AstClosure, requires_type_annotation: bool },  // |x -> x**2
+    Call { callee: ExprId, arguments: Vec<ExprId> },  // x(1, 2)
+    TypeInstantiation { typ: ExprId, data: Vec<ExprId> },  // Point{ x: 1, y: 2 }  (data is a tuple here), but here its not:  Number{ 3 }
+    EnumDefinition { variants: Vec<AstEnumExpression> },  // enum Color { Red, Blue, Green(data) }
+    EnumVariant { data: AstEnumExpression },  // .North
 
-    // sugar for a normal loop
-    While {  // while true { ... }
-        condition: Box<ExprInfo>,
-        body: Box<ExprInfo>,
-        label: String,
-    },
+    Return { expr: ExprId },  // return ...
+    Break { label: Option<String>, expr: ExprId },  // break #label ...
+    Continue { label: Option<String> },  // continue #label
 
-    Loop {  // loop { ... }
-        body: Box<ExprInfo>,
-        label: String,
-    },
-
-    EnumDefinition {  // enum Color { Red, Blue, Green(data) }
-        name: String,
-        variants: Vec<EnumExpression>,
-    },
-
-    FnDefinition {  // fn square(x: num) -> { x**2 }
-        name: String,
-        var_id: Option<VarID>,
-        params: Vec<MatchPatternInfo>,
-        return_type_annotation: TypeKindInfo,
-        body: Box<ExprInfo>,
-    },
-
-    Closure {  // |x -> x**2
-        params: Vec<MatchPatternInfo>,
-        return_type_annotation: TypeKindInfo,
-        body: Box<ExprInfo>,
-    },
-
-    // return ...
-    Return(Box<ExprInfo>),
-    // break #label ...
-    Break {
-        label: Option<String>,
-        expr: Box<ExprInfo>,
-    },
-    // continue #label
-    Continue {
-        label: Option<String>,
-    },
-
-    // Semicolons are void expressions.
-    Void,
+    Void,  // Semicolons are void expressions.
+    ParserError,  // desugar and typechecking will just ignore these nodes
 }
 
+
+
+
 #[derive(Debug, Clone)]
-pub enum Value {
+pub enum AstValue {
     Num(f64),
     Str(String),
     Bool(bool),
-
-    // for evaluating the tree
-    Arr(Vec<Self>),
-    Tup(Vec<Self>),
-
-    // raw unsafe pointer for the vm
-    // this SHOULD be fully safe, since the borrow checker checked all the lifetimes.
-    ValuePointer(*mut Self),
-    NativeFn(NativeFn),
-    Closure {
-        chunk_index: usize,
-    },
-
-    // for functions that return nothing
-    Void,
-
-    // for empty local slots in the vm
-    // i could also use <void> here, but i want to be more clear
-    Empty,
-}
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Self::Num(l), Self::Num(r)) => l.partial_cmp(r),
-            (Self::Str(l), Self::Str(r)) => l.partial_cmp(r),
-            (Self::Bool(l), Self::Bool(r)) => l.partial_cmp(r),
-            (Self::Arr(l), Self::Arr(r)) => l.partial_cmp(r),
-            (Self::Tup(l), Self::Tup(r)) => l.partial_cmp(r),
-            (Self::Void, Self::Void) => Some(std::cmp::Ordering::Equal),
-            (l, r) => panic!("Cannot compare {l} with {r}"),
-        }
-    }
-}
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool { self.partial_cmp(other) == Some(std::cmp::Ordering::Equal) }
 }
 
 
 
-
-#[derive(Debug, Clone)]
-pub struct MatchPatternInfo {
-    pub pattern: MatchPattern,
-    pub typ: TypeKind,
-    pub span: Span,
-
-    // only the outermost pattern has stuff in these.
-    pub vars_defined: Vec<(String, VarID)>,
-    pub covered_cases: Vec<PatternSpace>,
-}
-impl MatchPattern {
-    pub const fn to_info(self, span: Span) -> MatchPatternInfo {
-        MatchPatternInfo {
-            pattern: self,
-            typ: TypeKind::ParserUnknown,
-            span,
-            vars_defined: Vec::new(),
-            covered_cases: Vec::new(),
-        }
-    }
-}
 
 
 #[derive(Debug, IntoStaticStr, Clone)]
-pub enum MatchPattern {
-    Binding {  // x: num
-        name: String,
-        mutable: bool,
-        var_id: Option<VarID>,
-    },
+pub enum Pattern {
     Wildcard,  // _
-    Or(Vec<MatchPatternInfo>),
-    Array(Vec<MatchPatternInfo>),  // [...]
-    Tuple(Vec<TupleMatchPattern>),  // (...)
-    EnumVariant {
-        path: Vec<String>, // std::Option
-        name: String,   // Some
-        inner_patterns: Vec<MatchPatternInfo>,
-    },
-    Literal(Value),
-    Conditional {
-        pattern: Box<MatchPatternInfo>,
-        body: ExprInfo,
-    },
-
-    // PlaceIdentifier {
-    //     name: String,
-    //     var_id: Option<VarID>
-    // },
-    PlacePointer {
-        expr: ExprInfo
-    },
-}
-
-
-#[derive(Debug, Clone)]
-pub enum PatternSpace {
-    // Num { from: f64, to: f64 },
-    Bool { bool: bool },
-
-    // if i cover (false, false) it will be [true, All], [false, true]
-    // if i then cover (_, true) it will be [true, false] (from first missingcase, the second one results in no case)
-    Tup { inners: Vec<Self> },
-
-    // EnumVariant { name: String, attached_tuple: Box<PatternSpace/*::Tup */> },
-
-    // this represents ALL cases
-    // if we are missing ALL and a wildcard subtracts ALL from that -> empty (covered)
-    All,
-}
-
-
-
-#[derive(Debug, Clone)]
-pub struct TupleElement {
-    pub label: String,
-    pub expr: ExprInfo,
-}
-#[derive(Debug, Clone)]
-pub struct TupleMatchPattern {
-    pub label: String,
-    pub pattern: MatchPatternInfo,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct TupleType {
-    pub label: String,
-    pub typ: TypeKind,
-}
-
-
-
-#[derive(Debug, Clone)]
-pub struct MatchArm {
-    pub pattern: MatchPatternInfo,
-    pub body: ExprInfo,
-}
-
-#[derive(Debug, Clone)]
-pub struct EnumExpression {
-    pub variant_name: String,
-    pub attached_tuple: TypeKindInfo,
-}
-
-
-
-
-
-
-
-#[derive(Debug, Clone)]
-pub struct TypeKindInfo {
-    pub typ: TypeKind,
-    pub span: Span
-}
-
-
-
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypeKind {
-    Num,
-    Str,
-    Bool,
-
-    Arr(Box<Self>),
-    Tup(Vec<TupleType>),
-    Fn {
-        param_types: Vec<Self>,
-        return_type: Box<Self>,
-    },
-
-    Pointer {
-        mutable: bool,
-        inner: Box<Self>,
-        borrows_var: Option<VarID>
-    },
-
-    // type Point = { x: u32, y: u32 }
-    CustomType {
-        name: String,
-        generic_types: Vec<Self>,
-    },
-
-    Inference(TypeID),
-    TypeError,
+    Or(Vec<PatternId>),  // ... | ...
+    Tuple(Vec<AstTuplePattern>),  // (...)
     
-    // 'let', 'FnDefinition', empty block, sometimes if statement
-    Void,
-    // return for example, type NEVER gets hit.
-    Never,
+    Binding { name: Box<str>, mutable: bool },  // x: num
+    EnumVariant { name: String, attached_tuple: Option<PatternId> },
+    Conditional { pattern: PatternId, cond: ExprId },
 
-    // parser puts this type everywhere at first. should not exist anymore after typecheck.
-    ParserUnknown,
-
-}
-impl TypeKind {
-    pub fn from_custom_type(self) -> Self {
-        let Self::CustomType { name, generic_types } = self
-        else { unreachable!("this function should only be called with TypeKind::CustomStruct. ({self})") };
-
-        match name.as_str() {
-            "num" => Self::Num,
-            "bool" => Self::Bool,
-            "str" => Self::Str,
-            "void" => Self::Void,
-            "never" => Self::Never,
-            "arr" => {
-                assert!(generic_types.len() == 1, "arr type has to have 1 generic. (this panic definitely needs fixing later)");
-                Self::Arr(Box::new(generic_types[0].clone()))
-            }
-            _ => Self::CustomType {
-                name,
-                generic_types
-            }
-        }
-    }
-
-    pub fn is_never(&self) -> bool {
-        *self == Self::Never
-    }
-
-    pub fn prune(&self, type_lookup: &HashMap<TypeID, Self>) -> Self {
-        if let Self::Inference(id) = self
-            && let Some(entry) = type_lookup.get(id) {
-                entry.prune(type_lookup)
-                // type_lookup.insert(*id, pruned.clone());
-            }
-        else { self.clone() }
-    }
-
-    pub fn is_auto_clone(&self) -> bool {
-        match self {
-            Self::Num
-            | Self::Bool
-            | Self::Pointer { .. }
-            | Self::Fn { .. } => true,
-
-            Self::Str
-            | Self::Arr(..)
-            | Self::Tup(..)
-            | Self::CustomType { .. }
-            | Self::Void
-            | Self::Never
-            | Self::TypeError => false,
-
-            Self::Inference(..)
-            | Self::ParserUnknown => unreachable!("is_auto_clone() should not be called with type {self}")
-        }
-    }
+    Typed { pattern: PatternId, typ: ExprId },
+    
+    CompareExpr(ExprId),  // x is 3
+    PlacePointer(ExprId),  // x = ...
 }
 
-#[derive(Debug)]
-pub enum DefinedTypeKind {
-    Enum {
-        name: String,
-        variants: Vec<EnumExpression>
-    },
 
-    Native(TypeKind),
+
+
+
+// random simple structs
+#[derive(Debug, Clone)]
+pub struct AstClosure {
+    pub params: Box<[PatternId]>,
+    pub return_type: Option<ExprId>,
+    pub body: ExprId,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstTupleElement {
+    pub label: String,
+    pub expr: ExprId,
+}
+#[derive(Debug, Clone)]
+pub struct AstTuplePattern {
+    pub label: String,
+    pub pattern: PatternId,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct AstMatchArm {
+    pub pattern: PatternId,
+    pub body: ExprId,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstEnumExpression {
+    pub variant_name: Box<str>,
+    pub attached_tuple: Option<ExprId>,
 }
