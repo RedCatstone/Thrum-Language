@@ -55,7 +55,7 @@ pub enum Expr {
     Assign { pattern: PatternId, value: ExprId, extra_op: Option<AssignOp>, op_span: Span }, // x = 2  or  let x = 2
     EmptyLet { pattern: PatternId },  // let x
     Const { pattern: PatternId, value: ExprId },  // const x = 5
-    Newtype { expr: ExprId },  // type x = 5  (for now paired with const)
+    CustomType { expr: ExprId },  // type x = 5  (for now paired with const)
     Move { expr: ExprId },  // x^
     MemberAccess { left: ExprId, member: String },  // arr.len
     TypeMemberAccess { left: ExprId, member: String },  // Option::Some
@@ -71,6 +71,7 @@ pub enum Expr {
     Match { match_value: ExprId, arms: Vec<AstMatchArm> },  // match response { 2 -> "success", _ -> "nope." }
 
     While { condition: ExprId, body: ExprId, label: String, },  // while true { ... }
+    For { pattern: PatternId, iter_expr: ExprId, body: ExprId, label: String },  // for x in 0..5 { ... }
     Loop { body: ExprId, label: String },  // loop { ... }
     
     FnDefinition { name: Box<str>, closure: AstClosure },  // fn square(x: num) { x**2 }
@@ -79,6 +80,9 @@ pub enum Expr {
     TypeInstantiation { typ: ExprId, data: Vec<ExprId> },  // Point{ x: 1, y: 2 }  (data is a tuple here), but here its not:  Number{ 3 }
     EnumDefinition { variants: Vec<AstEnumExpression> },  // enum Color { Red, Blue, Green(data) }
     EnumVariant { data: AstEnumExpression },  // .North
+
+    ImplBlock { typ: ExprId, const_exprs: Vec<ExprId> },  // impl Expr { ... }
+    ImplSelf { },
 
     Return { expr: ExprId },  // return ...
     Break { label: Option<String>, expr: ExprId },  // break #label ...

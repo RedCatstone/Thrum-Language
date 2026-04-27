@@ -1,5 +1,6 @@
-fn fib(n: num) -> num {
-    if n < 2 { return n }
-    return fib(n-1) + fib(n-2)
+type N = num
+impl N {
+    fn do_nothing(self: Self) -> Self => self
 }
-fib(8)
+
+N{ 68 }.do_nothing()

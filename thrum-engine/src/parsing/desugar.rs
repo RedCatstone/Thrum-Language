@@ -1,8 +1,23 @@
-use crate::{lexing::tokens::TokenKind, parsing::ast_structure::{AstArena, Expr, Pattern}};
+use crate::{lexing::tokens::TokenKind, parsing::ast::{AstArena, AstTuplePattern, Expr, Pattern}};
 
 
 
 pub fn desugar_after_parsing(ast: &mut AstArena) {
+    // these macros are to get around the borrow checker
+    // it doesn't allow `ast.add_expr(span, ast.add_expr(...))` :(
+    macro_rules! pattern {
+        ($span:expr, $pattern:expr) => {{
+            let pattern = $pattern;
+            ast.add_pattern($span, pattern)
+        }};
+    }
+    macro_rules! expr {
+        ($span:expr, $expr:expr) => {{
+            let expr = $expr;
+            ast.add_expr($span, expr)
+        }};
+    }
+
     // this only loops up to the original length
     for i in 0..ast.exprs.len() {
         let expr = ast.exprs[i].clone();
@@ -15,27 +30,59 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
             // ==========================================
             Expr::While { condition, body, label } => {
                 // modify into
-                let void = ast.add_expr(span, Expr::Void);
-                let break_ = ast.add_expr(span, Expr::Break { expr: void, label: None });
-
                 ast.exprs[i] = Expr::Loop {
                     label,
-                    body: ast.add_expr(span, Expr::If {
+                    body: expr!(span, Expr::If {
                         condition,
                         then: body,
-                        alt: break_
+                        alt: expr!(span, Expr::Break { label: None, expr: expr!(span, Expr::Void) })
                     })
                 }
             }
 
+            // ==========================================
+            // desugar `for PATT in ITER_EXPR { BODY }` 
+            // --> `{ let mut i = ITER_EXPR; while i.next() is .Some(PATT) { BODY } }`
+            // ==========================================
+            Expr::For { pattern, iter_expr, body, label } => {
+                // modify into
+                ast.exprs[i] = Expr::Block {
+                    label: None,
+                    exprs: vec![
+                        expr!(span, Expr::Assign {
+                            pattern: pattern!(span, Pattern::Binding { name: "i".into(), mutable: true }),
+                            value: iter_expr,
+                            extra_op: None,
+                            op_span: span
+                        }),
+                        expr!(span, Expr::While {
+                            body,
+                            label,
+                            condition: expr!(span, Expr::Is {
+                                value: expr!(span, Expr::Call {
+                                    callee: expr!(span, Expr::MemberAccess {
+                                        left: expr!(span, Expr::IdentifierRef { name: "i".into(), mutable: false }),
+                                        member: "next".into()
+                                    }),
+                                    arguments: Vec::new()
+                                }),
+                                pattern: pattern!(span, Pattern::EnumVariant {
+                                    name: "Some".into(),
+                                    attached_tuple: Some(pattern!(span, Pattern::Tuple(vec![AstTuplePattern { label: "0".into(), pattern }])))
+                                })
+                            })
+                        })
+                    ]
+                }
+            }
 
             // ==========================================
             // desugar `fn x() { ... }` --> `const x = |-> ...`
             // ==========================================
             Expr::FnDefinition { name, closure } => {
                 ast.exprs[i] = Expr::Const {
-                    pattern: ast.add_pattern(span, Pattern::Binding { name, mutable: false }),
-                    value: ast.add_expr(span, Expr::Closure { closure, requires_type_annotation: true })
+                    pattern: pattern!(span, Pattern::Binding { name, mutable: false }),
+                    value: expr!(span, Expr::Closure { closure, requires_type_annotation: true })
                 }
             }
             
@@ -45,7 +92,7 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
             Expr::Infix { op: TokenKind::NotEqual, op_span, left, right } => {
                 ast.exprs[i] = Expr::Prefix { 
                     op: TokenKind::Exclamation,
-                    right: ast.add_expr(span, Expr::Infix { op: TokenKind::EqualEqual, op_span, left, right }) 
+                    right: expr!(span, Expr::Infix { op: TokenKind::EqualEqual, op_span, left, right }) 
                 };
             }
             // ==========================================
@@ -54,7 +101,7 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
             Expr::Infix { op: TokenKind::LessEqual, op_span, left, right } => {
                 ast.exprs[i] = Expr::Prefix { 
                     op: TokenKind::Exclamation,
-                    right: ast.add_expr(span, Expr::Infix { op: TokenKind::Greater, op_span, left, right }) 
+                    right: expr!(span, Expr::Infix { op: TokenKind::Greater, op_span, left, right }) 
                 };
             }
             // ==========================================
@@ -63,7 +110,7 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
             Expr::Infix { op: TokenKind::GreaterEqual, op_span, left, right } => {
                 ast.exprs[i] = Expr::Prefix { 
                     op: TokenKind::Exclamation,
-                    right: ast.add_expr(span, Expr::Infix { op: TokenKind::Less, op_span, left, right }) 
+                    right: expr!(span, Expr::Infix { op: TokenKind::Less, op_span, left, right }) 
                 };
             }
             

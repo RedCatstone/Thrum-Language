@@ -1,4 +1,4 @@
-# Thrum Language
+# Thrum Language Ideas
 Thrum is a very scripty language that takes inspiration mainly from Rust, but also Swift, Zig, Javascript and probably more!  
 The Syntax is simple, but still compiles to just as efficient code as rust (in the future, for now its a vm) because it uses rusts memory model. No GC, no RC.  
 It has a borrow checker, which can be made less strict than Rusts for single-threaded code.  
@@ -18,33 +18,13 @@ Since languages that have really fun and nice pattern-matching are usually reall
 - Range - 0..10 (exclusive 0-9) or 0..=10 (exclusive 0-9)
 
 ## Operators
-- Plus +
-- Minus -
-- Multiplication *
-- Division /
-- Exponentiation **
-- Modulo %
-- Nullish Coalescing ??
-- Bitwise AND ~&
-- Bitwise OR ~|
-- Bitwise XOR ~^
-- Bitwise NOT ~!
-- Left Shift ~<<
-- Right Shift ~>>
-- all of the above can be paired with =
+- Math: `+` `-` `*` `/` `%`
+    - all can be paired with =
+- Bitwise: AND: `~&`, OR: `~|`, XOR: `~^`, NOT: `~!`, L-SHIFT: `~<<`, R-SHIFT: `~>>`
+    - all can be paired with =
+- Boolean: `and` `or` `!`
+- Comparison: `<` `<=` `>` `>=` `is` (pattern matching for `==` and `!=`)
 
-Boolean Operators:
-- And &
-- Or |
-- Not !
-
-Comparison Operators:
-- Less <
-- Greater >
-- Less (inclusive) <=
-- Greater (inclusive) >=
-- Equals ==
-- Not Equals !=
 
 ## Base Syntax
 1. Semicolons aren't required, but can still be used instead of a new line to write multiple expressions on one line: `let x = 1; x + 2`
@@ -70,9 +50,9 @@ Comparison Operators:
 - `"this is a string"`
 - string interpolation:
     - `"1 + 1 = {1 + 1}" //-> "1 + 1 = 2"`
-    - empty `{}` get ignored by interpolation. This is so you can use a standard str function if stuff ends up too long. These arguments will then fill the empty `{}` in order.
+    - empty `{}` get ignored by interpolation. This is so you can use .fmt!() if stuff ends up too long. These arguments will then fill the empty `{}` in order. (that function is a macro because the searching for {} is exclusively done at compiletime.)
 ```thrum
-"hello {} and {other_name}, today is {}".fmt(
+"hello {} and {other_name}, today is {}".fmt!(
     System.name.hack
     System.calender.hack.getCurrentDayAsWeekday(),
 )
@@ -86,15 +66,15 @@ Comparison Operators:
 - MAYBE tuple types can have defaults: `let tup: (x: num, y: num = 3) = (x: 2)`
 
 ## Variable Bindings
-1. `let a = 5`
-    - a can then be used anywhere: `let b = a + 2`
-    - a can't be modified.
-2. `let mut b = 3`
-    - b can then be modified: `b += 51`
-3. Destructuring:
-    - `let [var1, _, var2] = [1, 2, 3]`  // _ means ignore
-    - `let (x, y) = (1, "string")`
-    - `let (id: x, y:) = (y: 1, id: 30)`
+```thrum
+let a = 5
+let mut b = a + 2
+b += 51
+
+let [var1, _, var2] = [1, 2, 3]  // _ ignores a value
+let (x, y) = (1, "string")
+let (id:, y:) = (y: 1, id: 30)  // binds id and y
+```
 
 
 ## Ownership / Borrowing
@@ -184,6 +164,7 @@ let nested_arr = [x, [2, 3]]
 
 - anonymous functions / closure syntax `|param1, param2, ... => body`:
     - `(0..10).iter().map(|x => x + 2).collect<Vec>() //-> [2, 3, 4, 5, ..., 11]`
+    - `thread.spawn(|=> print("spawned!"))`
 - can be called right at creation: `(|x => x + 1)(5)` -> 6
 
 
@@ -200,6 +181,7 @@ is _ => "default"
     - wildcard: `_`
     - tuple `(x, y)`, `(x: 2, y: 3)`, `(x, ...)`
     - enum `.North`, `.Some(x: 2)`, `?sugar`
+    - string `"result: 42" is "result: {let result}"`
     - or `pattern | other`
     - conditional `pattern and cond`, e.g. `x is let y and y > 5`
 - quick one line matches can be done using an `is`-expression.
@@ -217,6 +199,18 @@ is _ => "default"
         - `x ~> 0..5`
         - `x matches 0..5`
         - but now its `x is 0..5`
+```thrum
+ensure File.open("data.txt") is let .Ok(file) else return .Err("Failed to open")
+for line in file.lines() {
+    ...
+}
+
+// string matching (0 or 1 holes allowed, otherwise this would need a specific searching order and probably the heap)
+if output is "ERROR: {let msg}" => print("{msg}")
+
+// slices
+if recipe is let [...ingredients, result] => print_recipe(ingredients, result)
+```
 
 ## Labeled Loops and Break/Continue
 - loops can be given labels like so: `for #outer i in 0..10 { ... }`
@@ -229,28 +223,56 @@ is _ => "default"
 - constants are evaluated at compile time.
 - `const x = 5 * 3`
 - `const x = { let y = 5; y * 3 }`
+- they 
 
 ## Types are values
 - types can be defined anywhere, but they have the same scoping as variables.
-    - `type Point = (x: num, y: num)`
-    - `type Directions = enum { North, East, West, South(num) }`
-    - enum types can have extra Tuples as data on them.
-- types can have `impl Point { ... }` blocks. any variables/functions implemented here can then be accessed using `Point::distance()`.
+```thrum
+type Number = u32
+let x = Number(13)
+x + 4  //! ERROR: can't add types Number and u32
+x + Number(4)  // this works
+
+const Number2 = Number  // this is just a const variable, not a newtype.
+x + Number2(5)  // works
+
+
+// a tuple is a Type, if all its fields are types.
+type Point = (x: num, y: num)
+let p = Point(x: 3, y: 4)
+assert!(p.distance() is 5)
+
+impl Point {
+    fn distance(&self) -> num => (self.x.pow(2) + self.y.pow(2)).sqrt()
+}
+
+
+type Direction = enum { North, East, West, South(num) }
+let dir1: Direction = .North
+let dir2 = Direction.South(4)
+
+
+// would be really cool if this works:
+type usize = u{System.bits}
+// but probably gonna be this
+type isize = match System.bits
+    is 64 => i64
+    is 32 => i32
+    is _ => panic("could not generate type isize...")
+```
 
 ## Special Syntax
-- `expression_Type`:
+- DEFINITELY NOT `expression_Type`:
     - `[1, 2, 3]_Vec` desugars to `Vec::new(data = [1, 2, 3])`
     - `let complex_number = 1 + 2_Complex` this syntax would be really cool, and very scripty, which is the goal. `1 + 2_I` would be even better, but i doubt it would work with this system.
 - special panicky sugared syntax:
     - .get(...) can be called using struct[...].
-    - .insert(..., ...) can be called using struct[...] = ... 
-- defer for end of scope logic
+    - .insert(..., ...) can be called using struct[...] = ...
 - ensure for inverted binding-if's: `ensure x_option is ?x else { return }`
-- PROBABLYNOT a function called with only 1 string argument can be called without parantheses.
+- DEFINITELY NOT a function called with only 1 string argument can be called without parantheses.
     - `"a=b=c".split"=" //-> ["a", "b", "c"]`
-    - `print"{} + {} = {}"(1, 1, 2) //-> 1 + 1 = 2` this does look weird though...
-    - `print("{} + {} = {}"(1, 1, 2)) //-> 1 + 1 = 2`
-- slice, Vec, Set, range, str all implement .iter()
+    - `print"{} + {} = {}".fmt!(1, 1, 2) //-> 1 + 1 = 2` this does look weird though...
+    - `print("{} + {} = {}".fmt!(1, 1, 2)) //-> 1 + 1 = 2`
 
 
 # Motivations
@@ -262,3 +284,14 @@ I'm trying to make the absolute perfect language for myself.
 |,4- , ) )-,_  ,\ (  `'-'
  `-'' (_/-'   `-'\_)
 ```
+
+
+# Todos
+- data on enums
+- for loops
+- complete vm remake. (current one uses unsafe and slow push/pop stack)
+    - with that also a simple optimizer and evaluator remake
+- swap num to u{n} / i{n} / f{16n}
+- slices
+- pointer pattern matching
+- far future: heap data [1, 2, 3]

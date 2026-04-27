@@ -78,10 +78,11 @@ pub enum TokenKind {
     For, In, While, Loop,
     Break, Continue,
     Fn, Return,
+    FnSelf, ImplSelf,
     Match, Is,
     Let, Const, Type,
     Mut, Ref, Own,
-    Enum,
+    Enum, Impl,
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AssignOp {
@@ -129,17 +130,18 @@ impl TokenKind {
         (">=", Self::GreaterEqual), (">", Self::Greater),
     ];
 
-    pub const KEYWORDS: [(&'static str, Self); 24] = [
+    pub const KEYWORDS: [(&'static str, Self); 26] = [
         // Keywords
         ("and", Self::And), ("or", Self::Or),
         ("if", Self::If), ("else", Self::Else), ("ensure", Self::Ensure),
         ("for", Self::For), ("in", Self::In), ("while", Self::While), ("loop", Self::Loop),
         ("break", Self::Break), ("continue", Self::Continue),
         ("fn", Self::Fn), ("return", Self::Return),
+        ("Self", Self::ImplSelf),
         ("match", Self::Match), ("is", Self::Is),
         ("let", Self::Let), ("const", Self::Const), ("type", Self::Type),
         ("mut", Self::Mut), ("ref", Self::Ref), ("own", Self::Own),
-        ("enum", Self::Enum),
+        ("enum", Self::Enum), ("impl", Self::Impl),
 
         // Literals
         ("true", Self::Bool(true)), ("false", Self::Bool(false)),

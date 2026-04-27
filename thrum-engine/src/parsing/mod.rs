@@ -1,6 +1,6 @@
-use crate::{ErrType, ProgramError, ProgramErrorData, WarnType, lexing::tokens::{AssignOp, Span, TokenKind, TokenSpan}, parsing::ast_structure::{AstArena, Expr, ExprId, Pattern, PatternId}};
+use crate::{ErrType, ProgramError, ProgramErrorData, WarnType, lexing::tokens::{AssignOp, Span, TokenKind, TokenSpan}, parsing::ast::{AstArena, Expr, ExprId, Pattern, PatternId}};
 
-pub mod ast_structure;
+pub mod ast;
 pub mod desugar;
 mod parse_expressions;
 mod parse_patterns;
@@ -218,6 +218,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Let | TokenKind::If | TokenKind::Ensure | TokenKind::While
             | TokenKind::Loop | TokenKind::Match | TokenKind::Enum | TokenKind::Fn | TokenKind::Pipe
             | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Mut
+            | TokenKind::Impl | TokenKind::For
         )
     }
 

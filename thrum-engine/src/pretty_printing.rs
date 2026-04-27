@@ -1,5 +1,5 @@
 use std::fmt::{self, Display, Write};
-use crate::{ProgramError, ProgramSourceData, parsing::ast_structure::{AstArena, AstClosure, Expr, ExprId, Pattern, PatternId}};
+use crate::{ProgramError, ProgramSourceData, parsing::ast::{AstArena, AstClosure, Expr, ExprId, Pattern, PatternId}};
 
 
 
@@ -130,7 +130,7 @@ impl AstArena {
                 self.format_pattern_recursive(*pattern, s, ind + 1, "pattern", false)?;
                 self.format_expr_recursive(*value, s, ind + 1, "value", true)
             }
-            Expr::Newtype { expr } | Expr::Move { expr } => {
+            Expr::CustomType { expr } | Expr::Move { expr } => {
                 writeln!(s)?;
                 self.format_expr_recursive(*expr, s, ind + 1, "expr", true)
             }
@@ -194,6 +194,12 @@ impl AstArena {
                 self.format_expr_recursive(*condition, s, ind + 1, "cond", false)?;
                 self.format_expr_recursive(*body, s, ind + 1, "body", true)
             }
+            Expr::For { pattern, iter_expr, body, label } => {
+                writeln!(s, " - #{label}")?;
+                self.format_pattern_recursive(*pattern, s, ind + 1, "pattern", false)?;
+                self.format_expr_recursive(*iter_expr, s, ind + 1, "iter_expr", false)?;
+                self.format_expr_recursive(*body, s, ind + 1, "body", true)
+            }
             Expr::Loop { body, label } => {
                 writeln!(s, " - #{label}")?;
                 self.format_expr_recursive(*body, s, ind + 1, "body", true)
@@ -243,6 +249,17 @@ impl AstArena {
                     self.format_expr_recursive(data, s, ind + 1, "data", true)?;
                 }
                 Ok(())
+            }
+            Expr::ImplBlock { typ, const_exprs } => {
+                writeln!(s)?;
+                self.format_expr_recursive(*typ, s, ind + 1, "typ", false)?;
+                for (i, &e) in const_exprs.iter().enumerate() {
+                    self.format_expr_recursive(e, s, ind + 1, "", i == const_exprs.len() - 1)?;
+                }
+                Ok(())
+            }
+            Expr::ImplSelf {  } => {
+                writeln!(s)
             }
             Expr::Return { expr } => {
                 writeln!(s)?;

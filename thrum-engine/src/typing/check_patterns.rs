@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use derive_more::Display;
 
 use crate::{
-    ErrType, parsing::ast_structure::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string,
-    typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, type_environment::TypeVarConstVal}, vm_compiling::RuntimeValue
+    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string,
+    typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -248,14 +248,16 @@ impl<'ast> TypeChecker<'ast> {
 
 
 
-    pub(super) fn check_annotation_meta_type_id(&mut self, expr: ExprId) -> TypeId {
+    pub(super) fn check_annotation_meta_type_id(&mut self, expr: ExprId, needs_typechecking: bool) -> TypeId {
         // typecheck first
-        let expr_type = self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
+        if needs_typechecking {
+            self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
+        }
 
         // then evaluate
         self.evaluate_expr(expr).map_or(
             TypeId::ERROR,
-            |val| self.extract_meta_type_from_runtime_val(val, expr_type)
+            |val| self.extract_meta_type_from_runtime_val(val, self.typed_ast.expr_types[expr.0 as usize])
         )
     }
 
@@ -263,8 +265,9 @@ impl<'ast> TypeChecker<'ast> {
         match val {
             RuntimeValue::Type(id) => id,
             RuntimeValue::Tup(elems) => {
-                let Type::Tup(expected_tup) = self.prune_type_once(expected_type, None) else {
-                    unreachable!("type mismatch at runtime!?")
+                let typ = self.prune_type_once(expected_type, None);
+                let Type::Tup(expected_tup) = typ else {
+                    unreachable!("type mismatch at runtime!? {typ}")
                 };
 
                 let meta_elems = elems.into_iter()
@@ -285,7 +288,7 @@ impl<'ast> TypeChecker<'ast> {
 
     pub(super) fn get_pattern_type(&mut self, pattern: PatternId) -> Option<TypeId> {
         if let Pattern::Typed { pattern: _, typ } = self.ast.get_pattern(pattern) {
-            Some(self.check_annotation_meta_type_id(*typ))
+            Some(self.check_annotation_meta_type_id(*typ, true))
         } else {
             None
         }

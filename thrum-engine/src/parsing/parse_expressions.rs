@@ -1,6 +1,6 @@
 use crate::{
     ErrType, WarnType, lexing::{self, tokens::{AssignOp, Span, TokenKind, TokenSpan}},
-    parsing::{Parser, ast_structure::{AstClosure, AstEnumExpression, AstMatchArm, AstTupleElement, AstValue, Expr, ExprId}}
+    parsing::{Parser, ast::{AstClosure, AstEnumExpression, AstMatchArm, AstTupleElement, AstValue, Expr, ExprId}}
 };
 
 
@@ -288,7 +288,7 @@ impl Parser<'_> {
                 self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the type.");
                 let expr = self.parse_expression_default();
 
-                let value = self.add_expr(start, Expr::Newtype { expr });
+                let value = self.add_expr(start, Expr::CustomType { expr });
 
                 self.add_expr(start, Expr::Const { pattern, value })
             }
@@ -314,6 +314,16 @@ impl Parser<'_> {
                 let body = self.parse_arrow_or_block_expression("while");
 
                 self.add_expr(start, Expr::While { condition, body, label })
+            },
+
+            TokenKind::For => {
+                let label = self.optional_label().unwrap_or_else(|| "for".to_string());
+                let pattern = self.parse_pattern(true);
+                self.expect_token(TokenKind::In, "after for-loop pattern");
+                let iter_expr = self.parse_expression_default();
+                let body = self.parse_arrow_or_block_expression("for");
+
+                self.add_expr(start, Expr::For { pattern, iter_expr, body, label })
             },
 
             TokenKind::Loop => {
@@ -346,6 +356,23 @@ impl Parser<'_> {
                 );
                 self.add_expr(start, Expr::EnumDefinition { variants })
             },
+
+            TokenKind::Impl => {
+                let typ = self.parse_expression_default();
+                self.expect_token(TokenKind::LeftBrace, "to open the impl definition block");
+                
+                let const_exprs = self.parse_line_seperated(
+                    TokenKind::RightBrace,
+                    Self::parse_expression_default,
+                    |_| None
+                );
+
+                self.add_expr(start, Expr::ImplBlock { typ, const_exprs })
+            }
+
+            TokenKind::ImplSelf => {
+                self.add_expr(start, Expr::ImplSelf { })
+            }
 
             TokenKind::Dot => {
                 // enum variant!

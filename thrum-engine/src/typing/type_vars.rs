@@ -3,10 +3,16 @@ use std::collections::HashMap;
 use derive_more::Display;
 
 use crate::{
-    ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast_structure::{AstEnumExpression, AstIds, Expr, ExprId},
+    ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, AstIds, Expr, ExprId},
     typing::{EnumDefinition, EnumId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
 };
 
+
+
+#[derive(Default)]
+pub struct TypeVarScope<'a> {
+    pub scope: HashMap<&'a str, TypeVarId>,
+}
 
 
 #[derive(Debug, Display, Clone)]
@@ -54,7 +60,7 @@ pub type SnapshotVarsState = HashMap<TypeVarId, InitState>;
 impl<'ast> TypeChecker<'ast> {
     // when entering a block a new scope gets added
     pub(super) fn enter_scope(&mut self) {
-        self.var_scopes.push(HashMap::default());
+        self.var_scopes.push(TypeVarScope::default());
     }
     pub(super) fn exit_scope(&mut self) {
         self.var_scopes.pop().unwrap();
@@ -77,14 +83,14 @@ impl<'ast> TypeChecker<'ast> {
         
         let var_id = TypeVarId(AstIds::try_from(self.typed_ast.vars.len()).unwrap());
         self.typed_ast.vars.push(new_var);
-        self.var_scopes.last_mut().unwrap().insert(name, var_id);
+        self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
         
         var_id
     }
 
     pub(super) fn lookup_variable(&mut self, name: &str) -> Option<TypeVarId> {
         for i in (0..self.var_scopes.len()).rev() {
-            if let Some(&variable_id) = self.var_scopes[i].get(name) {
+            if let Some(&variable_id) = self.var_scopes[i].scope.get(name) {
 
                 // it needs to ensure that the var was typechecked and compiled
                 let var = self.typed_ast.get_var_mut(variable_id);
@@ -118,18 +124,19 @@ impl<'ast> TypeChecker<'ast> {
         // if there were any errors, don't evaluate consts anymore.
         // this fixes compiler crashes, but its definitely not the best
         if !self.error_data.errors.is_empty() {
+            // TODO: make better
             return None
         }
 
         match self.ast.get_expr(expr) {
-            // the typechecker needs to handle NewType because the
+            // the typechecker needs to handle CustomType because the
             // vm can't add types. so special case this.
-            Expr::Newtype { expr } => {
+            Expr::CustomType { expr } => {
                 self.evaluate_expr(*expr).map(|val| {
                     let RuntimeValue::Type(id) = val else {
                         unreachable!("type mismatch at runtime??!")
                     };
-                    let new_type = self.add_type(Type::NewType(id));
+                    let new_type = self.add_type(Type::CustomType(id));
                     RuntimeValue::Type(new_type)
                 })
             }
@@ -139,7 +146,7 @@ impl<'ast> TypeChecker<'ast> {
                 let variants = variants.iter().map(|AstEnumExpression { variant_name, attached_tuple }| {
                     let attached_tuple_type = attached_tuple.map_or_else(
                         || TypeId::VOID,
-                        |tup| self.check_annotation_meta_type_id(tup)
+                        |tup| self.check_annotation_meta_type_id(tup, true)
                     );
                     (variant_name.clone(), attached_tuple_type)
                 }).collect();
@@ -225,21 +232,26 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, expr: ExprId) -> TypeId {
         if let Some(var_id) = self.lookup_variable(name) {
             self.typed_ast.resolved_expr_var.insert(expr, var_id);
-            let var = self.typed_ast.get_var_mut(var_id);
-            if mutable {
-                // if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
-                // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
-                var.mut_borrows_count += 1;
-            } else {
-                // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
-                var.immut_borrows_count += 1;
-            }
-            let inner = var.typ;
-            self.add_type(Type::Pointer { mutable, inner, borrows_var: var_id })
+            
+            self.make_var_id_ref(var_id, mutable)
         } else {
             let expr_span = self.ast.get_expr_span(expr);
             self.error(ErrType::TyperUndefinedIdentifier { name: name.to_string() }, expr_span)
         }
+    }
+
+    pub(super) fn make_var_id_ref(&mut self, var_id: TypeVarId, mutable: bool) -> TypeId {
+        let var = self.typed_ast.get_var_mut(var_id);
+        if mutable {
+            // if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
+            // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
+            var.mut_borrows_count += 1;
+        } else {
+            // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
+            var.immut_borrows_count += 1;
+        }
+        let inner = var.typ;
+        self.add_type(Type::Pointer { mutable, inner, borrows_var: var_id })
     }
 
 
@@ -293,7 +305,7 @@ impl<'ast> TypeChecker<'ast> {
         // iterate over all currently in scope variables
         let mut vars_state = HashMap::new();
         for scope in &self.var_scopes {
-            for &var_id in scope.values() {
+            for &var_id in scope.scope.values() {
                 let var_init = self.typed_ast.get_var(var_id).is_init;
                 vars_state.insert(var_id, var_init);
             }

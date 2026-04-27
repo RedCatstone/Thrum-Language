@@ -10,7 +10,7 @@ use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;
 
-use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast_structure::{ExprId, Pattern}, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_environment::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::{ExprId, Pattern}, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod typing;
@@ -28,9 +28,6 @@ pub struct ProgramErrorData {
     warnings: Vec<ProgramError<WarnType>>,
 }
 impl ProgramErrorData {
-    const fn none() -> Self {
-        Self { errors: Vec::new(), warnings: Vec::new() }
-    }
     const fn new() -> Self {
         Self { errors: Vec::new(), warnings: Vec::new() }
     }
@@ -102,8 +99,8 @@ pub enum ErrType {
     TyperWrongNumberOfArguments { expected: usize, found: usize },
     #[display("Can't call a non-function type: {typ}.")]
     TyperCantCallNonFnType { typ: Type },
-    #[display("member .{member} does not exist on tuple: {tup}")]
-    TyperTupleDoesntHaveMember { tup: Type, member: String },
+    #[display("member .{member} does not exist on typ: {typ}")]
+    TyperTypeDoesntHaveMember { typ: Type, member: String },
     #[display("Infix operation {type_a} {op} {type_b} is not defined.")]
     TyperInvalidOperatorOnType { op: TokenKind, type_a: Type, type_b: Type },
     #[display("{} is not allowed in patterns.", Type::Never)]
@@ -130,12 +127,16 @@ pub enum ErrType {
     TyperCantIndexNonArrType { typ: Type },
     #[display("Return is only allowed inside functions.")]
     TyperReturnOutsideFunction,
+    #[display("Self is only available inside impl-blocks.")]
+    TyperSelfOutsideImplBlock,
     #[display("Can't index heterogenous tuple: {typ}")]
     TyperCantIndexHeterogenousTuple { typ: Type },
     #[display("Can't index empty tuple: {typ}")]
     TyperCantIndexEmptyTuple { typ: Type },
-    #[display("Must be a newtype, found: {typ}")]
-    TyperCantInstantiateNonNewtypeType { typ: Type },
+    #[display("Must be a customtype, found: {typ}")]
+    TyperCantInstantiateNonCustomtypeType { typ: Type },
+    #[display("Dot operator isn't supported for type: {typ}")]
+    TyperDotOperatorNotSupportedForType { typ: Type },
 
     #[display("Can't resolve const because it depends on itself.")]
     TyperConstResolvingCycle,
@@ -151,6 +152,9 @@ pub enum ErrType {
 
     #[display("Can't is-compare pattern {left:?} with {right:?}")]
     TyperCantCompareIsPatterns { left: Pattern, right: Pattern },
+
+    #[display("Non consts aren't allowed here.")]
+    TyperNonConstsArentAllowedHere,
 
     // #[display("Can't borrow because already borrowed mutably.")]
     // TyperCantBorrowBecauseAlreadyBorrowedMut,
@@ -194,13 +198,13 @@ pub fn run_code(source_code: &str) -> Result<RuntimeValue, Vec<ErrType>> {
     stage_complete("Parser", &ast.display_expr(ExprId(0)), &err_data, &source_data)?;
 
     parsing::desugar::desugar_after_parsing(&mut ast);
-    stage_complete("Desugar", &ast.display_expr(ExprId(0)), &ProgramErrorData::none(), &source_data)?;
+    stage_complete("Desugar", &ast.display_expr(ExprId(0)), &ProgramErrorData::new(), &source_data)?;
 
     let (typed_ast, mut compiled_functions) = typing::TypeChecker::start(&mut err_data, &ast);
     stage_complete("Typechecker", &format!("{typed_ast}\ncompiled_functions: {compiled_functions:?}"), &err_data, &source_data)?;
 
     vm_compiling::VmCompiler::start(&ast, &typed_ast, &mut compiled_functions);
-    stage_complete("VmCompiler", &format!("{compiled_functions:?}"), &ProgramErrorData::none(), &source_data)?;
+    stage_complete("VmCompiler", &format!("{compiled_functions:?}"), &ProgramErrorData::new(), &source_data)?;
 
 
     let start_execution_time = Instant::now();

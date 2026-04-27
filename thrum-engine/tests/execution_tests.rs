@@ -254,3 +254,36 @@ fn functions() {
         test((30, 0), true)
     "#, RuntimeValue::Void);
 }
+
+
+#[test]
+fn impls() {
+    test_eval!(r#"
+        type N = num
+        impl N {
+            fn get() -> N => N{ 5 }
+        }
+        fn get() -> N => N{ 3 }
+
+        N.get()
+    "#, RuntimeValue::Num(5.0));
+    
+    test_eval!(r#"
+        type N = num
+        impl N {
+            fn get() -> N => N{ 5 }
+        }
+        fn get() -> N => N{ 3 }
+
+        get()
+    "#, RuntimeValue::Num(3.0));
+
+    test_eval!(r#"
+        type N = num
+        impl N {
+            fn do_nothing(self: Self) -> Self => self
+        }
+        
+        N{ 68 }.do_nothing()
+    "#, RuntimeValue::Num(68.0))
+}

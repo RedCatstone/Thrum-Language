@@ -3,11 +3,11 @@ use derive_more::Display;
 
 use crate::{
     ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
-    parsing::ast_structure::{AstArena, AstIds, ExprId, PatternId}, pretty_printing::{slice_to_debug_string, slice_to_string},
-    typing::{check_expressions::CheckExprCtx, type_environment::{SnapshotVarsState, TypeVar}}, vm_compiling::FunctionRegistry
+    parsing::ast::{AstArena, AstIds, ExprId, PatternId}, pretty_printing::{slice_to_debug_string, slice_to_string},
+    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::FunctionRegistry
 };
 
-pub mod type_environment;
+pub mod type_vars;
 mod check_expressions;
 pub mod check_patterns;
 
@@ -34,8 +34,8 @@ pub enum Type {
 
     #[display("enum<{_0:?}>")]
     Enum(EnumId),
-    #[display("newtype<{_0:?}>")]
-    NewType(TypeId),
+    #[display("customtype<{_0:?}>")]
+    CustomType(TypeId),
 
     // Nested
     #[display("tup<{}>", slice_to_string(_0, ", "))]
@@ -94,20 +94,27 @@ pub struct TypeChecker<'a> {
     typed_ast: TypedAst,
     
     // maps variable names to their Id
-    var_scopes: Vec<HashMap<&'a str, TypeVarId>>,
+    var_scopes: Vec<TypeVarScope<'a>>,
 
     // this ensures that there are no duplicate types
     type_dedup: HashMap<Type, TypeId>,
     // if inference_types[0] is Some(TypeId(3))
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
+
+    // implemented stuff on types
+    // e.g. `impl Number { ... }`
+    type_impls: HashMap<TypeId, TypeVarScope<'a>>,
     
     // for return
     curr_function_return_type: Option<TypeId>,
     // for break/continue
     curr_label_infos: Vec<LabelInfo<'a>>,
+    // for impl so they can use Self and self
+    curr_impl_self: Option<TypeId>,
     
-    // meta compiling stuff
+    // meta compiling stuff, if a function gets compiled during the typechecking phase,
+    // it gets kept and doesn't need to be compiled again in the VmCompiler stage
     compiled_functions: FunctionRegistry,
 }
 
@@ -125,11 +132,13 @@ pub struct TypedAst {
     pub vars: Vec<TypeVar>,  // indexed with TypeVarId
     pub resolved_expr_var: HashMap<ExprId, TypeVarId>,
     pub resolved_pattern_var: HashMap<PatternId, TypeVarId>,
+
+    pub resolved_impl_self_type: HashMap<ExprId, TypeId>,
     
     pub resolved_enum_variant: HashMap<ExprId, (EnumId, usize)>,
     pub resolved_enum_variant_pattern: HashMap<PatternId, (EnumId, usize)>,
     pub resolved_closure_fn_id: HashMap<ExprId, usize>,
-    pub resolved_tuple_indices: HashMap<ExprId, usize>,
+    pub resolved_member_access: HashMap<ExprId, ResolvedMemberAccess>,
     pub resolved_labels: HashMap<ExprId, ExprId>,  // maps a labeled-expr to where it needs to jump to
     pub auto_derefs: HashMap<ExprId, usize>,  // amount of autoderefs
     pub move_expr: HashSet<ExprId>,
@@ -161,16 +170,25 @@ pub struct LabelInfo<'ast> {
     break_snapshots: Vec<Option<SnapshotVarsState>>,
 }
 
+#[derive(Debug)]
+pub enum ResolvedMemberAccess {
+    Tuple { index: usize },
+    MetaType { fn_var: TypeVarId },
+    SelfSugar { fn_var: TypeVarId, self_sugar_expr: ExprId }
+}
+
 impl TypeChecker<'_> {
     pub fn start(error_data: &mut ProgramErrorData, ast: &AstArena) -> (TypedAst, FunctionRegistry) {
         let mut tc = TypeChecker {
             error_data, ast,
             typed_ast: TypedAst::new(ast.exprs.len()),
-            var_scopes: vec![HashMap::default()],
+            var_scopes: vec![TypeVarScope::default()],
             type_dedup: HashMap::new(),
             inference_types: Vec::new(),
+            type_impls: HashMap::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
+            curr_impl_self: None,
             compiled_functions: FunctionRegistry::new(),
         };
         tc.add_hardcoded_types();
@@ -401,9 +419,9 @@ impl TypeChecker<'_> {
                 let new_inner = self.zonk_type(inner, span, cache);
                 self.add_type(Type::Pointer { inner: new_inner, mutable, borrows_var })
             }
-            Type::NewType(inner) => {
+            Type::CustomType(inner) => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.add_type(Type::NewType(new_inner))
+                self.add_type(Type::CustomType(new_inner))
             }
 
             // simple types don't need zonking

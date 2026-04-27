@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use derive_more::Display;
 use strum_macros::FromRepr;
 
-use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast_structure::{AstArena, AstEnumExpression, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{Type, TypeId, TypeVarId, TypedAst, type_environment::TypeVarConstVal}, vm_evaluating};
+use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, Type, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
 
 
 #[derive(Debug, Display, Clone, PartialEq, PartialOrd)]
@@ -594,11 +594,18 @@ impl VmCompiler<'_> {
             }
 
             Expr::Call { callee, arguments } => {
+                let mut arg_count = 0;
+                if let Some(ResolvedMemberAccess::SelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
+                    self.compile_expression(*self_sugar_expr);
+                    arg_count += 1;
+                }
+
                 for &argument in arguments {
                     self.compile_expression(argument);
+                    arg_count += 1;
                 }
                 self.compile_expression(*callee);
-                self.push_op(OpCode::CallFn { arg_count: arguments.len() });
+                self.push_op(OpCode::CallFn { arg_count });
             }
 
             Expr::TypeInstantiation { typ: _, data } => {
@@ -623,9 +630,16 @@ impl VmCompiler<'_> {
             }
 
             Expr::MemberAccess { left, member: _ } => {
-                self.compile_expression(*left);
-                let tup_index = self.typed_ast.resolved_tuple_indices[&compile_expr];
-                self.push_op(OpCode::TupPointerGet { index: tup_index });
+                match self.typed_ast.resolved_member_access[&compile_expr] {
+                    ResolvedMemberAccess::Tuple { index } => {
+                        self.compile_expression(*left);
+                        self.push_op(OpCode::TupPointerGet { index });
+                    }
+                    ResolvedMemberAccess::MetaType { fn_var }
+                    | ResolvedMemberAccess::SelfSugar { fn_var, .. } => {
+                        self.push_get_identifier_ref(fn_var);
+                    }
+                }
             }
 
 
@@ -634,8 +648,14 @@ impl VmCompiler<'_> {
                 self.push_get_constant_op(RuntimeValue::Num(i as f64));
             }
 
+            Expr::ImplSelf {  } => {
+                let meta_type = self.typed_ast.resolved_impl_self_type[&compile_expr];
+                self.push_get_constant_op(RuntimeValue::Type(meta_type));
+            }
 
-            Expr::Const { .. } => self.push_op(OpCode::PushVoid), // do nothing here, it was already compiled.
+            // do nothing here, these are only for the typechecker.
+            Expr::Const { .. }
+            | Expr::ImplBlock { .. } => self.push_op(OpCode::PushVoid),
 
             _ => panic!("{expr:?} not yet implemented")
         }

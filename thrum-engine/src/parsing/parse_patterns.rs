@@ -1,4 +1,4 @@
-use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast_structure::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::Precedence}};
+use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::Precedence}};
 
 
 impl Parser<'_> {
