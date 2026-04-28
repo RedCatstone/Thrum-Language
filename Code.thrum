@@ -1,6 +1,11 @@
 type N = num
 impl N {
-    fn do_nothing(self: Self) -> Self => self
+    fn square(self: Self) -> Self {
+        self * self
+    }
+    fn triangle(self: Self) -> Self {
+        (self * (self + N{ 1 })) / N{ 2 }
+    }
 }
 
-N{ 68 }.do_nothing()
+N{ 2 }.triangle().square().triangle().square()

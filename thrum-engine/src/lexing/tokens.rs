@@ -78,7 +78,7 @@ pub enum TokenKind {
     For, In, While, Loop,
     Break, Continue,
     Fn, Return,
-    FnSelf, ImplSelf,
+    ImplSelf,
     Match, Is,
     Let, Const, Type,
     Mut, Ref, Own,

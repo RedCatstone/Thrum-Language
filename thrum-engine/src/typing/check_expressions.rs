@@ -614,23 +614,39 @@ impl TypeChecker<'_> {
 
 
     fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId) -> TypeId {
+        // for now left and right have to be the same type, so just unify them.
+        self.unify_types(left, right, op_span);
+
+        let left_type = self.prune_type_once(left, Some(op_span));
+
+        if let Type::CustomType(id) = left_type {
+            // if its a customType, try to unify the inner types for now
+            // TODO: make better
+            let infixed_type = self.check_infix(op, op_span, id, id);
+
+            // if its the same type as id, it returns the custom type again
+            // e.g. `N{ 2 } * N{ 2 } == N{ 4 }`
+            return if infixed_type == id {
+                left
+            } else {
+                infixed_type
+            }
+        }
+
         match op {            
             TokenKind::EqualEqual | TokenKind::Greater | TokenKind::Less /*| TokenType::GreaterEqual | TokenType::LessEqual */ => {
-                self.unify_types(left, right, op_span);
                 TypeId::BOOL
             }
 
             // num operators
             TokenKind::Op(AssignOp::Plus | AssignOp::Minus | AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => {
                 self.unify_types(TypeId::NUM, left, op_span);
-                self.unify_types(TypeId::NUM, right, op_span);
                 TypeId::NUM
             }
 
             // boolean operators
             TokenKind::And | TokenKind::Or => {
                 self.unify_types(TypeId::BOOL, left, op_span);
-                self.unify_types(TypeId::BOOL, right, op_span);
                 TypeId::BOOL
             }
             _ => unreachable!("Unsupported infix operator: {:?}", op)

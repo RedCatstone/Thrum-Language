@@ -332,8 +332,7 @@ impl VmCompiler<'_> {
 
             Expr::Infix { op, op_span: _, left, right } => {
                 self.compile_expression(*left);
-                let left_type = self.typed_ast.get_expr_type(*left);
-                self.compile_infix(*op, left_type, *right);
+                self.compile_infix(*op, *right);
             }
             Expr::Prefix { op, right } => {
                 self.compile_expression(*right);
@@ -395,8 +394,7 @@ impl VmCompiler<'_> {
                         }
                         _ => unreachable!("Infix assignments are only allowed for place patterns.")
                     }
-                    let value_type = self.typed_ast.get_expr_type(*value);
-                    self.compile_infix(TokenKind::Op(*extra_op), value_type, *value);
+                    self.compile_infix(TokenKind::Op(*extra_op), *value);
                 } else {
                     // push value to the stack
                     self.compile_expression(*value);
@@ -902,7 +900,7 @@ impl VmCompiler<'_> {
 
 
 
-    fn compile_infix(&mut self, operator: TokenKind, left: TypeId, right: ExprId) {
+    fn compile_infix(&mut self, operator: TokenKind, right: ExprId) {
         if TokenKind::EqualEqual == operator {
             // this works regardless of any type
             self.compile_expression(right);
@@ -910,65 +908,46 @@ impl VmCompiler<'_> {
             return
         }
 
-        let left_type = self.typed_ast.get_type(left);
-
-        if Type::Bool == left_type {
-            // short circuiting logic!
-            // only compile right if its needed
-            match operator {
-                TokenKind::And => {
-                    // evaluate left
-                    // left is true => discard it and return right
-                    // left is false => return false
-                    let temps_after_left = self.cur_temp_amount;
-                    let jump_over_right_expression = self.push_jump_if_false_op_for_patching();
-                    self.compile_expression(right);
-                    let jump_to_end = self.push_jump_op_for_patching();
-                    self.patch_jump_op_to_here(jump_over_right_expression);
-                    self.push_get_constant_op(RuntimeValue::Bool(false));
-                    self.cur_temp_amount = temps_after_left;
-                    self.patch_jump_op_to_here(jump_to_end);
-                }
-                TokenKind::Or => {
-                    // evaluate left
-                    // left is true => return true
-                    // left is false => discard it and return right
-                    self.push_op(OpCode::BoolNegate);
-                    let temps_after_left = self.cur_temp_amount;
-                    let jump_over_right_expression = self.push_jump_if_false_op_for_patching();
-                    self.compile_expression(right);
-                    let jump_to_end = self.push_jump_op_for_patching();
-                    self.patch_jump_op_to_here(jump_over_right_expression);
-                    self.push_get_constant_op(RuntimeValue::Bool(true));
-                    self.cur_temp_amount = temps_after_left;
-                    self.patch_jump_op_to_here(jump_to_end);
-                }
-                _ => unreachable!("Unsupported operator {} for type bool", operator)
-            }
-            return
-        }
-
         self.compile_expression(right);
-        match left_type {
-            Type::Num => match operator {
-                TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd),
-                TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract),
-                TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply),
-                TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide),
-                TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo),
-                TokenKind::Less => self.push_op(OpCode::CmpLess),
-                TokenKind::Greater => self.push_op(OpCode::CmpGreater),
-                _ => unreachable!("Unsupported operator {} for type num", operator)
-            },
-            Type::Str => match operator {
-                TokenKind::Less => self.push_op(OpCode::CmpLess),
-                TokenKind::Greater => self.push_op(OpCode::CmpGreater),
-                _ => unreachable!("Unsupported operator {} for type str", operator)
+        match operator {
+            TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd),
+            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract),
+            TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply),
+            TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide),
+            TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo),
+            TokenKind::Less => self.push_op(OpCode::CmpLess),
+            TokenKind::Greater => self.push_op(OpCode::CmpGreater),
+
+            TokenKind::And => {
+                // evaluate left
+                // left is true => discard it and return right
+                // left is false => return false
+                let temps_after_left = self.cur_temp_amount;
+                let jump_over_right_expression = self.push_jump_if_false_op_for_patching();
+                self.compile_expression(right);
+                let jump_to_end = self.push_jump_op_for_patching();
+                self.patch_jump_op_to_here(jump_over_right_expression);
+                self.push_get_constant_op(RuntimeValue::Bool(false));
+                self.cur_temp_amount = temps_after_left;
+                self.patch_jump_op_to_here(jump_to_end);
+            }
+            TokenKind::Or => {
+                // evaluate left
+                // left is true => return true
+                // left is false => discard it and return right
+                self.push_op(OpCode::BoolNegate);
+                let temps_after_left = self.cur_temp_amount;
+                let jump_over_right_expression = self.push_jump_if_false_op_for_patching();
+                self.compile_expression(right);
+                let jump_to_end = self.push_jump_op_for_patching();
+                self.patch_jump_op_to_here(jump_over_right_expression);
+                self.push_get_constant_op(RuntimeValue::Bool(true));
+                self.cur_temp_amount = temps_after_left;
+                self.patch_jump_op_to_here(jump_to_end);
             }
 
-            Type::Never => { /* Do nothing */ }
+            _ => unreachable!("Unsupported operator: {operator}")
 
-            _ => unreachable!("Mismatched type for infix operation: {left_type}, right: {:?}", self.ast.get_expr(right))
         }
     }
 

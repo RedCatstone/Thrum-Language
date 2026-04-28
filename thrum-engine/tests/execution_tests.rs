@@ -265,25 +265,20 @@ fn impls() {
         }
         fn get() -> N => N{ 3 }
 
-        N.get()
-    "#, RuntimeValue::Num(5.0));
-    
-    test_eval!(r#"
-        type N = num
-        impl N {
-            fn get() -> N => N{ 5 }
-        }
-        fn get() -> N => N{ 3 }
-
-        get()
-    "#, RuntimeValue::Num(3.0));
+        (N.get(), get())
+    "#, RuntimeValue::Tup(vec![RuntimeValue::Num(5.0), RuntimeValue::Num(3.0)]));
 
     test_eval!(r#"
         type N = num
         impl N {
-            fn do_nothing(self: Self) -> Self => self
+            fn square(self: Self) -> Self {
+                self * self
+            }
+            fn triangle(self: Self) -> Self {
+                (self * (self + N{ 1 })) / N{ 2 }
+            }
         }
         
-        N{ 68 }.do_nothing()
-    "#, RuntimeValue::Num(68.0))
+        N{ 2 }.triangle().square().triangle().square()
+    "#, RuntimeValue::Num(2025.0))
 }
