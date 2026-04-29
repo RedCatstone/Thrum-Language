@@ -534,12 +534,30 @@ impl TypeChecker<'_> {
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
                 match self.prune_type_once(meta_id, Some(span)) {
                     Type::CustomType(inner_new_type) => {
-                        // for now i only support 1 piece of data in here
-                        let [first_data] = data.as_slice() else {
-                            panic!("multiple things here not yet implemented")
+
+                        match self.prune_type_once(inner_new_type, Some(span)) {
+                            Type::Error => TypeId::ERROR,
+                            Type::Tup(_) => {
+                                // if it expects a tuple, e.g. `type Point = { num, num }`
+                                // then just typecheck normally. (`data` is already a tuple expr)
+                                self.check_expression(*data, is_never, &ctx.expect(inner_new_type))
+                            }
+                            _ => {
+                                // if it doesn't expect a tuple, it needs to extract the first element.
+                                let Expr::Tuple { elems } = self.ast.get_expr(*data) else {
+                                    unreachable!("this is always a tuple.")
+                                };
+                                if let [first] = elems.as_slice() && first.label == "0" {
+                                    self.typed_ast.resolved_type_instantian_not_a_tuple.insert(check_expr);
+                                    self.check_expression(first.expr, is_never, &ctx.expect(inner_new_type))
+                                }
+                                else {
+                                    self.error(ErrType::TyperInstantiationExpectedOneUnlabeledExpr, span)
+                                }
+                            }
                         };
-                        // now check the data with the expected type
-                        self.check_expression(*first_data, is_never, &ctx.expect(inner_new_type));
+
+                        // `N{ 2 }` returns the type `N`
                         meta_id
                     }
                     Type::Error => TypeId::ERROR,

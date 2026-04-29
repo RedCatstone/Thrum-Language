@@ -77,7 +77,7 @@ pub enum Expr {
     FnDefinition { name: Box<str>, closure: AstClosure },  // fn square(x: num) { x**2 }
     Closure { closure: AstClosure, requires_type_annotation: bool },  // |x -> x**2
     Call { callee: ExprId, arguments: Vec<ExprId> },  // x(1, 2)
-    TypeInstantiation { typ: ExprId, data: Vec<ExprId> },  // Point{ x: 1, y: 2 }  (data is a tuple here), but here its not:  Number{ 3 }
+    TypeInstantiation { typ: ExprId, data: ExprId /* tuple */ },  // Point{ x: 1, y: 2 }
     EnumDefinition { variants: Vec<AstEnumExpression> },  // enum Color { Red, Blue, Green(data) }
     EnumVariant { data: AstEnumExpression },  // .North
 

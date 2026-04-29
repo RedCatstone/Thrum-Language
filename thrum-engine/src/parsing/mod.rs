@@ -62,7 +62,7 @@ impl<'a> Parser<'a> {
         self.peek_one_further().span.line == self.prev_token_span.line
     }
 
-    fn peek_spaces_infront(&self) -> usize {
+    fn peek_spaces_before(&self) -> usize {
         self.peek().span.byte_offset - (self.prev_token_span.byte_offset + self.prev_token_span.length)
     }
     fn peek_spaces_after(&self) -> usize {

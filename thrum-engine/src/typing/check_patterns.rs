@@ -261,7 +261,7 @@ impl<'ast> TypeChecker<'ast> {
         )
     }
 
-    fn extract_meta_type_from_runtime_val(&mut self, val: RuntimeValue, expected_type: TypeId) -> TypeId {
+    pub(super) fn extract_meta_type_from_runtime_val(&mut self, val: RuntimeValue, expected_type: TypeId) -> TypeId {
         match val {
             RuntimeValue::Type(id) => id,
             RuntimeValue::Tup(elems) => {

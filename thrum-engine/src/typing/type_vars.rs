@@ -133,10 +133,9 @@ impl<'ast> TypeChecker<'ast> {
             // vm can't add types. so special case this.
             Expr::CustomType { expr } => {
                 self.evaluate_expr(*expr).map(|val| {
-                    let RuntimeValue::Type(id) = val else {
-                        unreachable!("type mismatch at runtime??!")
-                    };
-                    let new_type = self.add_type(Type::CustomType(id));
+                    let expected_type = self.typed_ast.get_expr_type(*expr);
+                    let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
+                    let new_type = self.add_type(Type::CustomType(runtime_type_id));
                     RuntimeValue::Type(new_type)
                 })
             }

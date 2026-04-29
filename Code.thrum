@@ -1,11 +1,3 @@
-type N = num
-impl N {
-    fn square(self: Self) -> Self {
-        self * self
-    }
-    fn triangle(self: Self) -> Self {
-        (self * (self + N{ 1 })) / N{ 2 }
-    }
-}
+type X = (num, bool, num)
 
-N{ 2 }.triangle().square().triangle().square()
+X{ 2, true, 3 }

@@ -607,10 +607,16 @@ impl VmCompiler<'_> {
             }
 
             Expr::TypeInstantiation { typ: _, data } => {
-                let [first_data] = data.as_slice() else {
-                    unreachable!("multiple thingies not supported here")
-                };
-                self.compile_expression(*first_data);
+                if self.typed_ast.resolved_type_instantian_not_a_tuple.contains(&compile_expr) {
+                    // if its not a tuple type, e.g. `type N = num; N{ 2 }`
+                    let Expr::Tuple { elems } = self.ast.get_expr(*data) else {
+                        unreachable!("always a tuple.")
+                    };
+                    self.compile_expression(elems[0].expr);
+                }
+                else {
+                    self.compile_expression(*data);
+                }
             }
 
             Expr::Return { expr } => {
@@ -908,16 +914,9 @@ impl VmCompiler<'_> {
             return
         }
 
-        self.compile_expression(right);
+        // short circuiting operators,
+        // they need to compile `right` later.
         match operator {
-            TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd),
-            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract),
-            TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply),
-            TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide),
-            TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo),
-            TokenKind::Less => self.push_op(OpCode::CmpLess),
-            TokenKind::Greater => self.push_op(OpCode::CmpGreater),
-
             TokenKind::And => {
                 // evaluate left
                 // left is true => discard it and return right
@@ -930,6 +929,7 @@ impl VmCompiler<'_> {
                 self.push_get_constant_op(RuntimeValue::Bool(false));
                 self.cur_temp_amount = temps_after_left;
                 self.patch_jump_op_to_here(jump_to_end);
+                return
             }
             TokenKind::Or => {
                 // evaluate left
@@ -944,10 +944,23 @@ impl VmCompiler<'_> {
                 self.push_get_constant_op(RuntimeValue::Bool(true));
                 self.cur_temp_amount = temps_after_left;
                 self.patch_jump_op_to_here(jump_to_end);
+                return
             }
+            _ => ()
+        }
+
+        // for normal operators just compile right
+        self.compile_expression(right);
+        match operator {
+            TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd),
+            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract),
+            TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply),
+            TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide),
+            TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo),
+            TokenKind::Less => self.push_op(OpCode::CmpLess),
+            TokenKind::Greater => self.push_op(OpCode::CmpGreater),
 
             _ => unreachable!("Unsupported operator: {operator}")
-
         }
     }
 

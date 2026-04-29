@@ -282,3 +282,11 @@ fn impls() {
         N{ 2 }.triangle().square().triangle().square()
     "#, RuntimeValue::Num(2025.0))
 }
+
+#[test]
+fn single_tuple_type() {
+    test_eval!("type X = num; X{ 2 }", RuntimeValue::Num(2.0));
+    test_eval!("type X = (num,); X{ 2 }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0)]));
+    test_eval!("type X = (num, bool, num); X{ 2, true, 3 }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0), RuntimeValue::Bool(true), RuntimeValue::Num(3.0)]));
+    test_eval!("type X = (); X{ }", RuntimeValue::Tup(vec![]));
+}

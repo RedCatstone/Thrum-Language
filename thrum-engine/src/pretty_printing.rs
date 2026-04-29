@@ -223,10 +223,7 @@ impl AstArena {
             Expr::TypeInstantiation { typ, data } => {
                 writeln!(s)?;
                 self.format_expr_recursive(*typ, s, ind + 1, "typ", false)?;
-                for (i, &arg) in data.iter().enumerate() {
-                    self.format_expr_recursive(arg, s, ind + 1, "data", i == data.len() - 1)?;
-                }
-                Ok(())
+                self.format_expr_recursive(*data, s, ind + 1, "typ", true)
             }
             Expr::EnumDefinition { variants } => {
                 writeln!(s)?;

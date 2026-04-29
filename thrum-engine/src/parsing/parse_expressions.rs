@@ -97,7 +97,7 @@ impl Parser<'_> {
 
                 if self.peek_is_on_same_line() && self.peek_further_is_on_same_line() {
                     // warnings:
-                    if self.peek_spaces_infront() != self.peek_spaces_after() {
+                    if self.peek_spaces_before() != self.peek_spaces_after() {
                         self.warn(WarnType::ParserInconsistentSpacingAroundInfixOp { op: peek_op.token });
                     }
                 }
@@ -193,11 +193,9 @@ impl Parser<'_> {
                 let name_expr = self.add_expr(start, Expr::IdentifierRef { name, mutable: false });
 
                 // Number{ 3 } is only allowed if there is no whitespace after 'Number'
-                if self.peek_spaces_infront() == 0 && self.optional_token(TokenKind::LeftBrace) {
-                    let data = self.parse_comma_seperated_expressions(
-                        TokenKind::RightBrace,
-                        "to close the type creation list"
-                    );
+                if self.peek_spaces_before() == 0 && self.optional_token(TokenKind::LeftBrace) {
+                    let data = self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace);
+                    
                     self.add_expr(start, Expr::TypeInstantiation { typ: name_expr, data })
                 } else {
                     name_expr
@@ -224,7 +222,7 @@ impl Parser<'_> {
                     if self.optional_token(TokenKind::Comma) {
                         // , means its a tuple!
                         // e.g. (1, 2) (1,) (x: 1,)
-                        self.parse_tuple_expression(start, Some(first_elem))
+                        self.parse_tuple_expression(start, Some(first_elem), TokenKind::RightParen)
                     }
                     else if self.optional_token(TokenKind::Semicolon) {
                         // ; means its a tuple array
@@ -507,7 +505,7 @@ impl Parser<'_> {
         let variant_name = self.expect_identifier("to name an enum variant").into_boxed_str();
 
         let attached_tuple = self.optional_token(TokenKind::LeftParen).then(|| {
-            self.parse_tuple_expression(self.prev_token_span, None)
+            self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightParen)
         });
 
         AstEnumExpression { variant_name, attached_tuple }
@@ -559,16 +557,17 @@ impl Parser<'_> {
         AstTupleElement { label, expr }
     }
 
-    fn parse_tuple_expression(&mut self, start: Span, first_elem: Option<AstTupleElement>) -> ExprId {
+    fn parse_tuple_expression(&mut self, start: Span, first_elem: Option<AstTupleElement>, end_token: TokenKind) -> ExprId {
         let mut tuple_body = vec![];
+        let has_first_elem = first_elem.is_some();
         if let Some(x) = first_elem {
             tuple_body.push(x);
         }
         
         let other_tuple_elems = self.parse_comma_separated(
-            TokenKind::RightParen,
+            end_token,
             |p, i| {
-                p.parse_one_tuple_expression((i+1).to_string())
+                p.parse_one_tuple_expression((if has_first_elem { i + 1 } else { i }).to_string())
             },
             "to close the tuple"
         );
