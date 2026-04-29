@@ -135,6 +135,7 @@ pub struct TypedAst {
 
     pub resolved_impl_self_type: HashMap<ExprId, TypeId>,
     pub resolved_type_instantian_not_a_tuple: HashSet<ExprId>,
+    pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
     
     pub resolved_enum_variant: HashMap<ExprId, (EnumId, usize)>,
     pub resolved_enum_variant_pattern: HashMap<PatternId, (EnumId, usize)>,

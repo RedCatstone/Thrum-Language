@@ -315,6 +315,10 @@ impl AstArena {
                 }
                 Ok(())
             }
+            Pattern::TypeDestructor { typ, data } => {
+                self.format_expr_recursive(*typ, s, ind + 1, "typ", false)?;
+                self.format_pattern_recursive(*data, s, ind + 1, "data", true)
+            }
             Pattern::EnumVariant { name, attached_tuple } => {
                 writeln!(s, " - {name}")?;
                 if let Some(tup) = attached_tuple {

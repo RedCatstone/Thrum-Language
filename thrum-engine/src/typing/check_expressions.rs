@@ -552,7 +552,7 @@ impl TypeChecker<'_> {
                                     self.check_expression(first.expr, is_never, &ctx.expect(inner_new_type))
                                 }
                                 else {
-                                    self.error(ErrType::TyperInstantiationExpectedOneUnlabeledExpr, span)
+                                    self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
                                 }
                             }
                         };
@@ -561,7 +561,7 @@ impl TypeChecker<'_> {
                         meta_id
                     }
                     Type::Error => TypeId::ERROR,
-                    t => self.error(ErrType::TyperCantInstantiateNonCustomtypeType { typ: t }, self.ast.get_expr_span(*typ))
+                    t => self.error(ErrType::TyperMustBeCustomtypeType { typ: t }, self.ast.get_expr_span(*typ))
                 }
             }
 

@@ -2,9 +2,9 @@ use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{
 
 
 impl Parser<'_> {
-    // it enters binding mode when it sees a `let`
-    // `x is let y` => Binding y
-    // `x is y` => CompareExpr(IdentifierRef y)
+    /// it enters binding mode when it sees a `let`
+    /// `x is let y` => Binding y
+    /// `x is y` => CompareExpr(IdentifierRef y)
     fn parse_one_pattern(&mut self, binding_mode: bool) -> PatternId {
         let token = self.peek();
         let start = token.span;
@@ -23,7 +23,18 @@ impl Parser<'_> {
                     // x is let _
                     self.next();
                     self.add_pattern(start, Pattern::Wildcard)
-                } else if binding_mode {
+                }
+                else if self.peek_spaces_after() == 0 && self.peek_one_further().token == TokenKind::LeftBrace {
+                    // x is N{ ... }
+                    // x is let N{ ... }
+                    self.next(); // consume <ident>
+                    self.next(); // consume '{'
+                    let typ = self.add_expr(start, Expr::IdentifierRef { name: name.to_string(), mutable: false });
+                    let data = self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightBrace);
+                    
+                    self.add_pattern(start, Pattern::TypeDestructor { typ, data })
+                }
+                else if binding_mode {
                     // x is let a
                     self.next();
                     self.add_pattern(start, Pattern::Binding { name, mutable: false })
@@ -45,7 +56,7 @@ impl Parser<'_> {
                     let first_pattern = self.parse_one_tuple_pattern(binding_mode, "0".to_string());
                     if self.optional_token(TokenKind::Comma) {
                         // Tuple!
-                        self.parse_tuple_patterns(start, Some(first_pattern), binding_mode)
+                        self.parse_tuple_pattern(start, Some(first_pattern), binding_mode, TokenKind::RightParen)
                     }
                     else {
                         // normal grouped pattern
@@ -64,7 +75,7 @@ impl Parser<'_> {
                 let variant_name = self.expect_identifier("to name an enum variant");
 
                 let attached_tuple = self.optional_token(TokenKind::LeftParen).then(|| {
-                    self.parse_tuple_patterns(self.prev_token_span, None, binding_mode)
+                    self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightParen)
                 });
 
                 self.add_pattern(start, Pattern::EnumVariant { name: variant_name, attached_tuple })
@@ -145,16 +156,17 @@ impl Parser<'_> {
         AstTuplePattern { label, pattern }
     }
 
-    fn parse_tuple_patterns(&mut self, start: Span, first_elem: Option<AstTuplePattern>, binding_mode: bool) -> PatternId {
+    fn parse_tuple_pattern(&mut self, start: Span, first_elem: Option<AstTuplePattern>, binding_mode: bool, end_token: TokenKind) -> PatternId {
         let mut tuple_body = vec![];
+        let has_first_elem = first_elem.is_some();
         if let Some(x) = first_elem {
             tuple_body.push(x);
         }
 
         let other_tuple_elems = self.parse_comma_separated(
-            TokenKind::RightParen,
+            end_token,
             |p, i| {
-                p.parse_one_tuple_pattern(binding_mode, (i+1).to_string())
+                p.parse_one_tuple_pattern(binding_mode, (if has_first_elem { i + 1 } else { i }).to_string())
             },
             "to close the tuple"
         );

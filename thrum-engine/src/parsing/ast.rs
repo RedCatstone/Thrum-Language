@@ -113,7 +113,8 @@ pub enum Pattern {
     Tuple(Vec<AstTuplePattern>),  // (...)
     
     Binding { name: Box<str>, mutable: bool },  // x: num
-    EnumVariant { name: String, attached_tuple: Option<PatternId> },
+    TypeDestructor { typ: ExprId, data: PatternId /* tuple */ },  // Point{ x: 1, y: 2 }
+    EnumVariant { name: String, attached_tuple: Option<PatternId> },  // .North{ 2 }
     Conditional { pattern: PatternId, cond: ExprId },
 
     Typed { pattern: PatternId, typ: ExprId },

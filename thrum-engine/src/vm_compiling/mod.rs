@@ -816,7 +816,8 @@ impl VmCompiler<'_> {
                 // manually do stuff that self.push_op() does
                 // because OpCode::runtime_temp_effect can't know how many temps TupUnpack is gonna add.
                 self.curr_function_chunk.ops.push(OpCode::TupUnpack);
-                self.cur_temp_amount += patterns.len() - 1;
+                self.cur_temp_amount += patterns.len();
+                self.cur_temp_amount -= 1;
 
                 for pattern in patterns.iter().rev() {
                     self.compile_binding_pattern(pattern.pattern, failure_jumps);
@@ -847,6 +848,18 @@ impl VmCompiler<'_> {
                 });
             }
 
+            Pattern::TypeDestructor { typ, data } => {
+                if self.typed_ast.resolved_type_destruction_not_a_tuple.contains(&compile_pattern) {
+                    // if its not a tuple type, e.g. `type N = num; N{ 2 }`
+                    let Pattern::Tuple(elems) = self.ast.get_pattern(*data) else {
+                        unreachable!("always a tuple.")
+                    };
+                    self.compile_binding_pattern(elems[0].pattern, failure_jumps);
+                }
+                else {
+                    self.compile_binding_pattern(*data, failure_jumps);
+                }
+            }
 
             Pattern::EnumVariant { .. } => {
                 let (_enum_id, i) = self.typed_ast.resolved_enum_variant_pattern[&compile_pattern];

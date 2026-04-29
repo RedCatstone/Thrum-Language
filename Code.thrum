@@ -1,3 +1,2 @@
-type X = (num, bool, num)
-
-X{ 2, true, 3 }
+type X = ()
+let X{ } = X{ }

@@ -159,6 +159,50 @@ impl<'ast> TypeChecker<'ast> {
                 // missing cases defaults to NotCovered here, which is correct
             }
 
+            Pattern::TypeDestructor { typ, data } => {
+                // basically copy-pasted from check_expressions.rs `Expr::TypeInstantiation`
+                let meta_id = self.check_annotation_meta_type_id(*typ, true);
+                match self.prune_type_once(meta_id, Some(span)) {
+                    Type::CustomType(inner_new_type) => {
+
+                        match self.prune_type_once(inner_new_type, Some(span)) {
+                            Type::Error => TypeId::ERROR,
+                            Type::Tup(_) => {
+                                // if it expects a tuple, e.g. `type Point = { num, num }`
+                                // then just typecheck normally. (`data` is already a tuple expr)
+                                let (typ, covered) = self.check_match_pattern(
+                                    *data, Some(inner_new_type), has_value, const_update, vars_defined
+                                );
+                                covered_cases = covered;
+                                typ
+                            }
+                            _ => {
+                                // if it doesn't expect a tuple, it needs to extract the first element.
+                                let Pattern::Tuple(elems) = self.ast.get_pattern(*data) else {
+                                    unreachable!("this is always a tuple.")
+                                };
+                                if let [first] = elems.as_slice() && first.label == "0" {
+                                    self.typed_ast.resolved_type_destruction_not_a_tuple.insert(pattern);
+                                    let (typ, covered) = self.check_match_pattern(
+                                        first.pattern, Some(inner_new_type), has_value, const_update, vars_defined
+                                    );
+                                    covered_cases = covered;
+                                    typ
+                                }
+                                else {
+                                    self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
+                                }
+                            }
+                        };
+
+                        // `N{ 2 }` returns the type `N`
+                        meta_id
+                    }
+                    Type::Error => TypeId::ERROR,
+                    t => self.error(ErrType::TyperMustBeCustomtypeType { typ: t }, self.ast.get_expr_span(*typ))
+                }
+            }
+
             Pattern::EnumVariant { name, attached_tuple } => {
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
                 if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(name, expected_type, span) {
@@ -349,7 +393,8 @@ impl<'ast> TypeChecker<'ast> {
                 }
             }
             Pattern::Conditional { pattern, cond: _ }
-            | Pattern::Typed { pattern, typ: _ } => self.mark_vars_in_pattern_as_const(*pattern, const_val),
+            | Pattern::Typed { pattern, typ: _ }
+            | Pattern::TypeDestructor { typ: _, data: pattern } => self.mark_vars_in_pattern_as_const(*pattern, const_val),
             
             Pattern::Wildcard | Pattern::CompareExpr(_) | Pattern::PlacePointer(_) => { /* no vars */ },
         }

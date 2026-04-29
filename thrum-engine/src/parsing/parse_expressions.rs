@@ -535,7 +535,7 @@ impl Parser<'_> {
             let label = self.expect_identifier("to label the tuple element");
             self.expect_token(TokenKind::Colon, "unreachable");
 
-            if let TokenKind::Comma | TokenKind::RightParen = self.peek().token {
+            if let TokenKind::Comma | TokenKind::RightParen | TokenKind::RightBrace = self.peek().token {
                 // shorthand (x:, y:)
                 (label.clone(), make_shorthand(self, label))
             } else {

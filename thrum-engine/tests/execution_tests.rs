@@ -284,9 +284,18 @@ fn impls() {
 }
 
 #[test]
-fn single_tuple_type() {
-    test_eval!("type X = num; X{ 2 }", RuntimeValue::Num(2.0));
-    test_eval!("type X = (num,); X{ 2 }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0)]));
-    test_eval!("type X = (num, bool, num); X{ 2, true, 3 }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0), RuntimeValue::Bool(true), RuntimeValue::Num(3.0)]));
-    test_eval!("type X = (); X{ }", RuntimeValue::Tup(vec![]));
+fn single_tuple_type_instantiation() {
+    test_eval!("type X = num;         X{ 2 }", RuntimeValue::Num(2.0));
+    test_eval!("type X = (num,);      X{ 2 }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0)]));
+    test_eval!("type X = (num, bool); X{ 2, true }", RuntimeValue::Tup(vec![RuntimeValue::Num(2.0), RuntimeValue::Bool(true)]));
+    test_eval!("type X = ();          X{ }", RuntimeValue::Tup(vec![]));
+}
+
+#[test]
+fn single_tuple_type_destruction() {
+    test_eval!("type X = num;              let X{ a } = X{ 2 };                 a^",     RuntimeValue::Num(2.0));
+    test_eval!("type X = (num,);           let X{ a } = X{ 2 };                 a^",     RuntimeValue::Num(2.0));
+    test_eval!("type X = (num, num);       let X{ a, b } = X{ 3, 4 };           a * b", RuntimeValue::Num(12.0));
+    test_eval!("type X = (x: num, y: num); let X{ x: a, y: } = X{ x: 3, y: 4 }; a * y", RuntimeValue::Num(12.0));
+    test_eval!("type X = ();               let X{ } = X{ }",                            RuntimeValue::Void);
 }

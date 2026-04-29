@@ -134,9 +134,9 @@ pub enum ErrType {
     #[display("Can't index empty tuple: {typ}")]
     TyperCantIndexEmptyTuple { typ: Type },
     #[display("Must be a customtype, found: {typ}")]
-    TyperCantInstantiateNonCustomtypeType { typ: Type },
-    #[display("Instantiation of a new-type expects exactly one unlabeled expr.")]
-    TyperInstantiationExpectedOneUnlabeledExpr,
+    TyperMustBeCustomtypeType { typ: Type },
+    #[display("New-types expect exactly one unlabeled expr.")]
+    TyperNewTypesExpectOneUnlabeledExpr,
     #[display("Dot operator isn't supported for type: {typ}")]
     TyperDotOperatorNotSupportedForType { typ: Type },
 
