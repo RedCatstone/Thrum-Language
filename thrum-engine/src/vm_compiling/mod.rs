@@ -82,6 +82,7 @@ pub enum OpCode {
     TupCreate { length: usize },
     TupArrCreate { length: usize },
     TupPointerGet { index: usize },
+    TupGet { index: usize },
     TupPointerIndex,
     TupUnpack,
 
@@ -117,7 +118,7 @@ impl OpCode {
             Self::PointerSet => OpCodeRuntimeTempDiff { requires: 2, diff: -2 },
             
             Self::PointerGetClone | Self::PointerGetMove
-            | Self::TupPointerGet { .. } | Self::TupArrCreate { length: _ }
+            | Self::TupPointerGet { .. } | Self::TupGet { .. } | Self::TupArrCreate { length: _ }
             | Self::NumNegate | Self::BoolNegate
             | Self::Return | Self::Panic => OpCodeRuntimeTempDiff { requires: 1, diff: 0 },
 
@@ -593,7 +594,7 @@ impl VmCompiler<'_> {
 
             Expr::Call { callee, arguments } => {
                 let mut arg_count = 0;
-                if let Some(ResolvedMemberAccess::SelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
+                if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
                     self.compile_expression(*self_sugar_expr);
                     arg_count += 1;
                 }
@@ -635,12 +636,16 @@ impl VmCompiler<'_> {
 
             Expr::MemberAccess { left, member: _ } => {
                 match self.typed_ast.resolved_member_access[&compile_expr] {
-                    ResolvedMemberAccess::Tuple { index } => {
+                    ResolvedMemberAccess::TupleRefIndex { index } => {
                         self.compile_expression(*left);
                         self.push_op(OpCode::TupPointerGet { index });
                     }
-                    ResolvedMemberAccess::MetaType { fn_var }
-                    | ResolvedMemberAccess::SelfSugar { fn_var, .. } => {
+                    ResolvedMemberAccess::TupleIndex { index } => {
+                        self.compile_expression(*left);
+                        self.push_op(OpCode::TupGet { index });
+                    }
+                    ResolvedMemberAccess::Member { member: fn_var }
+                    | ResolvedMemberAccess::MemberWithSelfSugar { member: fn_var, .. } => {
                         self.push_get_identifier_ref(fn_var);
                     }
                 }

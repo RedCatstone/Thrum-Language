@@ -255,13 +255,13 @@ impl<'ast> TypeChecker<'ast> {
 
                 let pruned_expr = self.prune_type_once(expr_type, Some(span));
                 match pruned_expr {
-                    Type::Pointer { inner, mutable: true, borrows_var } => {
+                    Type::Borrow { inner, mutable: true, borrows_var } => {
                         self.update_variable(borrows_var, span);
                         inner
                     }
                     Type::Error => TypeId::ERROR,
                     _ => self.type_mismatch(
-                        Type::Pointer { inner: TypeId::ERROR, mutable: true, borrows_var: TypeVarId(0) }, pruned_expr, span
+                        Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: TypeVarId(0) }, pruned_expr, span
                     )
                 }
             }

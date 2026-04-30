@@ -100,7 +100,7 @@ impl TypeChecker<'_> {
 
                 let left_span = Some(self.ast.get_expr_span(*left));
                 match self.prune_type_once(left_pointer_type, left_span) {
-                    Type::Pointer { inner, mutable, borrows_var } => {
+                    Type::Borrow { inner, mutable, borrows_var } => {
 
                         let arr_inner_type = match self.prune_type_once(inner, left_span) {
                             Type::TupArr(inner, _) => inner,
@@ -123,7 +123,7 @@ impl TypeChecker<'_> {
         
                         self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
         
-                        self.add_type(Type::Pointer { inner: arr_inner_type, mutable, borrows_var })
+                        self.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
                     },
                     _ => TypeId::ERROR
                 }
@@ -323,7 +323,7 @@ impl TypeChecker<'_> {
                 let expr_type = self.check_expression(*expr, is_never, &ctx.auto_borrow_mut());
                 let expr_type = self.prune_type_once(expr_type, Some(span));
 
-                if let Type::Pointer { mutable, inner, borrows_var } = expr_type {
+                if let Type::Borrow { mutable, inner, borrows_var } = expr_type {
                     let pruned_inner = self.prune_type_once(inner, Some(span));
                     let auto_clone = self.is_auto_clone(&pruned_inner, span);
                     if auto_clone {
@@ -406,7 +406,7 @@ impl TypeChecker<'_> {
                 let mut call_param_types = Vec::new();
 
                 // `4.square()` is sugar for `u32.square(4)`, this handles that:
-                if let Some(ResolvedMemberAccess::SelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
+                if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
                     call_param_types.push(self.typed_ast.get_expr_type(*self_sugar_expr));
                 }
 
@@ -431,60 +431,11 @@ impl TypeChecker<'_> {
             },
 
 
-            Expr::MemberAccess { left, member } => {
+            Expr::MemberAccess { left, member: _ } => {
                 if old_ctx.auto_borrow_mut { ctx.auto_borrow_mut = true }
 
-                let left_type = self.check_expression(*left, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
-                let span = self.ast.get_expr_span(check_expr);
-                let left_span = self.ast.get_expr_span(*left);
-
-                match self.prune_type_once(left_type, Some(left_span)) {
-                    // for tuples it just checks indicies / labels
-                    // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
-                    Type::Tup(elems) => {
-                        let member_index = elems.iter().position(|elem| elem.label == *member);
-
-                        if let Some(index) = member_index {
-                            // modify the ast
-                            self.typed_ast.resolved_member_access.insert(check_expr, ResolvedMemberAccess::Tuple { index });
-                            elems[index].typ
-                        } else {
-                            self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::Tup(elems), member: member.to_string() }, span)
-                        }
-                    }
-
-                    // for metatypes it needs to first compile the type to get the actual `TypeId`
-                    // then it checks for impls with the correct member
-                    // e.g. `Number.MAX`
-                    Type::MetaType => {
-                        let meta_type = self.check_annotation_meta_type_id(*left, false);
-                        if let Some(type_impls) = self.type_impls.get(&meta_type)
-                        && let Some(member) = type_impls.scope.get(member.as_str()) {
-                            // found a member!
-                            self.typed_ast.resolved_member_access.insert(check_expr, ResolvedMemberAccess::MetaType { fn_var: *member });
-                            self.make_var_id_ref(*member, false)
-                        }
-                        else {
-                            self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::MetaType, member: member.to_string() }, span)
-                        }
-                    }
-
-                    // this uses left as the first argument in a call expression.
-                    // e.g. `Number{ 4 }.square()`
-                    Type::CustomType(_) => {
-                        if let Some(type_impls) = self.type_impls.get(&left_type)
-                        && let Some(member) = type_impls.scope.get(member.as_str()) {
-                            // found a member!
-                            self.typed_ast.resolved_member_access.insert(check_expr, ResolvedMemberAccess::SelfSugar { fn_var: *member, self_sugar_expr: *left });
-                            self.make_var_id_ref(*member, false)
-                        }
-                        else {
-                            self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::MetaType, member: member.to_string() }, span)
-                        }
-                    }
-
-                    typ => self.error(ErrType::TyperDotOperatorNotSupportedForType { typ }, span)
-                }
+                let left_type = self.check_expression(*left, is_never, &ctx);
+                self.check_member_access(left_type, check_expr, None)
             }
 
 
@@ -732,9 +683,10 @@ impl TypeChecker<'_> {
                         typ
                     } else {
                         if type_annotation_required {
-                            self.error(ErrType::TyperRequiresTypeAnnotation, self.ast.get_pattern_span(param));
+                            self.error(ErrType::TyperRequiresTypeAnnotation, self.ast.get_pattern_span(param))
+                        } else {
+                            self.new_infer_type()
                         }
-                        self.new_infer_type()
                     }
                 }
             )
@@ -782,6 +734,83 @@ impl TypeChecker<'_> {
         self.curr_function_return_type = backup;
 
         fn_type
+    }
+
+
+    fn check_member_access(&mut self, left_type: TypeId, member_access_expr: ExprId, came_from_ref: Option<(bool, TypeVarId)>) -> TypeId {
+        let Expr::MemberAccess { left, member } = self.ast.get_expr(member_access_expr) else {
+            unreachable!("this function is only called with MemberAccess exprs.")
+        };
+        let left_span = self.ast.get_expr_span(*left);
+
+        match self.prune_type_once(left_type, Some(left_span)) {
+            // for tuples one pointer layer is required
+            // just checks indicies / labels
+            // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
+            Type::Tup(elems) => {
+                let member_index = elems.iter().position(|elem| elem.label == *member);
+
+                if let Some(index) = member_index {
+                    // if we came from a ref keep that ref
+                    if let Some((mutable, borrows_var)) = came_from_ref {
+                        self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleRefIndex { index });
+                        self.add_type(Type::Borrow { inner: elems[index].typ, mutable, borrows_var })
+                    } else {
+                        self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleIndex { index });
+                        elems[index].typ
+                    }
+                } else {
+                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::Tup(elems), member: member.to_string() }, left_span)
+                }
+            }
+
+            // for metatypes it needs to first compile the type to get the actual `TypeId`
+            // then it checks for impls with the correct member
+            // e.g. `Number.MAX`
+            Type::MetaType => {
+                let meta_type = self.check_annotation_meta_type_id(*left, false);
+                if let Some(type_impls) = self.type_impls.get(&meta_type)
+                && let Some(&member) = type_impls.scope.get(member.as_str()) {
+                    // found a member!
+                    self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::Member { member });
+                    self.make_var_id_ref(member, false)
+                }
+                else {
+                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::MetaType, member: member.clone() }, left_span)
+                }
+            }
+
+            // this uses left as the first argument in a call expression.
+            // e.g. `Number{ 4 }.square()`
+            Type::CustomType(custom_inner_id) => {
+                if let Some(type_impls) = self.type_impls.get(&left_type)
+                && let Some(&member) = type_impls.scope.get(member.as_str()) {
+                    // found a member!
+                    self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::MemberWithSelfSugar { member, self_sugar_expr: *left });
+                    self.make_var_id_ref(member, false)
+                }
+                else {
+                    // recursively check for CustomTypes
+                    self.check_member_access(custom_inner_id, member_access_expr, came_from_ref)
+                }
+            }
+
+            Type::Borrow { inner, mutable, borrows_var } => {
+                // if we already came from a borrow before this borrow, just deref it
+                // this does not support double ref .access
+                if came_from_ref.is_some() {
+                    self.deref_if_pointer(*left);
+                }
+                
+                // now continue checking the member_access using the inner borrow type.
+                // also keep track of the borrows_var
+                // e.g. `tup.y` tup is a ref and the final thing will also be a ref.
+                self.check_member_access(inner, member_access_expr, Some((mutable, borrows_var)))
+            }
+
+            Type::Error => TypeId::ERROR,
+            typ => self.error(ErrType::TyperTypeDoesntHaveMember { typ, member: member.to_string() }, left_span)
+        }
     }
 
 
@@ -837,7 +866,7 @@ impl TypeChecker<'_> {
         if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {
             for _ in 0..(expr_p_count - expected_p_count) {
                 match self.prune_type_once(expr_type, Some(span)) {
-                    Type::Pointer { inner, mutable: _, borrows_var: _ } => {
+                    Type::Borrow { inner, mutable: _, borrows_var: _ } => {
                         self.insert_deref(expr, false, inner);
                     }
                     _ => unreachable!("i just checked the amount of pointers, so this is unreachable \
@@ -854,7 +883,7 @@ impl TypeChecker<'_> {
         let mut curr_typ = typ;
         let mut count = 0;
 
-        while let Type::Pointer { inner, .. } = self.prune_type_once(curr_typ, Some(err_span)) {
+        while let Type::Borrow { inner, .. } = self.prune_type_once(curr_typ, Some(err_span)) {
             curr_typ = inner;
             count += 1;
         }
@@ -882,7 +911,7 @@ impl TypeChecker<'_> {
                 if 0 == self.count_initial_pointers(expr_type, span).0 {
                     let pruned_infered = self.prune_type_once(expr_type, None);
                     self.type_mismatch(
-                        Type::Pointer { inner: TypeId::ERROR, mutable: false, borrows_var: TypeVarId(0) },
+                        Type::Borrow { inner: TypeId::ERROR, mutable: false, borrows_var: TypeVarId(0) },
                         pruned_infered, span
                     );
                 }
@@ -899,7 +928,7 @@ impl TypeChecker<'_> {
         let span = self.ast.get_expr_span(expr);
         let typ = self.typed_ast.get_expr_type(expr);
         match self.prune_type_once(typ, Some(span)) {
-            Type::Pointer { inner, mutable: _, borrows_var } => {
+            Type::Borrow { inner, mutable: _, borrows_var } => {
                 let prune_inner = self.prune_type_once(inner, Some(span));
                 let auto_clone = self.is_auto_clone(&prune_inner, span);
                 if auto_clone {
@@ -927,7 +956,7 @@ impl TypeChecker<'_> {
         match typ {
             Type::Num
             | Type::Bool
-            | Type::Pointer { .. }
+            | Type::Borrow { .. }
             | Type::Fn { .. }
             | Type::MetaType
             | Type::Error => true,

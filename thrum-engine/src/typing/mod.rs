@@ -47,7 +47,7 @@ pub enum Type {
     Fn { param_types: Vec<TypeId>, return_type: TypeId },
 
     #[display("{}ref {borrows_var:?} {inner:?}", if *mutable { "mut" } else { "" })]
-    Pointer { inner: TypeId, mutable: bool, borrows_var: TypeVarId },
+    Borrow { inner: TypeId, mutable: bool, borrows_var: TypeVarId },
 
     #[display("?{}", _0.0)]
     Infer(TypeInferId),
@@ -174,9 +174,10 @@ pub struct LabelInfo<'ast> {
 
 #[derive(Debug)]
 pub enum ResolvedMemberAccess {
-    Tuple { index: usize },
-    MetaType { fn_var: TypeVarId },
-    SelfSugar { fn_var: TypeVarId, self_sugar_expr: ExprId }
+    TupleRefIndex { index: usize },
+    TupleIndex { index: usize },
+    Member { member: TypeVarId },
+    MemberWithSelfSugar { member: TypeVarId, self_sugar_expr: ExprId }
 }
 
 impl TypeChecker<'_> {
@@ -316,8 +317,8 @@ impl TypeChecker<'_> {
                 }
             }
 
-            (Type::Pointer { mutable: mut_a, inner: inner_a, borrows_var: _ },
-            Type::Pointer { mutable: mut_b, inner: inner_b, borrows_var: _ }) => {
+            (Type::Borrow { mutable: mut_a, inner: inner_a, borrows_var: _ },
+            Type::Borrow { mutable: mut_b, inner: inner_b, borrows_var: _ }) => {
                 self.unify_types(inner_a, inner_b, span);
                 if mut_a != mut_b {
                     mismatch = true;
@@ -417,9 +418,9 @@ impl TypeChecker<'_> {
                 let new_ret = self.zonk_type(return_type, span, cache);
                 self.add_type(Type::Fn { param_types: new_params, return_type: new_ret })
             }
-            Type::Pointer { inner, mutable, borrows_var } => {
+            Type::Borrow { inner, mutable, borrows_var } => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.add_type(Type::Pointer { inner: new_inner, mutable, borrows_var })
+                self.add_type(Type::Borrow { inner: new_inner, mutable, borrows_var })
             }
             Type::CustomType(inner) => {
                 let new_inner = self.zonk_type(inner, span, cache);

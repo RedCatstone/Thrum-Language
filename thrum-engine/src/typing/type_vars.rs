@@ -250,7 +250,7 @@ impl<'ast> TypeChecker<'ast> {
             var.immut_borrows_count += 1;
         }
         let inner = var.typ;
-        self.add_type(Type::Pointer { mutable, inner, borrows_var: var_id })
+        self.add_type(Type::Borrow { mutable, inner, borrows_var: var_id })
     }
 
 

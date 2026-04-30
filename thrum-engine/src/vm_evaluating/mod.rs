@@ -229,6 +229,11 @@ impl<'a> VM<'a> {
                     let pointer = &raw mut tup[*index];
                     self.stack_push_val(RuntimeValue::ValuePointer(pointer));
                 }
+                OpCode::TupGet { index } => {
+                    let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let val = tup[*index].clone();
+                    self.stack_push_val(val);
+                }
                 OpCode::TupPointerIndex => {
                     let RuntimeValue::Num(i) = self.value_stack.pop().unwrap() else { unreachable!() };
                     
