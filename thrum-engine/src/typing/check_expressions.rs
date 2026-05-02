@@ -54,9 +54,8 @@ impl TypeChecker<'_> {
         let mut ctx = CheckExprCtx::default();
 
         let span = self.ast.get_expr_span(check_expr);
-        let expr_expr = self.ast.get_expr(check_expr);
 
-        let mut inferred_type = match expr_expr {
+        let mut inferred_type = match self.ast.get_expr(check_expr) {
             Expr::Literal { val } => self.check_literal(val),
 
             Expr::IdentifierRef { name, mutable } => {
@@ -79,7 +78,7 @@ impl TypeChecker<'_> {
                     })
                     .collect();
                     
-                self.add_type(Type::Tup(tuple_types))
+                self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
             Expr::TupleArr { elem, length } => {
@@ -91,7 +90,8 @@ impl TypeChecker<'_> {
                     _ => 0
                 };
 
-                self.add_type(Type::TupArr(elem_type, const_length))
+                self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
+                self.type_arena.add_type(Type::TupArr(elem_type, const_length))
             }
 
             Expr::Index { left, index } => {
@@ -123,7 +123,7 @@ impl TypeChecker<'_> {
         
                         self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
         
-                        self.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
+                        self.type_arena.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
                     },
                     _ => TypeId::ERROR
                 }
@@ -321,26 +321,24 @@ impl TypeChecker<'_> {
 
             Expr::Move { expr } => {
                 let expr_type = self.check_expression(*expr, is_never, &ctx.auto_borrow_mut());
-                let expr_type = self.prune_type_once(expr_type, Some(span));
 
-                if let Type::Borrow { mutable, inner, borrows_var } = expr_type {
-                    let pruned_inner = self.prune_type_once(inner, Some(span));
-                    let auto_clone = self.is_auto_clone(&pruned_inner, span);
-                    if auto_clone {
-                        self.clone_variable(borrows_var, span);
-                    } else {
-                        self.move_variable(borrows_var, span);
-                        self.typed_ast.move_expr.insert(check_expr);
+                match self.prune_type_once(expr_type, Some(span)) {
+                    Type::Borrow { inner, mutable, borrows_var } => {
+                        let auto_clone = self.check_deref_memory_rules(inner, mutable, borrows_var, span);
+
+                        if !auto_clone {
+                            self.typed_ast.move_expr.insert(check_expr);
+                        }
+                        inner
                     }
-                    if !mutable {
-                        self.error(ErrType::TyperCantDerefNonMutPointerType { typ: expr_type }, span);
-                    }
-                    inner
-                } else {
-                    self.error(ErrType::TyperCantDerefNonPointerType { typ: expr_type }, span)
+                    Type::Error => TypeId::ERROR,
+                    typ => self.error(ErrType::TyperCantDerefNonPointerType { typ }, span)
                 }
             },
 
+            Expr::Borrow { expr, mutable: _ } => {
+                self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::TYPE))
+            }
             
             Expr::Closure { closure, requires_type_annotation } => {
                 let id = self.compiled_functions.reserve_slot(check_expr);
@@ -400,7 +398,6 @@ impl TypeChecker<'_> {
 
             Expr::Call { callee, arguments } => {
                 let callee_type = self.check_expression(*callee, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
-
                 let callee_span = self.ast.get_expr_span(*callee);
 
                 let mut call_param_types = Vec::new();
@@ -572,9 +569,9 @@ impl TypeChecker<'_> {
 
     fn check_literal(&mut self, val: &AstValue) -> TypeId {
         match val {
-            AstValue::Num(_) => self.add_type(Type::Num),
-            AstValue::Str(_) => self.add_type(Type::Str),
-            AstValue::Bool(_) => self.add_type(Type::Bool),
+            AstValue::Num(_) => self.type_arena.add_type(Type::Num),
+            AstValue::Str(_) => self.type_arena.add_type(Type::Str),
+            AstValue::Bool(_) => self.type_arena.add_type(Type::Bool),
         }
     }
 
@@ -699,7 +696,7 @@ impl TypeChecker<'_> {
         } else {
             self.new_infer_type()
         };
-        self.add_type(Type::Fn { param_types, return_type })
+        self.type_arena.add_type(Type::Fn { param_types, return_type })
     }
 
 
@@ -707,7 +704,7 @@ impl TypeChecker<'_> {
         // check the fn_type in a new scope to also define the function parameters
         self.enter_scope();
 
-        let Type::Fn { param_types, return_type } = self.typed_ast.get_type(fn_type) else {
+        let Type::Fn { param_types, return_type } = self.type_arena.get_type(fn_type) else {
             unreachable!("this function should only be called with valid function types")
         };
         assert_eq!(param_types.len(), closure.params.len());
@@ -737,7 +734,7 @@ impl TypeChecker<'_> {
     }
 
 
-    fn check_member_access(&mut self, left_type: TypeId, member_access_expr: ExprId, came_from_ref: Option<(bool, TypeVarId)>) -> TypeId {
+    fn check_member_access(&mut self, left_type: TypeId, member_access_expr: ExprId, came_from_ref: Option<(bool, Option<TypeVarId>)>) -> TypeId {
         let Expr::MemberAccess { left, member } = self.ast.get_expr(member_access_expr) else {
             unreachable!("this function is only called with MemberAccess exprs.")
         };
@@ -754,7 +751,7 @@ impl TypeChecker<'_> {
                     // if we came from a ref keep that ref
                     if let Some((mutable, borrows_var)) = came_from_ref {
                         self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleRefIndex { index });
-                        self.add_type(Type::Borrow { inner: elems[index].typ, mutable, borrows_var })
+                        self.type_arena.add_type(Type::Borrow { inner: elems[index].typ, mutable, borrows_var })
                     } else {
                         self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleIndex { index });
                         elems[index].typ
@@ -768,6 +765,10 @@ impl TypeChecker<'_> {
             // then it checks for impls with the correct member
             // e.g. `Number.MAX`
             Type::MetaType => {
+                if came_from_ref.is_some() {
+                    // if this is a ref to a metatype, deref it first.
+                    assert!(self.deref_if_pointer(*left));
+                }
                 let meta_type = self.check_annotation_meta_type_id(*left, false);
                 if let Some(type_impls) = self.type_impls.get(&meta_type)
                 && let Some(&member) = type_impls.scope.get(member.as_str()) {
@@ -799,7 +800,7 @@ impl TypeChecker<'_> {
                 // if we already came from a borrow before this borrow, just deref it
                 // this does not support double ref .access
                 if came_from_ref.is_some() {
-                    self.deref_if_pointer(*left);
+                    assert!(self.deref_if_pointer(*left));
                 }
                 
                 // now continue checking the member_access using the inner borrow type.
@@ -911,12 +912,12 @@ impl TypeChecker<'_> {
                 if 0 == self.count_initial_pointers(expr_type, span).0 {
                     let pruned_infered = self.prune_type_once(expr_type, None);
                     self.type_mismatch(
-                        Type::Borrow { inner: TypeId::ERROR, mutable: false, borrows_var: TypeVarId(0) },
+                        Type::Borrow { inner: TypeId::ERROR, mutable: false, borrows_var: None },
                         pruned_infered, span
                     );
                 }
                 while 1 < self.count_initial_pointers(self.typed_ast.get_expr_type(check_expr), span).0 {
-                    self.deref_if_pointer(check_expr);
+                    assert!(self.deref_if_pointer(check_expr));
                 }
             }
         }
@@ -927,20 +928,36 @@ impl TypeChecker<'_> {
     pub fn deref_if_pointer(&mut self, expr: ExprId) -> bool {
         let span = self.ast.get_expr_span(expr);
         let typ = self.typed_ast.get_expr_type(expr);
+
         match self.prune_type_once(typ, Some(span)) {
-            Type::Borrow { inner, mutable: _, borrows_var } => {
-                let prune_inner = self.prune_type_once(inner, Some(span));
-                let auto_clone = self.is_auto_clone(&prune_inner, span);
-                if auto_clone {
-                    self.clone_variable(borrows_var, span);
-                } else {
-                    self.move_variable(borrows_var, span);
-                }
+            Type::Borrow { inner, mutable, borrows_var } => {
+                let auto_clone = self.check_deref_memory_rules(inner, mutable, borrows_var, span);
                 self.insert_deref(expr, !auto_clone, inner);
                 true
             }
             _ => false
         }
+    }
+
+    fn check_deref_memory_rules(&mut self, inner_type: TypeId, mutable: bool, borrows_var: Option<TypeVarId>, span: Span) -> bool {
+        let pruned_inner = self.prune_type_once(inner_type, Some(span));
+        let auto_clone = self.is_auto_clone(&pruned_inner, span);
+
+        if auto_clone {
+            if let Some(x) = borrows_var {
+                self.clone_variable(x, span);
+            }
+        } else {
+            // if it isn't autoclone, it needs to move it
+            if let Some(x) = borrows_var {
+                self.move_variable(x, span);
+            }
+            else {
+                self.error(ErrType::TyperCantDerefUnknownPointerType, span); 
+            }
+        }
+
+        auto_clone
     }
 
     fn insert_deref(&mut self, expr: ExprId, moves: bool, new_type: TypeId) {
@@ -959,13 +976,13 @@ impl TypeChecker<'_> {
             | Type::Borrow { .. }
             | Type::Fn { .. }
             | Type::MetaType
+            | Type::Void
+            | Type::Never
             | Type::Error => true,
 
             Type::Str
             | Type::TupArr(_, _)
             | Type::Tup(_)
-            | Type::Void
-            | Type::Never
             | Type::Enum(_) => false,
 
             Type::CustomType(id) => {

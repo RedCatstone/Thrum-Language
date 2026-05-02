@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use derive_more::Display;
 use strum_macros::FromRepr;
 
-use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, Type, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
+use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, TypeArena, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
 
 
 #[derive(Debug, Display, Clone, PartialEq, PartialOrd)]
@@ -96,6 +96,9 @@ pub enum OpCode {
     Return,
     Panic,
 
+    // meta type stuff
+    MakeTypeRef { mutable: bool },
+
     // no-op
     NoOp
 }
@@ -120,6 +123,7 @@ impl OpCode {
             Self::PointerGetClone | Self::PointerGetMove
             | Self::TupPointerGet { .. } | Self::TupGet { .. } | Self::TupArrCreate { length: _ }
             | Self::NumNegate | Self::BoolNegate
+            | Self::MakeTypeRef { .. }
             | Self::Return | Self::Panic => OpCodeRuntimeTempDiff { requires: 1, diff: 0 },
 
             Self::CmpEqual | Self::CmpLess | Self::CmpGreater
@@ -233,6 +237,7 @@ impl VmCompiler<'_> {
     pub fn compile_and_run_comptime_expr(
         ast: &AstArena,
         typed_ast: &TypedAst,
+        type_arena: &mut TypeArena,
         compiled_functions: &mut FunctionRegistry,
         expr_id: ExprId
     ) -> Result<RuntimeValue, ErrType> {
@@ -243,7 +248,7 @@ impl VmCompiler<'_> {
         let mut reg = FunctionRegistry::new();
         reg.compiled_functions[0] = CompilingStatus::Compiled(const_chunk);
         println!("\n{reg:?}");
-        unsafe { vm_evaluating::VM::start(&mut reg) }
+        unsafe { vm_evaluating::VM::start(&mut reg, Some(type_arena)) }
     }
     
     fn new<'a>(ast: &'a AstArena, typed_ast: &'a TypedAst, compiled_functions: &'a mut FunctionRegistry) -> VmCompiler<'a> {
@@ -312,9 +317,7 @@ impl VmCompiler<'_> {
             }
             Expr::TupleArr { elem, length: _ } => {
                 let typ = self.typed_ast.get_expr_type(compile_expr);
-                let Type::TupArr(_, const_length) = self.typed_ast.get_type(typ) else {
-                    unreachable!("typechecker illegal state...")
-                };
+                let const_length = self.typed_ast.resolved_tuple_arr_length[&compile_expr];
 
                 if const_length == 0 {
                     self.push_op(OpCode::TupCreate { length: 0 });
@@ -337,8 +340,7 @@ impl VmCompiler<'_> {
             }
             Expr::Prefix { op, right } => {
                 self.compile_expression(*right);
-                let right_type = self.typed_ast.get_expr_type(*right);
-                self.compile_prefix(*op, right_type);
+                self.compile_prefix(*op);
             }
 
             Expr::Block { exprs, label } => {
@@ -662,6 +664,11 @@ impl VmCompiler<'_> {
                 self.push_get_constant_op(RuntimeValue::Type(meta_type));
             }
 
+            Expr::Borrow { expr, mutable } => {
+                self.compile_expression(*expr);
+                self.push_op(OpCode::MakeTypeRef { mutable: *mutable });
+            }
+
             // do nothing here, these are only for the typechecker.
             Expr::Const { .. }
             | Expr::ImplBlock { .. } => self.push_op(OpCode::PushVoid),
@@ -853,7 +860,7 @@ impl VmCompiler<'_> {
                 });
             }
 
-            Pattern::TypeDestructor { typ, data } => {
+            Pattern::TypeDestructor { typ: _, data } => {
                 if self.typed_ast.resolved_type_destruction_not_a_tuple.contains(&compile_pattern) {
                     // if its not a tuple type, e.g. `type N = num; N{ 2 }`
                     let Pattern::Tuple(elems) = self.ast.get_pattern(*data) else {
@@ -982,17 +989,11 @@ impl VmCompiler<'_> {
         }
     }
 
-    fn compile_prefix(&mut self, operator: TokenKind, right: TypeId) {
-        match self.typed_ast.get_type(right) {
-            Type::Bool => match operator {
-                TokenKind::Exclamation => self.push_op(OpCode::BoolNegate),
-                _ => unreachable!("Unsupported operator {} for type bool", operator)
-            }
-            Type::Num => match operator {
-                TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumNegate),
-                _ => unreachable!("Unsupported operator {} for type num", operator)
-            }
-            _ => unreachable!("Mismatched types for prefix operation")
+    fn compile_prefix(&mut self, operator: TokenKind) {
+        match operator {
+            TokenKind::Exclamation => self.push_op(OpCode::BoolNegate),
+            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumNegate),
+            _ => unreachable!("unsupported prefix operator...")
         }
     }
 }

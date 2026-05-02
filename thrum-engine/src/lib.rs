@@ -121,8 +121,8 @@ pub enum ErrType {
     TyperCantUseMovedVar { var: TypeVar },
     #[display("Can't dereference non-pointer type: {typ}")]
     TyperCantDerefNonPointerType { typ: Type },
-    #[display("Can't dereference immutable pointer: {typ}")]
-    TyperCantDerefNonMutPointerType { typ: Type },
+    #[display("Can't deref a non local pointer.")]
+    TyperCantDerefUnknownPointerType,
     #[display("Can't index non array type: {typ}")]
     TyperCantIndexNonArrType { typ: Type },
     #[display("Return is only allowed inside functions.")]
@@ -203,14 +203,14 @@ pub fn run_code(source_code: &str) -> Result<RuntimeValue, Vec<ErrType>> {
     stage_complete("Desugar", &ast.display_expr(ExprId(0)), &ProgramErrorData::new(), &source_data)?;
 
     let (typed_ast, mut compiled_functions) = typing::TypeChecker::start(&mut err_data, &ast);
-    stage_complete("Typechecker", &format!("{typed_ast}\ncompiled_functions: {compiled_functions:?}"), &err_data, &source_data)?;
+    stage_complete("Typechecker", &format!("compiled_functions: {compiled_functions:?}"), &err_data, &source_data)?;
 
     vm_compiling::VmCompiler::start(&ast, &typed_ast, &mut compiled_functions);
     stage_complete("VmCompiler", &format!("{compiled_functions:?}"), &ProgramErrorData::new(), &source_data)?;
 
 
     let start_execution_time = Instant::now();
-    let result = unsafe { VM::start(&mut compiled_functions) };
+    let result = unsafe { VM::start(&mut compiled_functions, None) };
     match result {
         Ok(r) => {
             println!("\n--- Execution Successfull ({:?}) ---", start_execution_time.elapsed());

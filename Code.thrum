@@ -1,11 +1,11 @@
 type Point = (x: num, y: num)
 impl Point {
-    fn squared_distance(self: Self) -> num {
-        self.x * self.x * self.y * self.y
+    fn squared_distance(self: &Self) -> num {
+        self.x * self.x * self^.y * self.y
     }
 }
 
 
 let mut p = Point{ x: 2, y: 3 }
 p.y = 15
-p^.squared_distance()
+p.squared_distance()

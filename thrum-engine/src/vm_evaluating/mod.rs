@@ -1,4 +1,4 @@
-use crate::{ErrType, pretty_printing::slice_to_string, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, RuntimeValue}};
+use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, RuntimeValue}};
 
 
 
@@ -51,14 +51,19 @@ pub struct CallFrame {
 
 pub struct VM<'a> {
     compiled_functions: &'a mut FunctionRegistry,
+    // for evaluating consts it needs to be able
+    // to add new types and get TypeId's
+    type_arena: Option<&'a mut TypeArena>,
+
     frames: Vec<CallFrame>,
     value_stack: Vec<RuntimeValue>,
 }
 
 impl<'a> VM<'a> {
-    pub unsafe fn start(compiled_functions: &'a mut FunctionRegistry) -> Result<RuntimeValue, ErrType> {
+    pub unsafe fn start(compiled_functions: &'a mut FunctionRegistry, type_arena: Option<&'a mut TypeArena>) -> Result<RuntimeValue, ErrType> {
         let mut vm = Self {
             compiled_functions,
+            type_arena,
             frames: Vec::new(),
             // this stack is NOT allowed to reallocate.
             // if it does, every Value::ValuePointer(*mut Value) breaks and unsafe behaviour happens :(
@@ -291,6 +296,18 @@ impl<'a> VM<'a> {
 
                         _ => unreachable!("tried to call {callee}...")
                     }
+                }
+
+                // meta type stuff
+                OpCode::MakeTypeRef { mutable } => {
+                    let RuntimeValue::Type(a) = self.value_stack.pop().unwrap() else {
+                        unreachable!("last value was not a meta type")
+                    };
+                    let Some(type_arena) = &mut self.type_arena else {
+                        unreachable!("tried to access the type_arena, but there was none...")
+                    };
+                    let pointer_type = type_arena.add_type(Type::Borrow { inner: a, mutable: *mutable, borrows_var: None });
+                    self.stack_push_val(RuntimeValue::Type(pointer_type));
                 }
 
                 // End of function / program

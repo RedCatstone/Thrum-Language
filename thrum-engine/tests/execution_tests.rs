@@ -299,3 +299,20 @@ fn single_tuple_type_destruction() {
     test_eval!("type X = (x: num, y: num); let X{ x: a, y: } = X{ x: 3, y: 4 }; a * y", RuntimeValue::Num(12.0));
     test_eval!("type X = ();               let X{ } = X{ }",                            RuntimeValue::Void);
 }
+
+
+#[test]
+fn point_impl_test() {
+    test_eval!("
+        type Point = (x: num, y: num)
+        impl Point {
+            fn squared_distance(self: &Self) -> num {
+                self.x * self.x + self.y * self.y
+            }
+        }
+
+        let mut p = Point{ x: 3, y: 2 }
+        p.y = 4
+        p.squared_distance()
+    ", RuntimeValue::Num(25.0));
+}

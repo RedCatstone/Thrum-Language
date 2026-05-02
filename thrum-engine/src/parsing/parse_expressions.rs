@@ -201,6 +201,12 @@ impl Parser<'_> {
                     name_expr
                 }
             }
+
+            TokenKind::Mut => {
+                let name = self.expect_identifier("after mut");
+                self.add_expr(start, Expr::IdentifierRef { name, mutable: true })
+            }
+            
             TokenKind::Number => self.extract_number_expr_from_source(start),
 
             TokenKind::Bool(val) => self.add_expr(start, Expr::Literal { val: AstValue::Bool(val) }),
@@ -427,9 +433,10 @@ impl Parser<'_> {
                 self.add_expr(start, Expr::Continue { label })
             }
 
-            TokenKind::Mut => {
-                let name = self.expect_identifier("after mut");
-                self.add_expr(start, Expr::IdentifierRef { name, mutable: true })
+            TokenKind::Ampersand => {
+                let mutable = self.optional_token(TokenKind::Mut);
+                let expr = self.parse_expression(Precedence::Prefix);
+                self.add_expr(start, Expr::Borrow { expr, mutable })
             }
 
             _ => {

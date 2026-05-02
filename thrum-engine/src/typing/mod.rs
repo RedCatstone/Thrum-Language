@@ -47,7 +47,7 @@ pub enum Type {
     Fn { param_types: Vec<TypeId>, return_type: TypeId },
 
     #[display("{}ref {borrows_var:?} {inner:?}", if *mutable { "mut" } else { "" })]
-    Borrow { inner: TypeId, mutable: bool, borrows_var: TypeVarId },
+    Borrow { inner: TypeId, mutable: bool, borrows_var: Option<TypeVarId> },
 
     #[display("?{}", _0.0)]
     Infer(TypeInferId),
@@ -96,8 +96,8 @@ pub struct TypeChecker<'a> {
     // maps variable names to their Id
     var_scopes: Vec<TypeVarScope<'a>>,
 
-    // this ensures that there are no duplicate types
-    type_dedup: HashMap<Type, TypeId>,
+    type_arena: TypeArena,
+
     // if inference_types[0] is Some(TypeId(3))
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
@@ -118,13 +118,12 @@ pub struct TypeChecker<'a> {
     compiled_functions: FunctionRegistry,
 }
 
-#[derive(Debug, Display, Default)]
-#[display("types: [{}]\nexpr_types: {expr_types:?}\nvars: [{}]",
-    slice_to_string(types, ", "),
-    slice_to_string(vars, ", "),
-)]
+#[derive(Debug, Default)]
+/// this struct gets build in the typechecker phase
+/// and is read-only afterwards.
+/// it has a bunch of notes telling the VmCompiler everythhing 
+/// it needs to know to compile the ast-nodes (which are read-only after parsing already)
 pub struct TypedAst {
-    pub types: Vec<Type>,  // indexed with TypeId
     pub expr_types: Vec<TypeId>,  // Indexed with ExprId
 
     pub enum_defs: Vec<EnumDefinition>,  // indexed with EnumId
@@ -137,6 +136,7 @@ pub struct TypedAst {
     pub resolved_type_instantian_not_a_tuple: HashSet<ExprId>,
     pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
     
+    pub resolved_tuple_arr_length: HashMap<ExprId, usize>,
     pub resolved_enum_variant: HashMap<ExprId, (EnumId, usize)>,
     pub resolved_enum_variant_pattern: HashMap<PatternId, (EnumId, usize)>,
     pub resolved_closure_fn_id: HashMap<ExprId, usize>,
@@ -151,10 +151,46 @@ impl TypedAst {
         Self { expr_types: vec![TypeId::ERROR; ast_exprs], ..Default::default() }
     }
     #[must_use] pub fn get_expr_type(&self, id: ExprId) -> TypeId { self.expr_types[id.0 as usize] }
-    #[must_use] pub fn get_type(&self, id: TypeId) -> Type { self.types[id.0 as usize].clone() }
 
     #[must_use] pub fn get_var(&self, id: TypeVarId) -> &TypeVar { &self.vars[id.0 as usize] }
     #[must_use] pub fn get_var_mut(&mut self, id: TypeVarId) -> &mut TypeVar { &mut self.vars[id.0 as usize] }
+}
+
+#[derive(Debug)]
+pub struct TypeArena {
+    // indexed with TypeId
+    pub types: Vec<Type>,
+
+    // duplicate types should get the same id
+    // because of inference types there can still be dupes
+    // but those get filtered out in the zonking phase.
+    type_dedup: HashMap<Type, TypeId>,
+}
+impl TypeArena {
+    #[must_use]
+    fn new() -> Self {
+        let mut ta = Self { types: Vec::new(), type_dedup: HashMap::new() };
+        // add the hardcoded types
+        for (id, typ) in TypeId::MAP_CONSTS {
+            assert_eq!(id, ta.add_type(typ));
+        }
+        ta
+    }
+
+    #[must_use]
+    pub fn get_type(&self, id: TypeId) -> Type { self.types[id.0 as usize].clone() }
+
+    #[must_use]
+    pub fn add_type(&mut self, typ: Type) -> TypeId {
+        if let Some(&id) = self.type_dedup.get(&typ) {
+            id
+        } else {
+            let id = TypeId(AstIds::try_from(self.types.len()).unwrap());
+            self.types.push(typ.clone());
+            self.type_dedup.insert(typ, id);
+            id
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -186,7 +222,7 @@ impl TypeChecker<'_> {
             error_data, ast,
             typed_ast: TypedAst::new(ast.exprs.len()),
             var_scopes: vec![TypeVarScope::default()],
-            type_dedup: HashMap::new(),
+            type_arena: TypeArena::new(),
             inference_types: Vec::new(),
             type_impls: HashMap::new(),
             curr_function_return_type: None,
@@ -194,7 +230,6 @@ impl TypeChecker<'_> {
             curr_impl_self: None,
             compiled_functions: FunctionRegistry::new(),
         };
-        tc.add_hardcoded_types();
         let native_lib = get_native_lib();
         tc.load_prelude_from_lib(&native_lib);
         
@@ -221,32 +256,15 @@ impl TypeChecker<'_> {
         self.error(ErrType::TyperMismatch { expected, found }, span)
     }
 
-    pub fn add_hardcoded_types(&mut self) {
-        for (id, typ) in TypeId::MAP_CONSTS {
-            assert_eq!(id, self.add_type(typ));
-        }
-    }
-
-    pub fn add_type(&mut self, typ: Type) -> TypeId {
-        if let Some(&id) = self.type_dedup.get(&typ) {
-            id
-        } else {
-            let id = TypeId(AstIds::try_from(self.typed_ast.types.len()).unwrap());
-            self.typed_ast.types.push(typ.clone());
-            self.type_dedup.insert(typ, id);
-            id
-        }
-    }
-
     pub fn new_infer_type(&mut self) -> TypeId {
         let id = TypeInferId(AstIds::try_from(self.inference_types.len()).unwrap());
         self.inference_types.push(None);  // unresolved initially
-        self.add_type(Type::Infer(id))
+        self.type_arena.add_type(Type::Infer(id))
     }
 
     pub fn prune_id_once(&mut self, id: TypeId) -> TypeId {
         let mut current_id = id;
-        while let Type::Infer(infer_id) = self.typed_ast.types[current_id.0 as usize] {
+        while let Type::Infer(infer_id) = self.type_arena.types[current_id.0 as usize] {
             if let Some(resolved_id) = self.inference_types[infer_id.0 as usize] {
                 current_id = resolved_id;
             } else { break }
@@ -255,7 +273,7 @@ impl TypeChecker<'_> {
     }
     pub fn prune_type_once(&mut self, id: TypeId, err_span: Option<Span>) -> Type {
         let id = self.prune_id_once(id);
-        let typ = self.typed_ast.types[id.0 as usize].clone();
+        let typ = self.type_arena.types[id.0 as usize].clone();
         if let Some(span) = err_span && let Type::Infer(_) = typ {
             self.error(ErrType::TyperTypeMustBeKnownHere { typ }, span);
             Type::Error
@@ -272,8 +290,8 @@ impl TypeChecker<'_> {
         // already equal -> do nothing
         if id_a == id_b { return }
 
-        let a = self.typed_ast.types[id_a.0 as usize].clone();
-        let b = self.typed_ast.types[id_b.0 as usize].clone();
+        let a = self.type_arena.types[id_a.0 as usize].clone();
+        let b = self.type_arena.types[id_b.0 as usize].clone();
         let mut mismatch = false;
 
         assert!(a != b, "only equal after?");
@@ -363,7 +381,7 @@ impl TypeChecker<'_> {
     /// (num. Infer(0)) -> (num, num)
     pub(super) fn finalize_types(&mut self) {
         // cache to prevent recursively zonking the same type thousands of times.
-        let mut cache = vec![None; self.typed_ast.types.len()];
+        let mut cache = vec![None; self.type_arena.types.len()];
 
         // zonk Expression types
         for i in 0..self.typed_ast.expr_types.len() {
@@ -388,7 +406,7 @@ impl TypeChecker<'_> {
             return zonked;
         }
 
-        let typ = self.typed_ast.types[id.0 as usize].clone();
+        let typ = self.type_arena.types[id.0 as usize].clone();
 
         let zonked_id = match typ {
             // try to resolve this Type::Infer!
@@ -404,27 +422,27 @@ impl TypeChecker<'_> {
             // OTHER CASES: recursively zonk the inner types and then re-deduplicate them!
             Type::TupArr(inner, length) => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.add_type(Type::TupArr(new_inner, length))
+                self.type_arena.add_type(Type::TupArr(new_inner, length))
             }
             Type::Tup(elems) => {
                 let new_elems = elems.into_iter().map(|e| TypeTuple {
                     label: e.label,
                     typ: self.zonk_type(e.typ, span, cache),
                 }).collect();
-                self.add_type(Type::Tup(new_elems))
+                self.type_arena.add_type(Type::Tup(new_elems))
             }
             Type::Fn { param_types, return_type } => {
                 let new_params = param_types.into_iter().map(|p| self.zonk_type(p, span, cache)).collect();
                 let new_ret = self.zonk_type(return_type, span, cache);
-                self.add_type(Type::Fn { param_types: new_params, return_type: new_ret })
+                self.type_arena.add_type(Type::Fn { param_types: new_params, return_type: new_ret })
             }
             Type::Borrow { inner, mutable, borrows_var } => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.add_type(Type::Borrow { inner: new_inner, mutable, borrows_var })
+                self.type_arena.add_type(Type::Borrow { inner: new_inner, mutable, borrows_var })
             }
             Type::CustomType(inner) => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.add_type(Type::CustomType(new_inner))
+                self.type_arena.add_type(Type::CustomType(new_inner))
             }
 
             // simple types don't need zonking
@@ -432,9 +450,9 @@ impl TypeChecker<'_> {
             | Type::MetaType | Type::Error | Type::Enum(_) => id
         };
 
-        // resize the cache dynamically, because `self.add_type()` might have added stuff
-        if cache.len() < self.typed_ast.types.len() {
-            cache.resize(self.typed_ast.types.len(), None);
+        // resize the cache dynamically, because `self.type_arena.add_type()` might have added stuff
+        if cache.len() < self.type_arena.types.len() {
+            cache.resize(self.type_arena.types.len(), None);
         }
         cache[id.0 as usize] = Some(zonked_id);
         zonked_id

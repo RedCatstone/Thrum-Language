@@ -134,6 +134,10 @@ impl AstArena {
                 writeln!(s)?;
                 self.format_expr_recursive(*expr, s, ind + 1, "expr", true)
             }
+            Expr::Borrow { expr, mutable } => {
+                writeln!(s, "mutable: {mutable}")?;
+                self.format_expr_recursive(*expr, s, ind + 1, "expr", true)
+            }
             Expr::MemberAccess { left, member } | Expr::TypeMemberAccess { left, member } => {
                 writeln!(s, " - .{member}")?;
                 self.format_expr_recursive(*left, s, ind + 1, "object", true)

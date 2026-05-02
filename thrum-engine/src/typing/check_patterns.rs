@@ -106,7 +106,7 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 covered_cases = PatternSpace::tuple_cartesian_product(&tuple_covered_cases);
-                self.add_type(Type::Tup(tuple_types))
+                self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
             Pattern::Wildcard => {
@@ -256,12 +256,14 @@ impl<'ast> TypeChecker<'ast> {
                 let pruned_expr = self.prune_type_once(expr_type, Some(span));
                 match pruned_expr {
                     Type::Borrow { inner, mutable: true, borrows_var } => {
-                        self.update_variable(borrows_var, span);
+                        if let Some(x) = borrows_var {
+                            self.update_variable(x, span);
+                        }
                         inner
                     }
                     Type::Error => TypeId::ERROR,
                     _ => self.type_mismatch(
-                        Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: TypeVarId(0) }, pruned_expr, span
+                        Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: None }, pruned_expr, span
                     )
                 }
             }
@@ -323,9 +325,9 @@ impl<'ast> TypeChecker<'ast> {
                         }
                     }).collect();
 
-                self.add_type(Type::Tup(meta_elems))
+                self.type_arena.add_type(Type::Tup(meta_elems))
             }
-            _ => unreachable!("type mismatch at runtime?!")
+            _ => unreachable!("not a meta type?! {val} \nexpected: {}", self.type_arena.get_type(expected_type))
         }
     }
 

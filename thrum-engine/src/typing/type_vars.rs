@@ -135,7 +135,7 @@ impl<'ast> TypeChecker<'ast> {
                 self.evaluate_expr(*expr).map(|val| {
                     let expected_type = self.typed_ast.get_expr_type(*expr);
                     let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
-                    let new_type = self.add_type(Type::CustomType(runtime_type_id));
+                    let new_type = self.type_arena.add_type(Type::CustomType(runtime_type_id));
                     RuntimeValue::Type(new_type)
                 })
             }
@@ -153,12 +153,12 @@ impl<'ast> TypeChecker<'ast> {
                 // add a new defined enum type, which stores all enum .Variants and their attached data type 
                 let enum_id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
                 self.typed_ast.enum_defs.push(EnumDefinition { variants });
-                let enum_type = self.add_type(Type::Enum(enum_id));
+                let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
                 Some(RuntimeValue::Type(enum_type))
             }
 
             _ => {
-                match VmCompiler::compile_and_run_comptime_expr(self.ast, &self.typed_ast, &mut self.compiled_functions, expr) {
+                match VmCompiler::compile_and_run_comptime_expr(self.ast, &self.typed_ast, &mut self.type_arena, &mut self.compiled_functions, expr) {
                     Ok(val) => Some(val),
                     Err(e) => {
                         self.error(e, self.ast.get_expr_span(expr));
@@ -250,7 +250,7 @@ impl<'ast> TypeChecker<'ast> {
             var.immut_borrows_count += 1;
         }
         let inner = var.typ;
-        self.add_type(Type::Borrow { mutable, inner, borrows_var: var_id })
+        self.type_arena.add_type(Type::Borrow { mutable, inner, borrows_var: Some(var_id) })
     }
 
 
@@ -385,7 +385,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn load_prelude_from_lib(&mut self, module: &'ast ThrumModule) {
         for (name, value) in &module.values {
             if value.is_prelude {
-                let id = self.add_type(value.typ.clone());
+                let id = self.type_arena.add_type(value.typ.clone());
                 self.define_variable(name, id, false, true, Span::invalid(), TypeVarConstVal::Evaluated(value.val.clone()));
             }
         }

@@ -81,3 +81,9 @@ fn typecheck_functions() {
     test_err!("fn square(x: num) {}; square()", ErrType::TyperWrongNumberOfArguments { .. });
     test_err!("fn square(x) {}", ErrType::TyperRequiresTypeAnnotation);
 }
+
+
+#[test]
+fn deref_non_local_pointer() {
+    test_err!("type T = (); impl T { fn f(self: &Self) { self^^; } }", ErrType::TyperCantDerefUnknownPointerType);
+}

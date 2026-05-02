@@ -57,6 +57,7 @@ pub enum Expr {
     Const { pattern: PatternId, value: ExprId },  // const x = 5
     CustomType { expr: ExprId },  // type x = 5  (for now paired with const)
     Move { expr: ExprId },  // x^
+    Borrow { expr: ExprId, mutable: bool },  // &u32
     MemberAccess { left: ExprId, member: String },  // arr.len
     TypeMemberAccess { left: ExprId, member: String },  // Option::Some
 

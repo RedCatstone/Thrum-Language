@@ -55,6 +55,7 @@ pub enum TokenKind {
     Dot,
     DotDot, DotDotEqual,
     DotDotDot,
+    Ampersand,
     #[display("<eof>")]
     EndOfFile,
 
@@ -95,7 +96,7 @@ pub enum AssignOp {
 }
 
 impl TokenKind {
-    pub const PUNCTUATION: [(&'static str, Self); 40] = [
+    pub const PUNCTUATION: [(&'static str, Self); 41] = [
         // Longer tokens need to go first otherwise it picks '-' over '->'
 
         // Basic
@@ -114,6 +115,7 @@ impl TokenKind {
         ("...", Self::DotDotDot),
         ("..", Self::DotDot), ("..=", Self::DotDotEqual),
         (".", Self::Dot),
+        ("&", Self::Ampersand),
 
         // Operators
         ("+=", Self::Assign { extra_op: Some(AssignOp::Plus) }), ("+", Self::Op(AssignOp::Plus)),
