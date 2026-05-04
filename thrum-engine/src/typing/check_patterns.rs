@@ -114,6 +114,27 @@ impl<'ast> TypeChecker<'ast> {
                 self.new_infer_type()
             }
 
+            Pattern::Not(pat) => {
+                let mut inner_vars = Vec::new();
+                let (typ, covered) = self.check_match_pattern(
+                    *pat, expected_type, has_value, const_update,
+                    &mut CheckPatternVars::Collect(&mut inner_vars)
+                );
+
+                if !inner_vars.is_empty() {
+                    // it doesn't make sense for a not-pattern to bind vars.
+                    // even something double-negated like `... is let !(!x, 5)`
+                    // means either bind x OR 2nd is not 5, which doesn't make sense.
+                    // and `... is let !!x` can just be simplified to `... is let x`
+                    self.error(ErrType::TyperNotPatternCantBindVars, span);
+                }
+
+                // invert the covered cases
+                covered_cases.extend(PatternSpace::covered_to_missing_cases(&covered));
+
+                typ
+            }
+
             Pattern::Or(inner_patterns) => {
                 let (&first_pattern, other_patterns) = inner_patterns.split_first()
                     .expect("Parser makes sure that there are always at least 2 patterns here");
@@ -396,7 +417,8 @@ impl<'ast> TypeChecker<'ast> {
             }
             Pattern::Conditional { pattern, cond: _ }
             | Pattern::Typed { pattern, typ: _ }
-            | Pattern::TypeDestructor { typ: _, data: pattern } => self.mark_vars_in_pattern_as_const(*pattern, const_val),
+            | Pattern::TypeDestructor { typ: _, data: pattern }
+            | Pattern::Not(pattern) => self.mark_vars_in_pattern_as_const(*pattern, const_val),
             
             Pattern::Wildcard | Pattern::CompareExpr(_) | Pattern::PlacePointer(_) => { /* no vars */ },
         }

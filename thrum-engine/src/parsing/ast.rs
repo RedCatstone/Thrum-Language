@@ -110,6 +110,8 @@ pub enum AstValue {
 #[derive(Debug, IntoStaticStr, Clone)]
 pub enum Pattern {
     Wildcard,  // _
+    Not(PatternId),  // !...
+
     Or(Vec<PatternId>),  // ... | ...
     Tuple(Vec<AstTuplePattern>),  // (...)
     

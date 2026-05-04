@@ -10,7 +10,7 @@ use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;
 
-use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::{ExprId, Pattern}, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod typing;
@@ -111,6 +111,8 @@ pub enum ErrType {
     TyperOrPatternDoesntBindVars { vars: Vec<String> },
     #[display("Pattern binds {} twice.", slice_to_string(vars, ", "))]
     TyperPatternVarBoundTwice { vars: Vec<String> },
+    #[display("Not-patterns can't define variables.")]
+    TyperNotPatternCantBindVars,
     #[display("Variable {var} cannot be re-assigned, because it isn't declared mutable.")]
     TyperVarIsntDeclaredMut { var: TypeVar },
     #[display("Can't use {var} because it isn't initialized yet.")]
@@ -153,9 +155,6 @@ pub enum ErrType {
     TyperExpectedTypeIsntAnEnum { typ: Type },
     #[display("Enum {enum_} doesn't have variant: .{variant}")]
     TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },
-
-    #[display("Can't is-compare pattern {left:?} with {right:?}")]
-    TyperCantCompareIsPatterns { left: Pattern, right: Pattern },
 
     #[display("Non consts aren't allowed here.")]
     TyperNonConstsArentAllowedHere,

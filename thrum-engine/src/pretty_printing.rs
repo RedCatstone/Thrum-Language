@@ -303,6 +303,11 @@ impl AstArena {
 
         match pat {
             Pattern::Wildcard => writeln!(s, " - _"),
+            Pattern::Not(p) => {
+                writeln!(s)?;
+                self.format_pattern_recursive(*p, s, ind + 1, "not", true)
+            }
+
             Pattern::Binding { name, mutable } => writeln!(s, " - {}\"{name}\"", if *mutable {"mut "} else {""}),
             
             Pattern::Or(patterns) => {

@@ -140,11 +140,6 @@ fn tup_arrays() {
 }
 
 #[test]
-fn array_sum() {
-    
-}
-
-#[test]
 fn some_strings() {
     test_eval!(r#"
         let s = "klaus"
@@ -321,12 +316,12 @@ fn point_impl_test() {
 fn enums() {
     test_eval!("
         const Dir = enum { Up, Down(bool, bool) }
-    
+
         let down: Dir = .Down(true, false)
         let down2: Dir = .Down(true, false)
         let up: Dir = .Up
         let up2: Dir = .Up
-        
+
         up^ is .Up
         and down^ is .Down(_, false)
         and up2^ is !.Down(_, _)

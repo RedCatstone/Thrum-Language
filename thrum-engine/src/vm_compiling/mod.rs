@@ -161,8 +161,8 @@ enum CompilerVar {
 }
 
 struct FailureJump {
-    temps: usize,
     jump_loc: usize,
+    temps: usize,
 }
 
 pub struct VmCompiler<'a> {
@@ -436,16 +436,17 @@ impl VmCompiler<'_> {
 
                 // handle failure path
                 if !failure_jumps.is_empty() {
-                    // jump over this failure logic if it matched
-                    let jump_over_failure = self.push_jump_op_for_patching();
+                    // reset temps to handle the false path
+                    self.cur_temp_amount = temps_before_pushing_true;
+
+                    // jump over this false path if it matched
+                    let jump_over_false_path = self.push_jump_op_for_patching();
 
                     // all failure jumps land here
                     self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
-
-                    self.cur_temp_amount = temps_before_pushing_true;                    
                     self.push_get_constant_op(RuntimeValue::Bool(false));
                     
-                    self.patch_jump_op_to_here(jump_over_failure);
+                    self.patch_jump_op_to_here(jump_over_false_path);
                 }
             }
 
@@ -854,8 +855,8 @@ impl VmCompiler<'_> {
                 self.compile_expression(*expr);
                 self.push_op(OpCode::CmpEqual);
                 failure_jumps.push(FailureJump {
-                    temps: self.cur_temp_amount,
-                    jump_loc: self.push_jump_if_false_op_for_patching()
+                    jump_loc: self.push_jump_if_false_op_for_patching(),
+                    temps: self.cur_temp_amount
                 });
             }
 
@@ -863,8 +864,8 @@ impl VmCompiler<'_> {
                 self.compile_binding_pattern(*pattern, failure_jumps);
                 self.compile_expression(*cond);
                 failure_jumps.push(FailureJump {
-                    temps: self.cur_temp_amount,
-                    jump_loc: self.push_jump_if_false_op_for_patching()
+                    jump_loc: self.push_jump_if_false_op_for_patching(),
+                    temps: self.cur_temp_amount
                 });
             }
 
@@ -890,8 +891,8 @@ impl VmCompiler<'_> {
                 self.push_get_constant_op(RuntimeValue::Num(i as f64));
                 self.push_op(OpCode::CmpEqual);
                 failure_jumps.push(FailureJump {
-                    temps: self.cur_temp_amount,
-                    jump_loc: self.push_jump_if_false_op_for_patching()
+                    jump_loc: self.push_jump_if_false_op_for_patching(),
+                    temps: self.cur_temp_amount
                 });
 
                 // if the enum tags were equal, compare the data
@@ -900,6 +901,20 @@ impl VmCompiler<'_> {
                 } else {
                     self.push_op(OpCode::ValuePop);
                 }
+            }
+
+            Pattern::Not(pat) => {
+                let mut good_failure_jumps = Vec::new();
+                self.compile_binding_pattern(*pat, &mut good_failure_jumps);
+
+                // if it matched => failure jump
+                failure_jumps.push(FailureJump {
+                    jump_loc: self.push_jump_op_for_patching(),
+                    temps: self.cur_temp_amount
+                });
+
+                // if it didn't match its good!
+                self.compile_binding_pattern_failure_jumps(&mut good_failure_jumps);
             }
 
 

@@ -1,11 +1,1 @@
-const Dir = enum { Up, Down(bool, bool) }
-
-let down: Dir = .Down(true, false)
-let down2: Dir = .Down(true, false)
-let up: Dir = .Up
-let up2: Dir = .Up
-
-up^ is .Up
-and down^ is .Down(_, false)
-and up2^ is !.Down(_, _)
-and down2^ is !.Up
+(1, 4) is (_, !3)

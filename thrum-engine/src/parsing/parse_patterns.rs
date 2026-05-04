@@ -81,6 +81,12 @@ impl Parser<'_> {
                 self.add_pattern(start, Pattern::EnumVariant { name: variant_name, attached_tuple })
             }
 
+            TokenKind::Exclamation => {
+                self.next(); // consume '!'
+                let pat = self.parse_pattern(binding_mode);
+                self.add_pattern(start, Pattern::Not(pat))
+            }
+
 
             // literals in binding mode:
             // `x is 5 + 2` would parse as `x is (5 + 2)`
