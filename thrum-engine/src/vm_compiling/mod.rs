@@ -84,7 +84,7 @@ pub enum OpCode {
     TupPointerGet { index: usize },
     TupGet { index: usize },
     TupPointerIndex,
-    TupUnpack,
+    TupUnpack { length: usize },
 
     // Control Flow
     Jump { offset: isize },
@@ -134,7 +134,7 @@ impl OpCode {
             Self::StrTemplate { length }
             | Self::TupCreate { length } => OpCodeRuntimeTempDiff { requires: *length, diff: 1 - isize::try_from(*length).unwrap() },
 
-            Self::TupUnpack => unreachable!("Can't calculate the RuntimeTempEffect for {self:?}"),
+            Self::TupUnpack { length } => OpCodeRuntimeTempDiff { requires: 1, diff: isize::try_from(*length).unwrap() - 1 },
 
             Self::Jump { .. } | Self::NoOp => OpCodeRuntimeTempDiff { requires: 0, diff: 0 },
             Self::CallFn { arg_count } => OpCodeRuntimeTempDiff { requires: *arg_count, diff: -isize::try_from(*arg_count).unwrap() },
@@ -654,9 +654,16 @@ impl VmCompiler<'_> {
             }
 
 
-            Expr::EnumVariant { data: _ } => {
+            Expr::EnumVariant { data } => {
                 let (_enum_id, i) = self.typed_ast.resolved_enum_variant[&compile_expr];
+                // this compiles to a 2-tuple: (data, tag)
+                if let Some(tup) = data.attached_tuple {
+                    self.compile_expression(tup);
+                } else {
+                    self.push_op(OpCode::PushVoid);
+                }
                 self.push_get_constant_op(RuntimeValue::Num(i as f64));
+                self.push_op(OpCode::TupCreate { length: 2 });
             }
 
             Expr::ImplSelf {  } => {
@@ -691,10 +698,13 @@ impl VmCompiler<'_> {
 
 
     
-
+    #[track_caller]
     fn push_op(&mut self, op: OpCode) {
         let effect = op.runtime_temp_effect();
-        assert!(effect.requires <= self.cur_temp_amount, "Compiler does not have enough temps ({}) to push_op() {op:?}", self.cur_temp_amount);
+        assert!(effect.requires <= self.cur_temp_amount,
+            "Compiler does not have enough temps ({}) to push_op() {op:?}",
+            self.cur_temp_amount
+        );
         self.cur_temp_amount = self.cur_temp_amount.strict_add_signed(effect.diff);
         self.curr_function_chunk.ops.push(op);
     }
@@ -827,9 +837,7 @@ impl VmCompiler<'_> {
             Pattern::Tuple(patterns) => {
                 // manually do stuff that self.push_op() does
                 // because OpCode::runtime_temp_effect can't know how many temps TupUnpack is gonna add.
-                self.curr_function_chunk.ops.push(OpCode::TupUnpack);
-                self.cur_temp_amount += patterns.len();
-                self.cur_temp_amount -= 1;
+                self.push_op(OpCode::TupUnpack { length: patterns.len() });
 
                 for pattern in patterns.iter().rev() {
                     self.compile_binding_pattern(pattern.pattern, failure_jumps);
@@ -873,14 +881,25 @@ impl VmCompiler<'_> {
                 }
             }
 
-            Pattern::EnumVariant { .. } => {
+            Pattern::EnumVariant { name: _, attached_tuple } => {
                 let (_enum_id, i) = self.typed_ast.resolved_enum_variant_pattern[&compile_pattern];
+
+                self.push_op(OpCode::TupUnpack { length: 2 });
+
+                // compare the enum tags
                 self.push_get_constant_op(RuntimeValue::Num(i as f64));
                 self.push_op(OpCode::CmpEqual);
                 failure_jumps.push(FailureJump {
                     temps: self.cur_temp_amount,
                     jump_loc: self.push_jump_if_false_op_for_patching()
                 });
+
+                // if the enum tags were equal, compare the data
+                if let Some(tup) = attached_tuple {
+                    self.compile_binding_pattern(*tup, failure_jumps);
+                } else {
+                    self.push_op(OpCode::ValuePop);
+                }
             }
 
 

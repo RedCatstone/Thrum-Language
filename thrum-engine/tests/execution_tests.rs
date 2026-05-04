@@ -316,3 +316,37 @@ fn point_impl_test() {
         p.squared_distance()
     ", RuntimeValue::Num(25.0));
 }
+
+#[test]
+fn enums() {
+    test_eval!("
+        const Dir = enum { Up, Down(bool, bool) }
+    
+        let down: Dir = .Down(true, false)
+        let down2: Dir = .Down(true, false)
+        let up: Dir = .Up
+        let up2: Dir = .Up
+        
+        up^ is .Up
+        and down^ is .Down(_, false)
+        and up2^ is !.Down(_, _)
+        and down2^ is !.Up
+    ", RuntimeValue::Bool(true));
+}
+
+
+#[test]
+fn random_examples() {
+    test_eval!("
+        fn sum_to(max: num) -> num {
+            let mut sum = 0
+            let mut i = 0
+            while i < max {
+                i += 1
+                sum += i^
+            }
+            sum
+        }
+        sum_to(100)
+    ", RuntimeValue::Num(5050.0));
+}

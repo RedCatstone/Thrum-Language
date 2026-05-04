@@ -258,8 +258,9 @@ impl<'a> VM<'a> {
                     ));
                 }
 
-                OpCode::TupUnpack => {
+                OpCode::TupUnpack { length } => {
                     let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!("last value was not a tuple") };
+                    assert_eq!(*length, tup.len());
 
                     self.stack_extend_from_slice(&tup);
                 }

@@ -144,10 +144,12 @@ pub enum ErrType {
     TyperConstResolvingCycle,
     #[display("Const items can't be mutable.")]
     TyperConstCantBeMutable,
+    #[display("A const named {name} already exists in this scope.")]
+    TyperConstNameAlreadyExists { name: String },
 
     #[display("Expected a meta-type, found: {typ}")]
     TyperExpectedMetaType { typ: Type },
-    #[display("Expected type is not an enum. Can't infer the enum variant here.")]
+    #[display("Expected type is not an enum: {typ}. Can't infer the enum variant here.")]
     TyperExpectedTypeIsntAnEnum { typ: Type },
     #[display("Enum {enum_} doesn't have variant: .{variant}")]
     TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },

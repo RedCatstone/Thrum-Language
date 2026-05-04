@@ -67,6 +67,9 @@ impl<'ast> TypeChecker<'ast> {
     }
 
     pub(super) fn define_variable(&mut self, name: &'ast str, typ: TypeId, mutable: bool, is_init: bool, span: Span, const_val: TypeVarConstVal) -> TypeVarId {
+        // a var cant be shadowed if its a const
+        let cant_shadow = const_val != TypeVarConstVal::No;
+
         // make the new var
         let new_var = TypeVar {
             typ,
@@ -83,7 +86,13 @@ impl<'ast> TypeChecker<'ast> {
         
         let var_id = TypeVarId(AstIds::try_from(self.typed_ast.vars.len()).unwrap());
         self.typed_ast.vars.push(new_var);
-        self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
+        let previous = self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
+
+        if cant_shadow && previous.is_some() {
+            // if there was already something named the same in scope
+            self.error(ErrType::TyperConstNameAlreadyExists { name: name.to_string() }, span);
+        }
+
         
         var_id
     }
@@ -142,18 +151,19 @@ impl<'ast> TypeChecker<'ast> {
 
             // also needs to handle EnumDefinitions
             Expr::EnumDefinition { variants } => {
-                let variants = variants.iter().map(|AstEnumExpression { variant_name, attached_tuple }| {
-                    let attached_tuple_type = attached_tuple.map_or_else(
-                        || TypeId::VOID,
-                        |tup| self.check_annotation_meta_type_id(tup, true)
-                    );
-                    (variant_name.clone(), attached_tuple_type)
-                }).collect();
-                
-                // add a new defined enum type, which stores all enum .Variants and their attached data type 
-                let enum_id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
+                let variants = variants.iter()
+                    .map(|AstEnumExpression { variant_name, attached_tuple }| {
+                        let attached_tuple_type = attached_tuple.map_or_else(
+                            || TypeId::VOID,
+                            |tup| self.check_annotation_meta_type_id(tup, false)
+                        );
+                        (variant_name.clone(), attached_tuple_type)
+                    }).collect();
+
+                let enum_id = self.typed_ast.enum_defs.len();
+                let enum_type = self.type_arena.add_type(Type::Enum(EnumId(enum_id.try_into().unwrap())));
                 self.typed_ast.enum_defs.push(EnumDefinition { variants });
-                let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
+                
                 Some(RuntimeValue::Type(enum_type))
             }
 

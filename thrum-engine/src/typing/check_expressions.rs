@@ -437,7 +437,7 @@ impl TypeChecker<'_> {
 
 
             Expr::EnumVariant { data: AstEnumExpression { variant_name, attached_tuple } } => {
-                // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
+                // using `.Variant` syntax requires that the Typechecker knows the expected Enumtype.
                 if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(variant_name, old_ctx.expected_type, span) {
                     if let Some(tup) = attached_tuple {
                         self.check_expression(*tup, is_never, &ctx.expect(attached_type));
@@ -527,6 +527,7 @@ impl TypeChecker<'_> {
                 TypeId::TYPE
             }
             Expr::EnumDefinition { variants } => {
+                // the actual enum-type is defined in the hoisting_pass
                 for variant in variants {
                     if let Some(tup) = variant.attached_tuple {
                         self.check_expression(tup, is_never, &ctx);

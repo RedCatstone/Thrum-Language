@@ -72,6 +72,7 @@ fn consts() {
     test_eval!("const (x, _) = (5, 3); x^", RuntimeValue::Num(5.0));
     test_eval!("const X = 2 * Y; const Z = 20; const Y = 3 * Z; X^", RuntimeValue::Num(120.0));
     test_err!("const X = 2 * Y; const Y = 2 * X", ErrType::TyperConstResolvingCycle);
+    test_err!("const (X, X) = (1, 2)", ErrType::TyperConstNameAlreadyExists { .. });
 }
 
 
