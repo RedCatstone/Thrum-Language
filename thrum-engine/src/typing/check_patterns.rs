@@ -81,6 +81,7 @@ impl<'ast> TypeChecker<'ast> {
             Pattern::Tuple(elems) => {
                 let mut tuple_types = Vec::new();
                 let mut tuple_covered_cases = Vec::new();
+                let mut mismatch = false;
 
                 // we need to split the expected type up, and pass that
                 let expected_elems = expected_type.and_then(|exp| {
@@ -94,8 +95,10 @@ impl<'ast> TypeChecker<'ast> {
                     let elem_expected_type = expected_elems.as_ref()
                         .map(|elems| elems.iter()
                             .find(|x| &x.label == label)
-                            .map(|x| x.typ)
-                            .unwrap()
+                            .map_or_else(
+                                || { mismatch = true; TypeId::ERROR },
+                                |x| x.typ
+                            )
                         );
 
                     let (typ, covered) = self.check_match_pattern(
@@ -106,7 +109,14 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 covered_cases = PatternSpace::tuple_cartesian_product(&tuple_covered_cases);
-                self.type_arena.add_type(Type::Tup(tuple_types))
+                let typ = Type::Tup(tuple_types);
+
+                if mismatch {
+                    let expected = self.prune_type_once(expected_type.unwrap(), None);
+                    self.type_mismatch(expected, typ, span)
+                } else {
+                    self.type_arena.add_type(typ)
+                }
             }
 
             Pattern::Wildcard => {

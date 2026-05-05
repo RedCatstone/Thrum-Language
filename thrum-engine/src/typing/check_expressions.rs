@@ -629,7 +629,7 @@ impl TypeChecker<'_> {
                 self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked(expr));
             }
             else if !allow_non_const {
-                self.error(ErrType::TyperNonConstsArentAllowedHere, self.ast.get_expr_span(expr));
+                self.error(ErrType::TyperRuntimeValuesArentAllowedInImplBlocks, self.ast.get_expr_span(expr));
             }
         }
 

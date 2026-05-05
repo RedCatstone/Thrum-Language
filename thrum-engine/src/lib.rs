@@ -65,8 +65,6 @@ pub enum ErrType {
 
     #[display("Expected type: {expected}, found: {found}")]
     TyperMismatch { expected: Type, found: Type },
-    #[display("Name {name} is already defined in this scope.")]
-    TyperNameAlreadyDefined { name: String },
     #[display("Undefined identifier: {name}")]
     TyperUndefinedIdentifier { name: String },
     #[display("Can't infer type {}", typ)]
@@ -93,16 +91,12 @@ pub enum ErrType {
     TyperCantCallNonFnType { typ: Type },
     #[display("member .{member} does not exist on typ: {typ}")]
     TyperTypeDoesntHaveMember { typ: Type, member: String },
-    #[display("Infix operation {type_a} {op} {type_b} is not defined.")]
-    TyperInvalidOperatorOnType { op: TokenKind, type_a: Type, type_b: Type },
     #[display("{} is not allowed in patterns.", Type::Never)]
     TyperPatternNeverType,
     #[display("All or-patterns must bind the same variables. This pattern binds {}.", slice_to_string(vars, ", "))]
     TyperOrPatternBindsVarsTooMuch { vars: Vec<String> },
     #[display("All or-patterns must bind the same variables. This pattern doesn't bind {}.", slice_to_string(vars, ", "))]
     TyperOrPatternDoesntBindVars { vars: Vec<String> },
-    #[display("Pattern binds {} twice.", slice_to_string(vars, ", "))]
-    TyperPatternVarBoundTwice { vars: Vec<String> },
     #[display("Not-patterns can't define variables.")]
     TyperNotPatternCantBindVars,
     #[display("Variable {var} cannot be re-assigned, because it isn't declared mutable.")]
@@ -111,6 +105,8 @@ pub enum ErrType {
     TyperCantUseUninitializedVar { var: TypeVar },
     #[display("Can't use {var} because it isn't initialized in every possible branch.")]
     TyperCantUseMaybeInitializedVar { var: TypeVar },
+    #[display("Can't use {var} because it it was moved in some branches.")]
+    TyperCantUseMaybeMovedVar { var: TypeVar },
     #[display("Can't use {var} because it was moved.")]
     TyperCantUseMovedVar { var: TypeVar },
     #[display("Can't dereference non-pointer type: {typ}")]
@@ -131,8 +127,6 @@ pub enum ErrType {
     TyperMustBeCustomtypeType { typ: Type },
     #[display("New-types expect exactly one unlabeled expr.")]
     TyperNewTypesExpectOneUnlabeledExpr,
-    #[display("Dot operator isn't supported for type: {typ}")]
-    TyperDotOperatorNotSupportedForType { typ: Type },
 
     #[display("Can't resolve const because it depends on itself.")]
     TyperConstResolvingCycle,
@@ -141,15 +135,13 @@ pub enum ErrType {
     #[display("A const named {name} already exists in this scope.")]
     TyperConstNameAlreadyExists { name: String },
 
-    #[display("Expected a meta-type, found: {typ}")]
-    TyperExpectedMetaType { typ: Type },
     #[display("Expected type is not an enum: {typ}. Can't infer the enum variant here.")]
     TyperExpectedTypeIsntAnEnum { typ: Type },
     #[display("Enum {enum_} doesn't have variant: .{variant}")]
     TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },
 
-    #[display("Non consts aren't allowed here.")]
-    TyperNonConstsArentAllowedHere,
+    #[display("Runtime values aren't allowed in impl-blocks.")]
+    TyperRuntimeValuesArentAllowedInImplBlocks,
 
     // #[display("Can't borrow because already borrowed mutably.")]
     // TyperCantBorrowBecauseAlreadyBorrowedMut,

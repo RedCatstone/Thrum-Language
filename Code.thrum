@@ -1,1 +1,10 @@
-7 is 4 | 5 | 6 | 7
+const Opt = enum { None, Some(num) }
+        
+let val: Opt = .Some(42)
+
+match val^
+is .None => -1
+is .Some(0 | 1 | 2) => 0
+is .Some(!42) => 1
+is .Some(let x) => x^
+is _ => 2

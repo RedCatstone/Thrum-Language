@@ -23,7 +23,7 @@ pub struct TypeVar {
 
     pub declared_at: Span,  // Source code location - for error messages
     pub is_declared_mut: bool,
-    pub is_init: InitState,
+    pub is_init: MemState,
     pub const_val: TypeVarConstVal,
 
     pub is_used: bool,
@@ -45,14 +45,15 @@ pub enum TypeVarConstVal {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum InitState {
-    No, Yes, Maybe
+pub enum MemState {
+    NotInit, Init, MaybeInit,
+    Moved, MaybeMoved,
 }
 
 
-pub type SnapshotVarsState = HashMap<TypeVarId, InitState>;
+pub type SnapshotVarsState = HashMap<TypeVarId, MemState>;
 // pub struct SnapshotVar {
-//     init: InitState,
+//     init: MemState,
 //     moved: bool
 // }
 
@@ -77,7 +78,7 @@ impl<'ast> TypeChecker<'ast> {
             name: name.to_string(),
             declared_at: span,
             is_declared_mut: mutable,
-            is_init: if is_init { InitState::Yes } else { InitState::No },
+            is_init: if is_init { MemState::Init } else { MemState::NotInit },
             is_used: false,
             is_used_mut: false,
             immut_borrows_count: 0,
@@ -273,12 +274,12 @@ impl<'ast> TypeChecker<'ast> {
 
         if !var.is_declared_mut {
             match var.is_init {
-                InitState::No => { /* perfectly fine, do nothing */ },
-                InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
-                InitState::Yes => errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.clone() })
+                MemState::NotInit => { /* perfectly fine, do nothing */ },
+                MemState::MaybeInit => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+                MemState::Init | MemState::MaybeMoved | MemState::Moved => errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.clone() })
             }
         }
-        var.is_init = InitState::Yes;  // if variable was moved, doing `a = ...` unmoves it again.
+        var.is_init = MemState::Init;  // if variable was moved, doing `a = ...` unmoves it again.
         
         for e in errors { self.error(e, span); }
     }
@@ -288,9 +289,11 @@ impl<'ast> TypeChecker<'ast> {
         let mut errors = Vec::new();
 
         match var.is_init {
-            InitState::No => errors.push(ErrType::TyperCantUseUninitializedVar { var: var.clone() }),
-            InitState::Maybe => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
-            InitState::Yes => { /* perfectly fine, do nothing */ },
+            MemState::Moved      => errors.push(ErrType::TyperCantUseMovedVar            { var: var.clone() }),
+            MemState::NotInit    => errors.push(ErrType::TyperCantUseUninitializedVar    { var: var.clone() }),
+            MemState::MaybeMoved => errors.push(ErrType::TyperCantUseMaybeMovedVar       { var: var.clone() }),
+            MemState::MaybeInit  => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+            MemState::Init       => { /* perfectly fine, do nothing */ },
         }
 
         for e in errors { self.error(e, span); }
@@ -299,7 +302,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn move_variable(&mut self, var_id: TypeVarId, span: Span) {
         self.clone_variable(var_id, span);
         let var = self.typed_ast.get_var_mut(var_id);
-        var.is_init = InitState::No;
+        var.is_init = MemState::Moved;
     }
 
 
@@ -336,19 +339,27 @@ impl<'ast> TypeChecker<'ast> {
         for original_snap_var_id in original_snap.into_keys() {
             let mut any_branch_init = false;
             let mut all_branches_init = true;
+            let mut was_moved = false;
             
             // filter the None's out (the branches that had Never type)
             for branch_snap in branch_snaps.iter().filter_map(|x| x.as_ref()) {
                 let branch_state = branch_snap.get(&original_snap_var_id).unwrap();
 
-                if let InitState::Yes | InitState::Maybe = branch_state { any_branch_init = true; }
-                if let InitState::Maybe | InitState::No = branch_state { all_branches_init = false; }
+                if let MemState::MaybeInit | MemState::MaybeMoved | MemState::Init = branch_state { any_branch_init = true; }
+                if let MemState::MaybeInit | MemState::MaybeMoved | MemState::Moved | MemState::NotInit = branch_state { all_branches_init = false; }
+                if let MemState::MaybeMoved | MemState::Moved = branch_state { was_moved = true; } 
             }
 
-            self.typed_ast.get_var_mut(original_snap_var_id).is_init = match (all_branches_init, any_branch_init) {
-                (true, true) => InitState::Yes,       // every single branch initialized this var -> var is initialized.
-                (false, true) | (true, false) => InitState::Maybe, // some branches did, some didn't -> uncertain...
-                (false, false) => InitState::No,   // no branch touched it -> uninitialized
+            self.typed_ast.get_var_mut(original_snap_var_id).is_init = match (all_branches_init, any_branch_init, was_moved) {
+                // every single branch initialized this var -> var is initialized.
+                (true, true, _) => MemState::Init,
+
+                // some branches did, some didn't -> uncertain...
+                (false, true, moved) | (true, false, moved) => if moved { MemState::MaybeMoved } else { MemState::MaybeInit },
+
+                // no branch touched it -> keep NotInit/Moved
+                (false, false, false) => MemState::NotInit,
+                (false, false, true) => MemState::Moved,
             }
         }
     }
