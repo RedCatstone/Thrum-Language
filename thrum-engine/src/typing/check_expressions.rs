@@ -87,7 +87,7 @@ impl TypeChecker<'_> {
 
                 let const_length = match self.ast.get_expr(*length) {
                     Expr::Literal { val: AstValue::Num(num) } => *num as usize,
-                    _ => 0
+                    _ => 0  // TODO: make not 0
                 };
 
                 self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
@@ -323,8 +323,8 @@ impl TypeChecker<'_> {
                 let expr_type = self.check_expression(*expr, is_never, &ctx.auto_borrow_mut());
 
                 match self.prune_type_once(expr_type, Some(span)) {
-                    Type::Borrow { inner, mutable, borrows_var } => {
-                        let auto_clone = self.check_deref_memory_rules(inner, mutable, borrows_var, span);
+                    Type::Borrow { inner, mutable: _, borrows_var } => {
+                        let auto_clone = self.check_deref_memory_rules(inner, borrows_var, span);
 
                         if !auto_clone {
                             self.typed_ast.move_expr.insert(check_expr);
@@ -679,12 +679,10 @@ impl TypeChecker<'_> {
             .map(|&param| {
                     if let Some(typ) = self.get_pattern_type(param) {
                         typ
+                    } else if type_annotation_required {
+                        self.error(ErrType::TyperRequiresTypeAnnotation, self.ast.get_pattern_span(param))
                     } else {
-                        if type_annotation_required {
-                            self.error(ErrType::TyperRequiresTypeAnnotation, self.ast.get_pattern_span(param))
-                        } else {
-                            self.new_infer_type()
-                        }
+                        self.new_infer_type()
                     }
                 }
             )
@@ -758,7 +756,7 @@ impl TypeChecker<'_> {
                         elems[index].typ
                     }
                 } else {
-                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::Tup(elems), member: member.to_string() }, left_span)
+                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::Tup(elems), member: member.clone() }, left_span)
                 }
             }
 
@@ -811,7 +809,7 @@ impl TypeChecker<'_> {
             }
 
             Type::Error => TypeId::ERROR,
-            typ => self.error(ErrType::TyperTypeDoesntHaveMember { typ, member: member.to_string() }, left_span)
+            typ => self.error(ErrType::TyperTypeDoesntHaveMember { typ, member: member.clone() }, left_span)
         }
     }
 
@@ -931,8 +929,8 @@ impl TypeChecker<'_> {
         let typ = self.typed_ast.get_expr_type(expr);
 
         match self.prune_type_once(typ, Some(span)) {
-            Type::Borrow { inner, mutable, borrows_var } => {
-                let auto_clone = self.check_deref_memory_rules(inner, mutable, borrows_var, span);
+            Type::Borrow { inner, mutable: _, borrows_var } => {
+                let auto_clone = self.check_deref_memory_rules(inner, borrows_var, span);
                 self.insert_deref(expr, !auto_clone, inner);
                 true
             }
@@ -940,7 +938,7 @@ impl TypeChecker<'_> {
         }
     }
 
-    fn check_deref_memory_rules(&mut self, inner_type: TypeId, mutable: bool, borrows_var: Option<TypeVarId>, span: Span) -> bool {
+    fn check_deref_memory_rules(&mut self, inner_type: TypeId, borrows_var: Option<TypeVarId>, span: Span) -> bool {
         let pruned_inner = self.prune_type_once(inner_type, Some(span));
         let auto_clone = self.is_auto_clone(&pruned_inner, span);
 

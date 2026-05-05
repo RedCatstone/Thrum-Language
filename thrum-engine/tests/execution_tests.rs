@@ -15,51 +15,48 @@ fn math() {
 
 #[test]
 fn scoping() {
-    test_eval!(r#"
-        let x = 50
-        x^
-    "#, RuntimeValue::Num(50.0));
+    test_eval!("let x = 50; x^", RuntimeValue::Num(50.0));
 
-    test_eval!(r#"
+    test_eval!("
         let x = 12
         let res = {
             let x = 33  // shadowing!
             x + 5
         }
         res + x
-    "#, RuntimeValue::Num(50.0));
+    ", RuntimeValue::Num(50.0));
 
-    test_eval!(r#"
+    test_eval!("
         { #bloc
             break #bloc 50
             1
         }
-    "#, RuntimeValue::Num(50.0));
+    ", RuntimeValue::Num(50.0));
 }
 
 #[test]
 fn comments() {
-    test_eval!(r#"
+    test_eval!("
         15 /* this is a comment
         + 4
         */
         + /* weee * / */ 2
         // + 16
         + 3
-    "#, RuntimeValue::Num(20.0));
+    ", RuntimeValue::Num(20.0));
 }
 
 #[test]
 fn loop_shenanigance() {
-    test_eval!(r#"
+    test_eval!("
         let mut i = 0
         while i < 5 {
             i += 1
         }
         i^
-    "#, RuntimeValue::Num(5.0));
+    ", RuntimeValue::Num(5.0));
 
-    test_eval!(r#"
+    test_eval!("
         let mut sum = 0
         let mut i = 0
         loop {
@@ -69,9 +66,9 @@ fn loop_shenanigance() {
             sum += i^
         }
         sum^  // 1 + 2 + 4 + 5 = 12
-    "#, RuntimeValue::Num(12.0));
+    ", RuntimeValue::Num(12.0));
 
-    test_eval!(r#"
+    test_eval!("
         let mut res = 1
         loop #outer {
             res += 1
@@ -83,7 +80,7 @@ fn loop_shenanigance() {
             }
             break -1
         }
-    "#, RuntimeValue::Num(69.0));
+    ", RuntimeValue::Num(69.0));
     
     test_eval!("loop { break #loop }", RuntimeValue::Void);
 }
@@ -92,7 +89,7 @@ fn loop_shenanigance() {
 fn diabolical_loops() {
     test_eval!("1 + loop { 1 + break 1 }", RuntimeValue::Num(2.0));
 
-    test_eval!(r#"
+    test_eval!("
         let mut i = 1
 
         1 + loop {
@@ -102,17 +99,17 @@ fn diabolical_loops() {
             }
             (1, 1, 1, break 1)
         }
-    "#, RuntimeValue::Num(2.0));
+    ", RuntimeValue::Num(2.0));
 }
 
 
 #[test]
 fn tup_destructuring() {
-    test_eval!(r#"
+    test_eval!("
         let tup = ((1, 2), 2, (3, 4, 5))
         let (_, _, (_, x, _)) = tup^
         x^
-    "#, RuntimeValue::Num(4.0));
+    ", RuntimeValue::Num(4.0));
 
     test_eval!(r#"
         let status = "ok"
@@ -127,16 +124,16 @@ fn tup_destructuring() {
 
 #[test]
 fn tup_arrays() {
-    test_eval!(r#"
+    test_eval!("
         let x = (1, 2, 3)
         x[0] + x[1] * x[2]
-    "#, RuntimeValue::Num(7.0));
+    ", RuntimeValue::Num(7.0));
 
-    test_eval!(r#"
+    test_eval!("
         let mut x = (7; 30)
         x[2] %= 4
         x[2]^
-    "#, RuntimeValue::Num(3.0));
+    ", RuntimeValue::Num(3.0));
 }
 
 #[test]
@@ -155,14 +152,14 @@ fn some_strings() {
 
 #[test]
 fn delayed_let() {
-    test_eval!(r#"
+    test_eval!("
         { #bloc
             let x
             if true { x = 5 }
             else break #bloc -1
             x^
         }
-    "#, RuntimeValue::Num(5.0));
+    ", RuntimeValue::Num(5.0));
 
     test_eval!("let a;         (a, let b) = (1, 2); a + b", RuntimeValue::Num(3.0));
     test_eval!("let mut a = 5; (a, let b) = (1, 2); a + b", RuntimeValue::Num(3.0));
@@ -192,6 +189,20 @@ fn short_circuiting() {
 
 
 #[test]
+fn pattern_matching() {
+    test_eval!("7 is 7", RuntimeValue::Bool(true));
+    test_eval!("7 is 0", RuntimeValue::Bool(false));
+    test_eval!("7 is !0", RuntimeValue::Bool(true));
+    test_eval!("7 is !7", RuntimeValue::Bool(false));
+    test_eval!("7 is 5 | 6 | 7", RuntimeValue::Bool(true));
+    test_eval!("5 is 5 | 6 | 7", RuntimeValue::Bool(true));
+    test_eval!("0 is 5 | 6 | 7", RuntimeValue::Bool(false));
+    test_eval!("0 is !_", RuntimeValue::Bool(false));
+    test_eval!("3 + 3 is 3 + 3", RuntimeValue::Bool(true));
+    test_eval!("3 + 3 is !3 * 3", RuntimeValue::Bool(true));
+}
+
+#[test]
 fn match_exprs() {
     test_eval!(r#"
         match (69, "yay!")
@@ -208,32 +219,30 @@ fn match_exprs() {
 
 #[test]
 fn recursion() {
-    test_eval!(r#"
+    test_eval!("
         fn fib(n: num) -> num {
             if n < 2 { return n }
             return fib(n-1) + fib(n-2)
         }
         fib(8)
-    "#, RuntimeValue::Num(21.0));
+    ", RuntimeValue::Num(21.0));
 }
 
 
 
 #[test]
 fn functions() {
-    test_eval!(r#"
-        fn fun() -> num {
-            4
-        }
+    test_eval!("
+        fn fun() -> num => 4
         fun()
-    "#, RuntimeValue::Num(4.0));
+    ", RuntimeValue::Num(4.0));
 
-    test_eval!(r#"
+    test_eval!("
         fn fun(x: num, y: num) -> num {
             x * y + x
         }
         fun(2, 4)
-    "#, RuntimeValue::Num(10.0));
+    ", RuntimeValue::Num(10.0));
 
 
     test_eval!(r#"
@@ -253,7 +262,7 @@ fn functions() {
 
 #[test]
 fn impls() {
-    test_eval!(r#"
+    test_eval!("
         type N = num
         impl N {
             fn get() -> N => N{ 5 }
@@ -261,9 +270,9 @@ fn impls() {
         fn get() -> N => N{ 3 }
 
         (N.get(), get())
-    "#, RuntimeValue::Tup(vec![RuntimeValue::Num(5.0), RuntimeValue::Num(3.0)]));
+    ", RuntimeValue::Tup(vec![RuntimeValue::Num(5.0), RuntimeValue::Num(3.0)]));
 
-    test_eval!(r#"
+    test_eval!("
         type N = num
         impl N {
             fn square(self: Self) -> Self {
@@ -275,7 +284,7 @@ fn impls() {
         }
         
         N{ 2 }.triangle().square().triangle().square()
-    "#, RuntimeValue::Num(2025.0))
+    ", RuntimeValue::Num(2025.0));
 }
 
 #[test]

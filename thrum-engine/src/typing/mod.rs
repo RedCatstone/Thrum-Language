@@ -119,9 +119,9 @@ pub struct TypeChecker<'a> {
 }
 
 #[derive(Debug, Default)]
-/// this struct gets build in the typechecker phase
-/// and is read-only afterwards.
-/// it has a bunch of notes telling the VmCompiler everythhing 
+/// this struct gets build in the typechecker phase, and is read-only afterwards.
+/// 
+/// it has a bunch of notes telling the `VmCompiler` everything it needs to compile.
 /// it needs to know to compile the ast-nodes (which are read-only after parsing already)
 pub struct TypedAst {
     pub expr_types: Vec<TypeId>,  // Indexed with ExprId

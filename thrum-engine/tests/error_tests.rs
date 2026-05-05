@@ -47,7 +47,7 @@ fn typecheck_misc_errors() {
     test_err!("if (1, 2) is let (x, 0) | (0, y) { }", ErrType::TyperOrPatternDoesntBindVars { .. });
     test_err!("let (x, 0) = (1, 2)", ErrType::TyperFailableAssignPattern { .. });
 
-    test_err!("let x", ErrType::TyperCantInferType { typ: Type::Infer(TypeInferId(0)) })
+    test_err!("let x", ErrType::TyperCantInferType { typ: Type::Infer(TypeInferId(0)) });
 }
 
 

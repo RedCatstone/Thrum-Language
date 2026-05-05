@@ -316,9 +316,7 @@ impl VmCompiler<'_> {
                 self.push_op(OpCode::StrTemplate { length: elems.len() });
             }
             Expr::TupleArr { elem, length: _ } => {
-                let typ = self.typed_ast.get_expr_type(compile_expr);
                 let const_length = self.typed_ast.resolved_tuple_arr_length[&compile_expr];
-
                 if const_length == 0 {
                     self.push_op(OpCode::TupCreate { length: 0 });
                 } else {
@@ -806,14 +804,6 @@ impl VmCompiler<'_> {
             Some(CompilerVar::AtSlot(slot)) => {
                 self.push_op(OpCode::LocalPointer { local_index: *slot });
             }
-        }
-    }
-
-
-    fn drop_vars(&mut self, vars: &[TypeVarId]) {
-        for var in vars {
-            self.locals.remove(var);
-            self.cur_function_var_amount -= 1;
         }
     }
 

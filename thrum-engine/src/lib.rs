@@ -1,11 +1,3 @@
-#![warn(clippy::all, clippy::complexity, clippy::perf,
-    // clippy::pedantic, clippy::nursery, clippy::style,
-)]
-#![allow(
-    clippy::missing_panics_doc, clippy::missing_errors_doc, clippy::too_many_lines,
-    clippy::derive_partial_eq_without_eq, clippy::equatable_if_let
-)]
-
 use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;

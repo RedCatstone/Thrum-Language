@@ -12,3 +12,19 @@ strum_macros = "0.28.0"  # using EnumString for pretty_printing
 [lib]
 name = "thrum_engine"
 path = "src/lib.rs"
+
+[lints.clippy]
+# --- Groups ---
+all = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+
+# --- Specific Allows ---
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+too_many_lines = "allow"  # i am like 4x over clippies limits OOOPSS lol
+derive_partial_eq_without_eq = "allow"  # don't care
+equatable_if_let = "allow"  # i fully disagree with this lint, i think pattern matching is actually cleaner
