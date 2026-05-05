@@ -443,7 +443,7 @@ impl VmCompiler<'_> {
                     let jump_over_false_path = self.push_jump_op_for_patching();
 
                     // all failure jumps land here
-                    self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
+                    self.compile_binding_pattern_failure_jumps(failure_jumps);
                     self.push_get_constant_op(RuntimeValue::Bool(false));
                     
                     self.patch_jump_op_to_here(jump_over_false_path);
@@ -564,33 +564,30 @@ impl VmCompiler<'_> {
 
             Expr::Match { match_value, arms } => {
                 self.compile_expression(*match_value);
-                
-                let mut jumps_to_end_of_match = Vec::new();
+                let mut success_jumps = Vec::new();
+                let mut prev_failure_jumps = Vec::new();
 
                 for (i, arm) in arms.iter().enumerate() {
-                    let is_last_arm = i == arms.len() - 1;
+                    let is_last = i + 1 == arms.len();
 
-                    // if not the last arm, duplicate the to match value
-                    if !is_last_arm { self.push_op(OpCode::ValueDup); }
+                    // on the first iteration this does nothing
+                    self.compile_binding_pattern_failure_jumps(prev_failure_jumps);
+                    prev_failure_jumps = Vec::new();
 
-                    let mut failure_jumps = Vec::new();
-                    self.compile_binding_pattern(arm.pattern, &mut failure_jumps);
+                    // duplicate the to match value
+                    if !is_last { self.push_op(OpCode::ValueDup); }
+                    self.compile_binding_pattern(arm.pattern, &mut prev_failure_jumps);
 
-                    // this part is only reached if the pattern matched -> pop original to match value
-                    if !is_last_arm { self.push_op(OpCode::ValuePop); }
+                    // if it matched -> pop original to match value
+                    if !is_last { self.push_op(OpCode::ValuePop); }
                     self.compile_expression(arm.body);
-                    
-                    // last success jump / failure jumps aren't neccessary, its already at the end
-                    if !is_last_arm {
-                        jumps_to_end_of_match.push(self.push_jump_op_for_patching());
-                        
-                        // all failure jumps from this pattern match attempt should point towards the next arm
-                        self.compile_binding_pattern_failure_jumps(&mut failure_jumps);
-                    }
+                    success_jumps.push(self.push_jump_op_for_patching());
                 }
 
-                // end of match statement, point all the success jumps here
-                for jump in jumps_to_end_of_match {
+                // ignore the final `prev_failure_jumps` because the last arm can't fail
+
+                // end of match statement, point all arm-body-success-jumps here
+                for jump in success_jumps {
                     self.patch_jump_op_to_here(jump);
                 }
             }
@@ -845,6 +842,44 @@ impl VmCompiler<'_> {
                 }
             }
 
+            Pattern::Or(patterns) => {
+                let mut prev_failure_jumps = Vec::new();
+                let mut success_jumps = Vec::new();
+
+                for (i, pat) in patterns.iter().enumerate() {
+                    let is_last = i + 1 == patterns.len();
+
+                    // no prev_failure_jumps the first time, so nothing happens
+                    self.compile_binding_pattern_failure_jumps(prev_failure_jumps);
+                    prev_failure_jumps = Vec::new();
+
+                    // dupe the value each time, so it doesn't get used up.
+                    if !is_last { self.push_op(OpCode::ValueDup); }
+                    self.compile_binding_pattern(*pat, &mut prev_failure_jumps);
+
+                    // if this point is reached an or pattern matched!
+                    success_jumps.push(self.push_jump_op_for_patching());
+                }
+
+                failure_jumps.extend(prev_failure_jumps);
+
+                if let [others @ .., last] = success_jumps.as_slice() {
+                    // point all `success_jumps` to here
+                    for sj in others {
+                        self.patch_jump_op_to_here(*sj);
+                    }
+                    
+                    // now that it matched, pop the original value
+                    self.cur_temp_amount += 1;
+                    self.push_op(OpCode::ValuePop);
+
+                    // which isn't needed for the last pattern, because it was never Duped in the first place
+                    self.patch_jump_op_to_here(*last);
+                } else {
+                    unreachable!("Or-patterns should have at least one pattern...")
+                }
+            }
+
             Pattern::PlacePointer(expr) => {
                 self.compile_expression(*expr);
                 self.push_op(OpCode::PointerSet);
@@ -914,21 +949,19 @@ impl VmCompiler<'_> {
                 });
 
                 // if it didn't match its good!
-                self.compile_binding_pattern_failure_jumps(&mut good_failure_jumps);
+                self.compile_binding_pattern_failure_jumps(good_failure_jumps);
             }
 
 
             Pattern::Typed { pattern, typ: _ } => {
                 self.compile_binding_pattern(*pattern, failure_jumps);
             }
-
-            _ => panic!("not implemented")
         }
     }
 
 
 
-    fn compile_binding_pattern_failure_jumps(&mut self, failure_jumps: &mut [FailureJump]) {
+    fn compile_binding_pattern_failure_jumps(&mut self, mut failure_jumps: Vec<FailureJump>) {
         // complicated function but it does this:
         // if one failure jump had 5 temps
         // and another had 3 temps

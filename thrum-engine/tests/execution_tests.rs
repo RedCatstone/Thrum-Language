@@ -198,7 +198,7 @@ fn match_exprs() {
         is (69, "") => "nope"
         is (0, "yay!") => "nope"
         is (0, "") => "nope" 
-        is (69, x) => x^
+        is (69, let x) => x^
         is _ => "nope"
     "#, RuntimeValue::Str("yay!".to_string()));
 }
