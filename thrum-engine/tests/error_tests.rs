@@ -115,6 +115,10 @@ fn const_errs() {
 
     test_err!("const mut X = 5", ErrType::TyperConstCantBeMutable);
     test_err!("type N = num; impl N { let x = 5 }", ErrType::TyperRuntimeValuesArentAllowedInImplBlocks);
+
+    test_err!("let x = 10; const Y = x^", ErrType::TyperUndefinedIdentifier { .. });
+    test_err!("let x = 10; (0; x)", ErrType::TyperExpectedConstFoundRuntimeValue { .. });
+    test_err!("let x = 10; let y: x = 5", ErrType::TyperExpectedConstFoundRuntimeValue { .. });
 }
 
 

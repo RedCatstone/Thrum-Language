@@ -336,7 +336,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn check_annotation_meta_type_id(&mut self, expr: ExprId, needs_typechecking: bool) -> TypeId {
         // typecheck first
         if needs_typechecking {
-            self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
+            self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE).is_const());
         }
 
         // then evaluate

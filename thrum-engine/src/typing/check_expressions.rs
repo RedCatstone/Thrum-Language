@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{EnumId, ResolvedMemberAccess, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}
+    typing::{EnumId, ResolvedMemberAccess, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -14,8 +14,7 @@ pub struct CheckExprCtx {
     // e.g. `if option is let .Some(x) { ... }`
     allow_is_expr_bindings: bool,
 
-    // e.g. `x = 4` -> `mut x = 4`
-    // or `x^` -> `mut x^`
+    // e.g. `tup.x = 4` -> `mut tup.x = 4`
     // this setting starts from move expressions and place-pointer patterns
     // and sifts through array[access], member.access
     auto_borrow_mut: bool,
@@ -23,6 +22,10 @@ pub struct CheckExprCtx {
     // (1, x) - tuples are mode Once, x is gonna be autoderefed
     // x()    - function calls are fully derefed, so even if x is a pointer to a pointer to a pointer to a pointer to a pointer to a pointer it will still work
     deref_mode: AutoDerefMode,
+
+    // if its in a const context, runtime values aren't available
+    // e.g. `let x = 5; let y: x = ...` doesn't work, x isn't const
+    is_const: bool,
 }
 #[derive(Default, Clone, Copy)]
 pub enum AutoDerefMode {
@@ -45,6 +48,9 @@ impl CheckExprCtx {
     pub fn auto_deref(&self, mode: AutoDerefMode) -> Self {
         Self { deref_mode: mode, ..self.clone() }
     }
+    pub fn is_const(&self) -> Self {
+        Self { is_const: true, ..self.clone() }
+    }
 }
 
 
@@ -52,6 +58,9 @@ impl CheckExprCtx {
 impl TypeChecker<'_> {
     pub(super) fn check_expression(&mut self, check_expr: ExprId, is_never: &mut bool, old_ctx: &CheckExprCtx) -> TypeId {
         let mut ctx = CheckExprCtx::default();
+        if old_ctx.is_const {
+            ctx.is_const = true;
+        }
 
         let span = self.ast.get_expr_span(check_expr);
 
@@ -60,7 +69,7 @@ impl TypeChecker<'_> {
 
             Expr::IdentifierRef { name, mutable } => {
                 let mutable = *mutable || old_ctx.auto_borrow_mut;
-                self.make_variable_ref(name, mutable, check_expr)
+                self.make_variable_ref(name, mutable, old_ctx.is_const, check_expr)
             }
 
             Expr::TemplateString { elems } => {
@@ -83,15 +92,17 @@ impl TypeChecker<'_> {
 
             Expr::TupleArr { elem, length } => {
                 let elem_type = self.check_expression(*elem, is_never, &ctx.auto_deref(AutoDerefMode::Once));
-                self.check_expression(*length, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM));
+                self.check_expression(*length, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM).is_const());
 
-                let const_length = match self.ast.get_expr(*length) {
-                    Expr::Literal { val: AstValue::Num(num) } => *num as usize,
-                    _ => 0  // TODO: make not 0
-                };
-
-                self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
-                self.type_arena.add_type(Type::TupArr(elem_type, const_length))
+                match self.evaluate_expr(*length) {
+                    Some(RuntimeValue::Num(num)) => {
+                        let const_length = num as usize;
+                        self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
+                        self.type_arena.add_type(Type::TupArr(elem_type, const_length))
+                    }
+                    Some(other) => unreachable!("expected a num from typechecking, but got {other}"),
+                    None => TypeId::ERROR
+                }
             }
 
             Expr::Index { left, index } => {
@@ -322,7 +333,7 @@ impl TypeChecker<'_> {
             },
 
             Expr::Move { expr } => {
-                let expr_type = self.check_expression(*expr, is_never, &ctx.auto_borrow_mut());
+                let expr_type = self.check_expression(*expr, is_never, &ctx);
 
                 match self.prune_type_once(expr_type, Some(span)) {
                     Type::Borrow { inner, mutable: _, borrows_var } => {
@@ -339,7 +350,7 @@ impl TypeChecker<'_> {
             },
 
             Expr::Borrow { expr, mutable: _ } => {
-                self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::TYPE))
+                self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::TYPE).is_const())
             }
             
             Expr::Closure { closure, requires_type_annotation } => {
@@ -525,7 +536,7 @@ impl TypeChecker<'_> {
             // already handled in the hoisting phase
             | Expr::Const { .. } => TypeId::VOID,
             Expr::CustomType { expr } => {
-                self.check_expression(*expr, is_never, &ctx.expect(TypeId::TYPE));
+                self.check_expression(*expr, is_never, &ctx.expect(TypeId::TYPE).is_const());
                 TypeId::TYPE
             }
             Expr::EnumDefinition { variants } => {
@@ -653,7 +664,11 @@ impl TypeChecker<'_> {
         let mut pattern_type = self.get_pattern_type(pattern);
 
         if let Some(val) = value {
-            let check_typ = self.check_expression(val, is_never, &CheckExprCtx::default().maybe_expect(pattern_type));
+            let mut ctx = CheckExprCtx::default().maybe_expect(pattern_type);
+            if const_update.is_some() {
+                ctx = ctx.is_const();
+            }
+            let check_typ = self.check_expression(val, is_never, &ctx);
             pattern_type = Some(check_typ);
         }
 

@@ -1,4 +1,3 @@
-let val: enum { None, Some(bool, bool) } = .Some(true, false)
+let X = 10
 
-match val^
-is .Some(false, true) => 0
+(0; X)

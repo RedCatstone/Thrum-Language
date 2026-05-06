@@ -129,7 +129,8 @@ impl<'ast> TypeChecker<'ast> {
     /// this function actually evaluates a const-expr
     /// in the typechecker itself this is used in:
     /// `const x = ...`
-    /// `let x: ... = 5`  (probably shouldn't here tho)
+    /// `let x: ... = 5`
+    /// `(0; ...)`
     pub(super) fn evaluate_expr(&mut self, expr: ExprId) -> Option<RuntimeValue> {
         // if there were any errors, don't evaluate consts anymore.
         // this fixes compiler crashes, but its definitely not the best
@@ -239,13 +240,18 @@ impl<'ast> TypeChecker<'ast> {
         }
     }
 
-    pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, expr: ExprId) -> TypeId {
+    pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, is_const: bool, expr: ExprId) -> TypeId {
+        let expr_span = self.ast.get_expr_span(expr);
+
         if let Some(var_id) = self.lookup_variable(name) {
             self.typed_ast.resolved_expr_var.insert(expr, var_id);
-            
-            self.make_var_id_ref(var_id, mutable)
+
+            if is_const && self.typed_ast.get_var(var_id).const_val == TypeVarConstVal::No {
+                self.error(ErrType::TyperExpectedConstFoundRuntimeValue { name: name.to_string() }, expr_span)
+            } else {
+                self.make_var_id_ref(var_id, mutable)
+            }
         } else {
-            let expr_span = self.ast.get_expr_span(expr);
             self.error(ErrType::TyperUndefinedIdentifier { name: name.to_string() }, expr_span)
         }
     }

@@ -168,6 +168,8 @@ fn tup_arrays() {
         x[2]^
     ", RuntimeValue::Num(3.0));
 
+    test!("const LENGTH = 10; (0; LENGTH)", RuntimeValue::Tup(vec![RuntimeValue::Num(0.0); 10]));
+
     test!("
         let mut grid = ((1, 2), (3, 4))
         grid[1][0] = 99
@@ -320,7 +322,7 @@ fn functions() {
 #[test]
 fn impls() {
     test!("type Number = num; Number{ 320 }", RuntimeValue::Num(320.0));
-    
+
     test!("
         type N = num
         impl N {
