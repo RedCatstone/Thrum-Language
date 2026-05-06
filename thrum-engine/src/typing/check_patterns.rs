@@ -1,10 +1,6 @@
 use std::collections::HashMap;
-
-use derive_more::Display;
-
 use crate::{
-    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string,
-    typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -140,7 +136,7 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 // invert the covered cases
-                covered_cases.extend(PatternSpace::covered_to_missing_cases(&covered));
+                covered_cases.extend(PatternSpace::covered_to_missing_cases(&covered, &self.typed_ast.enum_defs));
 
                 typ
             }
@@ -238,12 +234,24 @@ impl<'ast> TypeChecker<'ast> {
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
                 if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(name, expected_type, span) {
                     if let Some(tup) = attached_tuple {
-                        self.check_match_pattern(
+                        let (_, covered) = self.check_match_pattern(
                             *tup, Some(attached_type), has_value, const_update, vars_defined
                         );
+                        for covered in covered {
+                            covered_cases.push(PatternSpace::EnumVariant {
+                                enum_id,
+                                variant_index,
+                                attached_tuple: Box::new(covered)
+                            });
+                        }
                     } else {
                         // if the variant had no data, then the defined variant shouldn't have data either!
                         self.unify_types(TypeId::VOID, attached_type, span);
+                        covered_cases.push(PatternSpace::EnumVariant {
+                            enum_id,
+                            variant_index,
+                            attached_tuple: Box::new(PatternSpace::All)
+                        });
                     }
                     self.typed_ast.resolved_enum_variant_pattern.insert(pattern, (enum_id, variant_index));
 
@@ -259,14 +267,14 @@ impl<'ast> TypeChecker<'ast> {
                 // if there the compare expr is a simple literal, or a const value
                 // then add that to covered_cases
                 match self.ast.get_expr(*expr) {
-                    Expr::Literal { val: AstValue::Bool(b) } => covered_cases.push(PatternSpace::Bool { bool: *b }),
+                    Expr::Literal { val: AstValue::Bool(b) } => covered_cases.push(PatternSpace::Bool(*b)),
                     Expr::IdentifierRef { .. } => {
                         if let Some(var_id) = self.typed_ast.resolved_expr_var.get(expr) {
                             let var = self.typed_ast.get_var(*var_id);
                             if let TypeVarConstVal::Evaluated(val) = &var.const_val {
                                 #[allow(clippy::collapsible_match, clippy::single_match)]
                                 match val {
-                                    RuntimeValue::Bool(b) => covered_cases.push(PatternSpace::Bool { bool: *b }),
+                                    RuntimeValue::Bool(b) => covered_cases.push(PatternSpace::Bool(*b)),
                                     _ => {}
                                 }
                             }
@@ -432,147 +440,5 @@ impl<'ast> TypeChecker<'ast> {
             
             Pattern::Wildcard | Pattern::CompareExpr(_) | Pattern::PlacePointer(_) => { /* no vars */ },
         }
-    }
-}
-
-
-
-
-#[derive(Debug, Display, Clone)]
-pub enum PatternSpace {
-    // Num { from: f64, to: f64 },
-    #[display("{bool}")]
-    Bool { bool: bool },
-
-    // if i cover (false, false) it will be [true, All], [false, true]
-    // if i then cover (_, true) it will be [true, false] (from first missingcase, the second one results in no case)
-    #[display("({})", slice_to_string(inners, ", "))]
-    Tup { inners: Vec<Self> },
-
-    // EnumVariant { name: String, attached_tuple: Box<PatternSpace/*::Tup */> },
-
-    // this represents ALL cases
-    // if we are missing ALL and a wildcard subtracts ALL from that -> empty (covered)
-    #[display("_")]
-    All,
-}
-
-impl PatternSpace {
-    pub(super) fn covered_to_missing_cases(covered_cases: &[Self]) -> Vec<Self> {
-        let mut missing_cases = vec![Self::All];
-
-        for covered in covered_cases {
-            missing_cases = missing_cases.into_iter()
-                .flat_map(|missing| missing.subtract(covered))
-                .collect();
-        }
-        missing_cases
-    }
-
-
-    fn subtract(&self, now_covered: &Self) -> Vec<Self> {
-        let mut new_missing_cases = Vec::new();
-
-        match (self, now_covered) {
-            (_, Self::All) => {
-                // anything - All = nothing
-                // even All - All = nothing
-                // so just add nothing here
-            }
-
-            (Self::All, Self::Bool { bool: covered_bool }) => {
-                // All - false = true
-                // All - true = false
-                new_missing_cases.push(Self::Bool { bool: !covered_bool });
-            }
-            (Self::Bool { bool: missing_bool }, Self::Bool { bool: covered_bool }) => {
-                if missing_bool != covered_bool {
-                    // missing the same case again
-                    new_missing_cases.push(self.clone());
-                }
-                // else: fully covered
-            }
-
-            (Self::All, Self::Tup { inners: covered_inners }) => {
-                let all_tup_vec = Self::Tup { inners: vec![Self::All; covered_inners.len()] };
-                new_missing_cases.extend(all_tup_vec.subtract(now_covered));
-            }
-            (Self::Tup { inners: missing_inners }, Self::Tup { inners: covered_inners }) => {
-                // the generalized logic for this with missing_inners: (M1, M2, ..., Mn) and covered_inners (C1, C2, ..., Cn)
-                // 1. (M1 - C1, M2, M3, ...)
-                // 2. (M1 ∩ C1, M2 - C2, M3, ...)
-                // 3. (M1 ∩ C1, M2 ∩ C2, M3 - C3, ...)
-
-                // with missing_inners: (All, All, All) and covered_inners: (false, false, false)
-                // this would generate: (true, All, All), (false, true, All), (false, false, true)
-
-                let mut curr_vec = missing_inners.clone();
-
-                debug_assert_eq!(missing_inners.len(), covered_inners.len());
-                for (i, (mi, ci)) in missing_inners.iter().zip(covered_inners).enumerate() {
-                    // Calculate Mi - Ci (this can return multiple things)
-                    for subtract in mi.subtract(ci) {
-                        let mut new_inners = curr_vec.clone();
-                        new_inners[i] = subtract;
-                        new_missing_cases.push(Self::Tup { inners: new_inners });
-                    }
-
-                    // Calculate Mi ∩ Ci and put it in the curr_vec for the other cases.
-                    if let Some(intersect) = mi.intersect(ci) {
-                        curr_vec[i] = intersect;
-                    } else {
-                        // if the intersection didn't match (e.g. false ∩ true) we stop
-                        // e.g. with missing_inners: (All, true, All) and covered_inners: (false, false, false)
-                        // this would generate: (true, true, All), (false, true, All), nothing here anymore
-                        break;
-                    }
-                }
-            }
-            (a, b) => unreachable!("pattern subtraction is not defined for {a:?} - {b:?}")
-        }
-
-        new_missing_cases
-    }
-
-
-    fn intersect(&self, other: &Self) -> Option<Self> {
-        match (self, other) {
-            (Self::All, x) | (x, Self::All) => Some(x.clone()),
-
-            (Self::Bool { bool: a }, Self::Bool { bool: b }) => {
-                if a == b { Some(Self::Bool { bool: *a }) } else { None }
-            }
-
-            (Self::Tup { inners: a }, Self::Tup { inners: b }) => {
-                a.iter()
-                    .zip(b)
-                    .map(|(a, b)| a.intersect(b))
-                    .collect::<Option<Vec<_>>>()
-                    .map(|inners| Self::Tup { inners })
-            }
-
-            _ => unreachable!("cannot intersect {self:?} and {other:?}")
-        }
-    }
-
-    fn tuple_cartesian_product(missing_cases: &[Vec<Self>]) -> Vec<Self> {
-        // with [[a, b], [c, d]]
-        // this should generate [a, c], [a, d], [b, c], [b, d]
-        let mut result = Vec::with_capacity(missing_cases.iter().map(Vec::len).product());
-        result.push(Vec::new());  // start with one empty tuple
-
-        for cases in missing_cases {
-            let mut new_result = Vec::new();
-            for existing in result {
-                for case in cases {
-                    let mut new_inner = existing.clone();
-                    new_inner.push(case.clone());
-                    new_result.push(new_inner);
-                }
-            }
-            result = new_result;
-        }
-
-        result.into_iter().map(|inners| Self::Tup { inners }).collect()
     }
 }

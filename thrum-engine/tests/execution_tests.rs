@@ -1,4 +1,4 @@
-use thrum_engine::{ErrType, vm_compiling::RuntimeValue};
+use thrum_engine::vm_compiling::RuntimeValue;
 mod common;
 
 
@@ -62,6 +62,9 @@ fn scoping() {
             1
         }
     ", RuntimeValue::Num(50.0));
+    
+    test!("{ #label }", RuntimeValue::Void);
+    test!("{}", RuntimeValue::Void);
 }
 
 #[test]
@@ -265,7 +268,6 @@ fn enum_match_expr() {
         is .Some(0 | 1 | 2) => 0
         is .Some(!42) => 1
         is .Some(let x) => x^
-        is _ => 2  // TODO: get rid of this :(
     ", RuntimeValue::Num(42.0));
 }
 
@@ -317,6 +319,8 @@ fn functions() {
 
 #[test]
 fn impls() {
+    test!("type Number = num; Number{ 320 }", RuntimeValue::Num(320.0));
+    
     test!("
         type N = num
         impl N {

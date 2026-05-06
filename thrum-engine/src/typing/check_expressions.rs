@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{EnumId, ResolvedMemberAccess, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::{CheckPatternVars, PatternSpace}, type_vars::TypeVarConstVal}
+    typing::{EnumId, ResolvedMemberAccess, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}
 };
 
 
@@ -265,9 +265,11 @@ impl TypeChecker<'_> {
 
                 if all_arms_never { *is_never = true; }
 
-                let missing_cases = PatternSpace::covered_to_missing_cases(&covered_cases);
+                let missing_cases = PatternSpace::covered_to_missing_cases(&covered_cases, &self.typed_ast.enum_defs);
                 if !missing_cases.is_empty() {
-                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases { remaining: missing_cases }, span);
+                    self.error(crate::ErrType::TyperPatternDoesntCoverAllCases {
+                        remaining: PatternSpace::display_patterns(&missing_cases, &self.typed_ast.enum_defs)
+                    }, span);
                 }
 
                 self.merge_vars_states(original_snap, &arm_snapshots);
@@ -662,9 +664,11 @@ impl TypeChecker<'_> {
         );
 
         let span = self.ast.get_pattern_span(pattern);
-        let remaining = PatternSpace::covered_to_missing_cases(&covered);
+        let remaining = PatternSpace::covered_to_missing_cases(&covered, &self.typed_ast.enum_defs);
         if !can_fail && !remaining.is_empty() {
-            self.error(ErrType::TyperFailableAssignPattern { remaining }, span);
+            self.error(ErrType::TyperFailableAssignPattern {
+                remaining: PatternSpace::display_patterns(&remaining, &self.typed_ast.enum_defs)
+            }, span);
         }
         if !can_bind_vars && !vars_defined.is_empty() {
             self.error(ErrType::TyperInvalidBindingCaseExpr, span);
@@ -712,10 +716,12 @@ impl TypeChecker<'_> {
             let (_, covered) = self.check_match_pattern(
                 param_pattern, Some(param_type), true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
             );
-            let remaining = PatternSpace::covered_to_missing_cases(&covered);
+            let remaining = PatternSpace::covered_to_missing_cases(&covered, &self.typed_ast.enum_defs);
             if !remaining.is_empty() {
                 let param_span = self.ast.get_pattern_span(param_pattern);
-                self.error(ErrType::TyperPatternDoesntCoverAllCases { remaining }, param_span);
+                self.error(ErrType::TyperPatternDoesntCoverAllCases {
+                    remaining: PatternSpace::display_patterns(&remaining, &self.typed_ast.enum_defs)
+                }, param_span);
             }
         }
 

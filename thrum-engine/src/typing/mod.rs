@@ -9,7 +9,8 @@ use crate::{
 
 pub mod type_vars;
 mod check_expressions;
-pub mod check_patterns;
+mod check_patterns;
+mod exhaustiveness;
 
 
 #[derive(Debug, Display, Clone, Eq, Hash, PartialEq)]

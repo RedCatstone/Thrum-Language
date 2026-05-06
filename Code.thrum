@@ -1,10 +1,4 @@
-const Opt = enum { None, Some(num) }
-        
-let val: Opt = .Some(42)
+let val: enum { None, Some(bool, bool) } = .Some(true, false)
 
 match val^
-is .None => -1
-is .Some(0 | 1 | 2) => 0
-is .Some(!42) => 1
-is .Some(let x) => x^
-is _ => 2
+is .Some(false, true) => 0

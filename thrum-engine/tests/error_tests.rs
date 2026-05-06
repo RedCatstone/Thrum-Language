@@ -1,4 +1,4 @@
-use thrum_engine::{ErrType, lexing::tokens::{AssignOp, TokenKind}, typing::{Type, TypeInferId}, vm_compiling::RuntimeValue};
+use thrum_engine::{ErrType, lexing::tokens::{AssignOp, TokenKind}, typing::{Type, TypeInferId}};
 mod common;
 
 
@@ -16,7 +16,6 @@ fn parser_errors() {
     test_err!("1 - / 1", ErrType::ParserExpectedAnExpression { found: TokenKind::Op(AssignOp::Slash) });
     test_err!("1 + 1  15", ErrType::ParserUnexpectedExpression);
     test_err!("let = 5", ErrType::ParserExpectedABindingPattern { .. });
-    test!("{ #label }", RuntimeValue::Void);
     test_err!("{ \n #label }", ErrType::ParserLabelsHaveToBeOnSameLine);
     test_err!("if true => \n 5", ErrType::ParserArrowExprsHaveToBeOnSameLine);
 }
@@ -80,6 +79,11 @@ fn invalid_op_types() {
 #[test]
 fn exhaustive_pattern_matching() {
     test_err!("match 5 is 1 => 2", ErrType::TyperPatternDoesntCoverAllCases { .. });
+    test_err!("
+        const Opt = enum { None, Some(bool) }
+        let val: Opt = .Some(true)
+        match val^ is .None | .Some(true) => 0
+    ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
 
     test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingCaseExpr);
@@ -124,7 +128,6 @@ fn array_bounds() {
 
 #[test]
 fn new_types() {
-    test!("type Number = num; Number{ 320 }", RuntimeValue::Num(320.0));
     test_err!("type Number = num; Number{ 320 } == 320", ErrType::TyperMismatch { .. });
     test_err!("type Number = num; let x: Number = 5", ErrType::TyperMismatch { .. });
 }

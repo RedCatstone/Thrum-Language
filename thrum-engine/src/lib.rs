@@ -2,7 +2,7 @@ use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;
 
-use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, check_patterns::PatternSpace, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod typing;
@@ -71,12 +71,12 @@ pub enum ErrType {
     TyperCantInferType { typ: Type },
     #[display("Type {typ} must be known at this point.")]
     TyperTypeMustBeKnownHere { typ: Type },
-    #[display("Pattern doesn't cover all cases. Missing cases: {}", slice_to_string(remaining, ", "))]
-    TyperPatternDoesntCoverAllCases { remaining: Vec<PatternSpace> },
+    #[display("Pattern doesn't cover all cases. Missing cases: {remaining}")]
+    TyperPatternDoesntCoverAllCases { remaining: String },
     #[display("Pattern can't be reached.")]
     TyperPatternCantBeReached,
-    #[display("Failable pattern in let-expression. Missing cases: {}", slice_to_string(remaining, ", "))]
-    TyperFailableAssignPattern { remaining: Vec<PatternSpace> },
+    #[display("Failable pattern in let-expression. Missing cases: {remaining}")]
+    TyperFailableAssignPattern { remaining: String },
     #[display("Requires type annotation.")]
     TyperRequiresTypeAnnotation,
     #[display("Is-expressions that bind variables aren't allowed here.")]
