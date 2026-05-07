@@ -1,12 +1,15 @@
 # Could do right now
 - [ ] make tuples coerce to Type::Tuple, instead of treating tuples as types
-- [ ] enums with data
+- [x] enums with data
 - [ ] support for runtime & and &mut
 - [ ] drop logic
 - [ ] match / if else correct moving logic
+- [ ] ref pattern matching `x is 4` instead of `x^ is 4`
 - [ ] "{single hole} string patterns"
-- [ ] ! negation pattern
+- [x] ! negation pattern
 - [ ] enum variant stand alone types e.g. Dir.West
+- [ ] Ranges 0..4
+- [ ] for loops
 
 
 - [ ] !!! complete VM rewrite
@@ -22,3 +25,4 @@
     - mut-borrows to the left side of an indirection can't be alias
     - e.g. can't have `&alias mut vec` if `&alias vec[1]` is also borrowed
     - e.g. can't have `&alias mut enum` if some inner part of the enum is borrowed
+- [ ] swap num to u{n} / i{n} / f{16n}
