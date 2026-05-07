@@ -402,13 +402,7 @@ impl VmCompiler<'_> {
                 }
 
                 // compile the binding pattern
-                let mut failure_jumps = Vec::new();
-                self.compile_binding_pattern(*pattern, &mut failure_jumps);
-
-                // if AssignablePattern can fail, use the else block or panic
-                if !failure_jumps.is_empty() {
-                    unreachable!("assign pattern didn't match in let expression, typechecker should have caught this.")
-                }
+                self.compile_binding_pattern(*pattern, &mut Vec::new());
 
                 // every assign expression results in void
                 self.push_op(OpCode::PushVoid);

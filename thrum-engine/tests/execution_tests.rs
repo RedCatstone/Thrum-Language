@@ -95,8 +95,8 @@ fn loop_shenanigance() {
         loop {
             i += 1
             if i > 5 { break }
-            if i == 3 { continue }
-            sum += i^
+            if i^ is 3 { continue }
+            sum += i
         }
         sum^  // 1 + 2 + 4 + 5 = 12
     ", RuntimeValue::Num(12.0));
@@ -153,6 +153,11 @@ fn tup_destructuring() {
         }
         else { -1 }
     "#, RuntimeValue::Num(42.0));
+
+    test!("
+        let (x, true | false) = (3, true);
+        x^
+    ", RuntimeValue::Num(3.0));
 }
 
 #[test]
@@ -239,7 +244,7 @@ fn pattern_matching() {
     test!("5 is 5 | 6 | 7", RuntimeValue::Bool(true));
     test!("0 is 5 | 6 | 7", RuntimeValue::Bool(false));
     test!("0 is !_", RuntimeValue::Bool(false));
-    test!("3 + 3 is 3 + 3", RuntimeValue::Bool(true));
+    test!("2 + 2 is 2 * 2", RuntimeValue::Bool(true));
     test!("3 + 3 is !3 * 3", RuntimeValue::Bool(true));
     test!("(1, 2) is (1, 1) | (1, 2)", RuntimeValue::Bool(true));
 
@@ -307,7 +312,7 @@ fn functions() {
     test!(r#"
         fn test(tup: (num, num), expected_bool: bool) {
             let maybe = { tup^ is let (x, 0) and x > 10 }
-            if maybe != expected_bool {
+            if maybe^ is !expected_bool^ {
                 panic("nope.")
             }
         }
@@ -421,7 +426,7 @@ fn random_examples() {
             let mut i = 0
             while i < max {
                 i += 1
-                sum += i^
+                sum += i
             }
             sum
         }

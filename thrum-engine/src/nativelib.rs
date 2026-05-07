@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{ErrType, typing::{Type, TypeId}, vm_compiling::RuntimeValue};
+use crate::{ErrType, typing::{Type, TypeArena, TypeId, TypeTuple}, vm_compiling::RuntimeValue};
 
 pub struct ThrumValue {
     pub typ: Type,
@@ -16,7 +16,7 @@ pub struct ThrumModule {
 
 
 
-pub fn get_native_lib() -> ThrumModule {
+pub fn get_native_lib(type_arena: &mut TypeArena) -> ThrumModule {
     let mut std_module = ThrumModule::default();
 
     let mut io_module = ThrumModule::default();
@@ -34,6 +34,14 @@ pub fn get_native_lib() -> ThrumModule {
 
     std_module.values.insert("num".to_string(), ThrumValue { typ: Type::MetaType, val: RuntimeValue::Type(TypeId::NUM), is_prelude: true });
     std_module.values.insert("bool".to_string(), ThrumValue { typ: Type::MetaType, val: RuntimeValue::Type(TypeId::BOOL), is_prelude: true });
+    
+
+    // let range_tup_type = type_arena.add_type(Type::Tup(vec![
+    //     TypeTuple { label: "start".to_string(), typ: TypeId::NUM, },
+    //     TypeTuple { label: "end".to_string(), typ: TypeId::NUM, },
+    // ]));
+    // let range_tup_custom_type = type_arena.add_type(Type::CustomType(range_tup_type));
+    // std_module.values.insert("Range".to_string(), ThrumValue { typ: Type::MetaType, val: RuntimeValue::Type(range_tup_custom_type), is_prelude: true });
 
     std_module
 }

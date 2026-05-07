@@ -8,8 +8,8 @@
 - [ ] "{single hole} string patterns"
 - [x] ! negation pattern
 - [ ] enum variant stand alone types e.g. Dir.West
-- [ ] Ranges 0..4
-- [ ] for loops
+- [x] Ranges 0..4
+- [x] for loops
 
 
 - [ ] !!! complete VM rewrite

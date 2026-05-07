@@ -226,7 +226,7 @@ impl<'ast> TypeChecker<'ast> {
                 let prev_labels = std::mem::take(&mut self.curr_label_infos);
 
                 self.check_assign_pattern_and_value(
-                    *pattern, Some(*value), &mut false, true, false,
+                    *pattern, Some(*value), &mut false, true, false, false,
                     Some(TypeVarConstVal::NotYetEvaluated(expr))
                 );
 
@@ -258,15 +258,23 @@ impl<'ast> TypeChecker<'ast> {
 
     pub(super) fn make_var_id_ref(&mut self, var_id: TypeVarId, mutable: bool) -> TypeId {
         let var = self.typed_ast.get_var_mut(var_id);
+        let inner = var.typ;
+
         if mutable {
             // if var.borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowed); }
             // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowMutBecauseAlreadyBorrowedMut); }
             var.mut_borrows_count += 1;
+
+            // if !var.is_declared_mut {
+            //     let var = var.clone();
+            //     let span = var.declared_at;
+            //     self.error(ErrType::TyperVarIsntDeclaredMut { var }, span);
+            // }
         } else {
             // if var.mut_borrows_count > 0 { errors.push(ErrType::TyperCantBorrowBecauseAlreadyBorrowedMut); }
             var.immut_borrows_count += 1;
         }
-        let inner = var.typ;
+
         self.type_arena.add_type(Type::Borrow { mutable, inner, borrows_var: Some(var_id) })
     }
 

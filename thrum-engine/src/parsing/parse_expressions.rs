@@ -166,6 +166,17 @@ impl Parser<'_> {
                 self.add_expr(start, Expr::Index { left: left_expr, index })
             },
 
+            TokenKind::DotDot => {
+                let right = self.parse_expression_default();
+
+                let range_type = self.add_expr(start, Expr::IdentifierRef { name: "Range".to_string(), mutable: false });
+                let data = self.add_expr(start, Expr::Tuple { elems: vec![
+                    AstTupleElement { label: "start".to_string(), expr: left_expr },
+                    AstTupleElement { label: "end".to_string(), expr: right },
+                ] });
+                self.add_expr(start, Expr::TypeInstantiation { typ: range_type, data })
+            }
+
             _ => unreachable!("parse_infix() should not be called with op_token: {op:?}")
         }
     }
@@ -418,13 +429,13 @@ impl Parser<'_> {
             }
 
             TokenKind::Return => {
-                let expr = self.parse_optional_expression();
+                let expr = self.parse_optional_expression().unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
                 self.add_expr(start, Expr::Return { expr })
             },
 
             TokenKind::Break => {
                 let label = self.optional_label();
-                let expr = self.parse_optional_expression();
+                let expr = self.parse_optional_expression().unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
                 self.add_expr(start, Expr::Break { expr, label })
             },
 
@@ -597,11 +608,8 @@ impl Parser<'_> {
     }
 
 
-    fn parse_optional_expression(&mut self) -> ExprId {
-        if self.peek_is_on_same_line() && self.peek_is_expression_start() {
-            self.parse_expression_default()
-        } else {
-            self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void)
-        }
+    fn parse_optional_expression(&mut self) -> Option<ExprId> {
+        (self.peek_is_on_same_line() && self.peek_is_expression_start())
+            .then(|| self.parse_expression_default())
     }
 }

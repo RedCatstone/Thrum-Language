@@ -87,7 +87,7 @@ fn exhaustive_pattern_matching() {
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
 
     test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingCaseExpr);
-    test_err!("if (5 is let x) == true {}", ErrType::TyperInvalidBindingCaseExpr);
+    test_err!("if (5 is let x) is true {}", ErrType::TyperInvalidBindingCaseExpr);
 
     test_err!("5 is !(let x)", ErrType::TyperNotPatternCantBindVars);
 
@@ -132,7 +132,7 @@ fn array_bounds() {
 
 #[test]
 fn new_types() {
-    test_err!("type Number = num; Number{ 320 } == 320", ErrType::TyperMismatch { .. });
+    test_err!("type Number = num; Number{ 320 } is 320", ErrType::TyperMismatch { .. });
     test_err!("type Number = num; let x: Number = 5", ErrType::TyperMismatch { .. });
 }
 

@@ -18,8 +18,12 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
         }};
     }
 
-    // this only loops up to the original length
-    for i in 0..ast.exprs.len() {
+    // this loops until its fully done `exprs.len()`
+    // which means that newly added desugared exprs will also get desugared
+    for i in 0.. {
+        if i == ast.exprs.len() {
+            break;
+        }
         let expr = ast.exprs[i].clone();
         let span = ast.expr_spans[i];
 
@@ -50,10 +54,16 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
                     label: None,
                     exprs: vec![
                         expr!(span, Expr::Assign {
-                            pattern: pattern!(span, Pattern::Binding { name: "i".into(), mutable: true }),
-                            value: iter_expr,
                             extra_op: None,
-                            op_span: span
+                            op_span: span,
+                            pattern: pattern!(span, Pattern::Binding { name: "i".into(), mutable: true }),
+                            value: expr!(span, Expr::Call {
+                                callee: expr!(span, Expr::MemberAccess {
+                                    left: iter_expr,
+                                    member: "iter".into()
+                                }),
+                                arguments: Vec::new()
+                            })
                         }),
                         expr!(span, Expr::While {
                             body,
@@ -61,7 +71,7 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
                             condition: expr!(span, Expr::Is {
                                 value: expr!(span, Expr::Call {
                                     callee: expr!(span, Expr::MemberAccess {
-                                        left: expr!(span, Expr::IdentifierRef { name: "i".into(), mutable: false }),
+                                        left: expr!(span, Expr::IdentifierRef { name: "i".into(), mutable: true }),
                                         member: "next".into()
                                     }),
                                     arguments: Vec::new()

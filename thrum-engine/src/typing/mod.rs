@@ -231,7 +231,7 @@ impl TypeChecker<'_> {
             curr_impl_self: None,
             compiled_functions: FunctionRegistry::new(),
         };
-        let native_lib = get_native_lib();
+        let native_lib = get_native_lib(&mut tc.type_arena);
         tc.load_prelude_from_lib(&native_lib);
         
         // check the main expression

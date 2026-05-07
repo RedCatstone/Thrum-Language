@@ -64,7 +64,8 @@ impl TypeChecker<'_> {
 
         let span = self.ast.get_expr_span(check_expr);
 
-        let mut inferred_type = match self.ast.get_expr(check_expr) {
+        let expr_expr = self.ast.get_expr(check_expr);
+        let mut inferred_type = match expr_expr {
             Expr::Literal { val } => self.check_literal(val),
 
             Expr::IdentifierRef { name, mutable } => {
@@ -308,25 +309,25 @@ impl TypeChecker<'_> {
             },
 
             Expr::Assign { pattern, value, extra_op, op_span } => {
-                let pattern_type = self.check_assign_pattern_and_value(
-                    *pattern, Some(*value), is_never, true, false, None
+                let value_type = self.check_assign_pattern_and_value(
+                    *pattern, Some(*value), is_never, true, false, extra_op.is_some(), None
                 );
 
                 if let Some(extra_op) = extra_op {
-                    let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, pattern_type, pattern_type);
-                    self.unify_types(pattern_type, infixed_typ, *op_span);
+                    let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, value_type, value_type);
+                    self.unify_types(value_type, infixed_typ, *op_span);
                 }
                 TypeId::VOID
             },
 
             Expr::EmptyLet { pattern } => {
-                self.check_assign_pattern_and_value(*pattern, None, is_never, true, false, None);
+                self.check_assign_pattern_and_value(*pattern, None, is_never, true, false, false, None);
                 TypeId::VOID
             }
 
             Expr::Is { value, pattern } => {
                 self.check_assign_pattern_and_value(
-                    *pattern, Some(*value), is_never, old_ctx.allow_is_expr_bindings, true, None
+                    *pattern, Some(*value), is_never, old_ctx.allow_is_expr_bindings, true, false, None
                 );
 
                 TypeId::BOOL
@@ -550,7 +551,7 @@ impl TypeChecker<'_> {
             }
 
             // should be desugared stuff
-            Expr::While { .. } | Expr::For { .. } | Expr::FnDefinition { .. } => unreachable!("should be desugared already..."),
+            Expr::While { .. } | Expr::For { .. } | Expr::FnDefinition { .. } => unreachable!("should be desugared already... {expr_expr:?}"),
         };
 
         if inferred_type == TypeId::NEVER { *is_never = true; }
@@ -659,7 +660,9 @@ impl TypeChecker<'_> {
 
 
     pub(super) fn check_assign_pattern_and_value(
-        &mut self, pattern: PatternId, value: Option<ExprId>, is_never: &mut bool, can_bind_vars: bool, can_fail: bool, const_update: Option<TypeVarConstVal>
+        &mut self, pattern: PatternId, value: Option<ExprId>,
+        is_never: &mut bool, can_bind_vars: bool, can_fail: bool, fully_deref_value: bool,
+        const_update: Option<TypeVarConstVal>
     ) -> TypeId {
         let mut pattern_type = self.get_pattern_type(pattern);
 
@@ -667,6 +670,9 @@ impl TypeChecker<'_> {
             let mut ctx = CheckExprCtx::default().maybe_expect(pattern_type);
             if const_update.is_some() {
                 ctx = ctx.is_const();
+            }
+            if fully_deref_value {
+                ctx.deref_mode = AutoDerefMode::Fully;
             }
             let check_typ = self.check_expression(val, is_never, &ctx);
             pattern_type = Some(check_typ);
