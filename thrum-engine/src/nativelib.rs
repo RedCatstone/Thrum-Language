@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{ErrType, typing::{Type, TypeArena, TypeId, TypeTuple}, vm_compiling::RuntimeValue};
+use crate::{ErrType, typing::{Type, TypeArena, TypeId}, vm_compiling::RuntimeValue};
 
 pub struct ThrumValue {
     pub typ: Type,

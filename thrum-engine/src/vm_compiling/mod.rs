@@ -627,18 +627,21 @@ impl VmCompiler<'_> {
             }
 
             Expr::MemberAccess { left, member: _ } => {
-                match self.typed_ast.resolved_member_access[&compile_expr] {
+                match &self.typed_ast.resolved_member_access[&compile_expr] {
                     ResolvedMemberAccess::TupleRefIndex { index } => {
                         self.compile_expression(*left);
-                        self.push_op(OpCode::TupPointerGet { index });
+                        self.push_op(OpCode::TupPointerGet { index: *index });
                     }
                     ResolvedMemberAccess::TupleIndex { index } => {
                         self.compile_expression(*left);
-                        self.push_op(OpCode::TupGet { index });
+                        self.push_op(OpCode::TupGet { index: *index });
                     }
-                    ResolvedMemberAccess::Member { member: fn_var }
-                    | ResolvedMemberAccess::MemberWithSelfSugar { member: fn_var, .. } => {
-                        self.push_get_identifier_ref(fn_var);
+                    ResolvedMemberAccess::Member { constant }
+                    | ResolvedMemberAccess::MemberWithSelfSugar { constant, .. } => {
+                        self.push_get_constant_ref_op(constant.clone());
+                    }
+                    ResolvedMemberAccess::EnumWithNoData { i } => {
+                        self.compile_enum_variant(*i, None);
                     }
                 }
             }
@@ -646,17 +649,10 @@ impl VmCompiler<'_> {
 
             Expr::EnumVariant { data } => {
                 let (_enum_id, i) = self.typed_ast.resolved_enum_variant[&compile_expr];
-                // this compiles to a 2-tuple: (data, tag)
-                if let Some(tup) = data.attached_tuple {
-                    self.compile_expression(tup);
-                } else {
-                    self.push_op(OpCode::PushVoid);
-                }
-                self.push_get_constant_op(RuntimeValue::Num(i as f64));
-                self.push_op(OpCode::TupCreate { length: 2 });
+                self.compile_enum_variant(i, data.attached_tuple);
             }
 
-            Expr::ImplSelf {  } => {
+            Expr::ImplSelf { } => {
                 let meta_type = self.typed_ast.resolved_impl_self_type[&compile_expr];
                 self.push_get_constant_op(RuntimeValue::Type(meta_type));
             }
@@ -746,6 +742,17 @@ impl VmCompiler<'_> {
         self.push_op(OpCode::ConstGet { const_index });
     }
     fn push_get_constant_ref_op(&mut self, val: RuntimeValue) {
+        // if the const value is a fn that is not compiled yet, compile it!
+        if let RuntimeValue::Fn { slot } = val
+        && self.compiled_functions.compiled_functions[slot].not_compiled() {
+            
+            let closure_expr = self.compiled_functions.closure_expr_id[slot];
+            let Expr::Closure { closure, .. } = self.ast.get_expr(closure_expr) else {
+                unreachable!("woopsie?")
+            };
+            self.compile_and_insert_function(closure.body, &closure.params, slot);
+        }
+
         let const_index = self.add_constant(val);
         self.push_op(OpCode::ConstGetRef { const_index });
     }
@@ -775,17 +782,6 @@ impl VmCompiler<'_> {
             None => {
                 match &self.typed_ast.get_var(var_id).const_val {
                     TypeVarConstVal::Evaluated(val) => {
-
-                        // if the const value is a fn that is not compiled yet, compile it!
-                        if let RuntimeValue::Fn { slot } = *val
-                        && self.compiled_functions.compiled_functions[slot].not_compiled() {
-                            
-                            let closure_expr = self.compiled_functions.closure_expr_id[slot];
-                            let Expr::Closure { closure, .. } = self.ast.get_expr(closure_expr) else {
-                                unreachable!("woopsie?")
-                            };
-                            self.compile_and_insert_function(closure.body, &closure.params, slot);
-                        }
                         self.push_get_constant_ref_op(val.clone());
                     }
                     TypeVarConstVal::NotYetEvaluated(expr) => unreachable!("const was not evaluated yet... {:?}", self.ast.display_expr(*expr)),
@@ -1046,5 +1042,16 @@ impl VmCompiler<'_> {
             TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumNegate),
             _ => unreachable!("unsupported prefix operator...")
         }
+    }
+
+    fn compile_enum_variant(&mut self, i: usize, data: Option<ExprId>) {
+        // this compiles to a 2-tuple: (data, tag)
+        if let Some(tup) = data {
+            self.compile_expression(tup);
+        } else {
+            self.push_op(OpCode::PushVoid);
+        }
+        self.push_get_constant_op(RuntimeValue::Num(i as f64));
+        self.push_op(OpCode::TupCreate { length: 2 });
     }
 }

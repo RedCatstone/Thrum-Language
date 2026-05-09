@@ -376,6 +376,30 @@ fn consts() {
     test!("const X = 2 * Y; const Z = 20; const Y = 3 * Z; X^", RuntimeValue::Num(120.0));
 }
 
+#[test]
+fn enums() {
+    test!("
+        const Dir = enum { Up, Down(bool, bool) }
+
+        let down: Dir = .Down(true, false)
+        let down2: Dir = .Down(true, false)
+        let up: Dir = .Up
+        let up2 = Dir.Up
+
+        up^ is .Up
+        and down^ is .Down(_, false)
+        and up2^ is !.Down(_, _)
+        and down2^ is !.Up
+    ", RuntimeValue::Bool(true));
+
+    test!("
+        const Res = enum { Err, Ok((num, bool)) }
+        let r: Res = .Ok((100, true))
+
+        r^ is .Ok((100, !false))
+    ", RuntimeValue::Bool(true));
+}
+
 
 #[test]
 fn point_impl_test() {
@@ -394,26 +418,16 @@ fn point_impl_test() {
 }
 
 #[test]
-fn enums() {
+fn enum_impl_test() {
     test!("
-        const Dir = enum { Up, Down(bool, bool) }
+        type Option = enum { None, Some(num) }
+        impl Option {
+            fn is_none(self: Self) -> bool {
+                self^ is .None
+            }
+        }
 
-        let down: Dir = .Down(true, false)
-        let down2: Dir = .Down(true, false)
-        let up: Dir = .Up
-        let up2: Dir = .Up
-
-        up^ is .Up
-        and down^ is .Down(_, false)
-        and up2^ is !.Down(_, _)
-        and down2^ is !.Up
-    ", RuntimeValue::Bool(true));
-
-    test!("
-        const Res = enum { Err, Ok((num, bool)) }
-        let r: Res = .Ok((100, true))
-
-        r^ is .Ok((100, !false))
+        Option.None.is_none()
     ", RuntimeValue::Bool(true));
 }
 

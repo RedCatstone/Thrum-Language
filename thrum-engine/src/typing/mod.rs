@@ -4,7 +4,7 @@ use derive_more::Display;
 use crate::{
     ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
     parsing::ast::{AstArena, AstIds, ExprId, PatternId}, pretty_printing::{slice_to_debug_string, slice_to_string},
-    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::FunctionRegistry
+    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, RuntimeValue}
 };
 
 pub mod type_vars;
@@ -211,10 +211,11 @@ pub struct LabelInfo<'ast> {
 
 #[derive(Debug)]
 pub enum ResolvedMemberAccess {
-    TupleRefIndex { index: usize },
-    TupleIndex { index: usize },
-    Member { member: TypeVarId },
-    MemberWithSelfSugar { member: TypeVarId, self_sugar_expr: ExprId }
+    TupleRefIndex { index: usize },  // tup.0
+    TupleIndex { index: usize },  // tup^.0
+    Member { constant: RuntimeValue },  // Point.distance(p)
+    MemberWithSelfSugar { constant: RuntimeValue, self_sugar_expr: ExprId },  // p.distance()
+    EnumWithNoData { i: usize }  // Option.None
 }
 
 impl TypeChecker<'_> {

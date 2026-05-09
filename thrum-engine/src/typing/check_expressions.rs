@@ -446,7 +446,7 @@ impl TypeChecker<'_> {
                 if old_ctx.auto_borrow_mut { ctx.auto_borrow_mut = true }
 
                 let left_type = self.check_expression(*left, is_never, &ctx);
-                self.check_member_access(left_type, check_expr, None)
+                self.check_member_access(left_type, check_expr, None, false)
             }
 
 
@@ -760,83 +760,139 @@ impl TypeChecker<'_> {
     }
 
 
-    fn check_member_access(&mut self, left_type: TypeId, member_access_expr: ExprId, came_from_ref: Option<(bool, Option<TypeVarId>)>) -> TypeId {
-        let Expr::MemberAccess { left, member } = self.ast.get_expr(member_access_expr) else {
+
+    /// this might be the most complicated function in this compiler...
+    fn check_member_access(
+        &mut self, left_type_id: TypeId, member_expr: ExprId,
+        came_from_ref: Option<(bool, Option<TypeVarId>)>, came_from_meta: bool
+    ) -> TypeId {
+        let Expr::MemberAccess { left, member } = self.ast.get_expr(member_expr) else {
             unreachable!("this function is only called with MemberAccess exprs.")
         };
         let left_span = self.ast.get_expr_span(*left);
+        let left_type = self.prune_type_once(left_type_id, Some(left_span));
 
-        match self.prune_type_once(left_type, Some(left_span)) {
-            // for tuples one pointer layer is required
-            // just checks indicies / labels
-            // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
-            Type::Tup(elems) => {
+        // check the member for special types first:
+        match &left_type {
+            Type::Tup(elems) if !came_from_meta => {
+                // for tuples check if `member` matches a label
+                // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
                 let member_index = elems.iter().position(|elem| elem.label == *member);
 
                 if let Some(index) = member_index {
                     // if we came from a ref keep that ref
-                    if let Some((mutable, borrows_var)) = came_from_ref {
-                        self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleRefIndex { index });
+                    return if let Some((mutable, borrows_var)) = came_from_ref {
+                        self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::TupleRefIndex { index });
                         self.type_arena.add_type(Type::Borrow { inner: elems[index].typ, mutable, borrows_var })
                     } else {
-                        self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::TupleIndex { index });
+                        self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::TupleIndex { index });
                         elems[index].typ
                     }
-                } else {
-                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::Tup(elems), member: member.clone() }, left_span)
                 }
             }
 
-            // for metatypes it needs to first compile the type to get the actual `TypeId`
-            // then it checks for impls with the correct member
-            // e.g. `Number.MAX`
-            Type::MetaType => {
+            Type::MetaType if !came_from_meta => {
+                // for metatypes it needs to first compile the type to get the actual `TypeId`
+                // then it checks for impls with the correct member
+                // e.g. `i32.MAX`
                 if came_from_ref.is_some() {
                     // if this is a ref to a metatype, deref it first.
                     assert!(self.deref_if_pointer(*left));
                 }
-                let meta_type = self.check_annotation_meta_type_id(*left, false);
-                if let Some(type_impls) = self.type_impls.get(&meta_type)
-                && let Some(&member) = type_impls.scope.get(member.as_str()) {
-                    // found a member!
-                    self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::Member { member });
-                    self.make_var_id_ref(member, false)
-                }
-                else {
-                    self.error(ErrType::TyperTypeDoesntHaveMember { typ: Type::MetaType, member: member.clone() }, left_span)
+                let meta_type_id = self.check_annotation_meta_type_id(*left, false);
+                return self.check_member_access(meta_type_id, member_expr, None, true);
+            }
+            Type::Enum(enum_id) if came_from_meta => {
+                // enum member access only works if we came from a meta type
+                // e.g. `Option.None`
+                let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
+                if let Some(i) = variants.iter().position(|(x, _)| **x == **member) {
+                    // found a variant!
+                    let variant_type_id = variants[i].1;
+                    let variant_type = self.prune_type_once(variant_type_id, None);
+    
+                    return if variant_type == Type::Void {
+                        // if the variant has no data, just push that variant, e.g. `Option.None`
+                        self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::EnumWithNoData { i });
+                        left_type_id
+                    } else {
+                        // if it has data, this returns that variants type. e.g. `Option.Some`
+                        let constant = RuntimeValue::Type(variant_type_id);
+                        self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant });
+                        variant_type_id
+                    }
                 }
             }
 
-            // this uses left as the first argument in a call expression.
-            // e.g. `Number{ 4 }.square()`
+            Type::Error => return TypeId::ERROR,
+            _ => {}
+        }
+
+
+        // if there wasn't any type specific things that matched check the types impls
+        if let Some((constant, typ)) = self.check_type_impl_const(left_type_id, member) {
+            let resolved = if came_from_meta {
+                // `i32.square(5)`
+                ResolvedMemberAccess::Member { constant }
+            } else {
+                // `5.square()`
+                ResolvedMemberAccess::MemberWithSelfSugar { constant, self_sugar_expr: *left }
+            };
+            self.typed_ast.resolved_member_access.insert(member_expr, resolved);
+            return typ
+        }
+
+
+        // if it still didn't find anything, recursively check inner types (if any)
+        match left_type {
             Type::CustomType(custom_inner_id) => {
-                if let Some(type_impls) = self.type_impls.get(&left_type)
-                && let Some(&member) = type_impls.scope.get(member.as_str()) {
-                    // found a member!
-                    self.typed_ast.resolved_member_access.insert(member_access_expr, ResolvedMemberAccess::MemberWithSelfSugar { member, self_sugar_expr: *left });
-                    self.make_var_id_ref(member, false)
+                // recursively check for CustomTypes inner
+                let mut resolved_type = self.check_member_access(custom_inner_id, member_expr, came_from_ref, came_from_meta);
+
+                // Magic wrapping for impl consts
+                // if the resolved_type evaluates to the custom inner type, we lift it back to the CustomType.
+                // e.g.
+                // const N = num
+                // N{ 4 }.square()  // should be lifted to type N
+                if resolved_type == custom_inner_id {
+                    resolved_type = left_type_id;
                 }
-                else {
-                    // recursively check for CustomTypes
-                    self.check_member_access(custom_inner_id, member_access_expr, came_from_ref)
-                }
+
+                return resolved_type
             }
 
             Type::Borrow { inner, mutable, borrows_var } => {
                 // if we already came from a borrow before this borrow, just deref it
-                // this does not support double ref .access
+                // this function does not support (double ref).access
                 if came_from_ref.is_some() {
                     assert!(self.deref_if_pointer(*left));
                 }
                 
                 // now continue checking the member_access using the inner borrow type.
                 // also keep track of the borrows_var
-                // e.g. `tup.y` tup is a ref and the final thing will also be a ref.
-                self.check_member_access(inner, member_access_expr, Some((mutable, borrows_var)))
+                // e.g. `tup.y` tup is a ref, so the final thing will also be a ref.
+                return self.check_member_access(inner, member_expr, Some((mutable, borrows_var)), came_from_meta)
             }
 
-            Type::Error => TypeId::ERROR,
-            typ => self.error(ErrType::TyperTypeDoesntHaveMember { typ, member: member.clone() }, left_span)
+            _ => {}
+        }
+
+
+        self.error(ErrType::TyperTypeDoesntHaveMember { typ: left_type, member: member.clone() }, left_span)
+    }
+
+
+    fn check_type_impl_const(&mut self, typ: TypeId, member: &str) -> Option<(RuntimeValue, TypeId)> {
+        if let Some(type_impls) = self.type_impls.get(&typ)
+        && let Some(&member) = type_impls.scope.get(member) {
+            // found a member!
+            
+            match &self.typed_ast.get_var(member).const_val {
+                TypeVarConstVal::Evaluated(constant) => Some((constant.clone(), self.make_var_id_ref(member, false))),
+                other => unreachable!("should be an evaluated const... {:?}", other)
+            }
+        } else {
+            None
         }
     }
 
@@ -869,6 +925,10 @@ impl TypeChecker<'_> {
                 let attached_type = enum_def.variants[variant_index].1;
 
                 Some((enum_id, variant_index, attached_type))
+            }
+            Type::CustomType(id) => {
+                // if its a custom type, recursively go down until we find Type::Enum
+                self.check_enum_variant(variant_name, Some(id), span)
             }
             Type::Error => None,
             typ => { self.error(ErrType::TyperExpectedTypeIsntAnEnum { typ }, span); None }
