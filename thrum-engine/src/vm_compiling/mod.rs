@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use derive_more::Display;
 use strum_macros::FromRepr;
 
-use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, TypeArena, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
+use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, ResolvedTypeInstantiation, TypeArena, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
 
 
 #[derive(Debug, Display, Clone, PartialEq, PartialOrd)]
@@ -600,15 +600,20 @@ impl VmCompiler<'_> {
             }
 
             Expr::TypeInstantiation { typ: _, data } => {
-                if self.typed_ast.resolved_type_instantian_not_a_tuple.contains(&compile_expr) {
-                    // if its not a tuple type, e.g. `type N = num; N{ 2 }`
-                    let Expr::Tuple { elems } = self.ast.get_expr(*data) else {
-                        unreachable!("always a tuple.")
-                    };
-                    self.compile_expression(elems[0].expr);
-                }
-                else {
-                    self.compile_expression(*data);
+                match self.typed_ast.resolved_type_instantian[&compile_expr] {
+                    ResolvedTypeInstantiation::NewType => {
+                        // e.g. `N{ 2 }`
+                        let Expr::Tuple { elems } = self.ast.get_expr(*data) else {
+                            unreachable!("always a tuple.")
+                        };
+                        self.compile_expression(elems[0].expr);
+                    }
+                    ResolvedTypeInstantiation::Tuple => {
+                        self.compile_expression(*data);
+                    }
+                    ResolvedTypeInstantiation::EnumVariant(i) => {
+                        self.compile_enum_variant(i, Some(*data));
+                    }
                 }
             }
 

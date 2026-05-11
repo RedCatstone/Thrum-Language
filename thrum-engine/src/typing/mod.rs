@@ -34,7 +34,8 @@ pub enum Type {
     MetaType,
 
     #[display("enum<{_0:?}>")]
-    Enum(EnumId),
+    Enum(EnumId, EnumSpecializationId),
+
     #[display("customtype<{_0:?}>")]
     CustomType(TypeId),
 
@@ -62,11 +63,25 @@ pub struct TypeTuple {
     pub typ: TypeId,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum EnumSpecialization {
+    /// enum type was just initalized, e.g. `let x: Option`
+    NothingYet,
+    /// "currently" its this variant. could change though
+    Specialized(usize),
+    /// always this exact variant. `e.g. fn handle_some(x: Option.Some)`
+    HardSpecialized(usize),
+    /// can be multiple
+    Multiple,
+}
+
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct TypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct EnumId(pub AstIds);
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
+pub struct EnumSpecializationId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct TypeInferId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -103,6 +118,8 @@ pub struct TypeChecker<'a> {
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
 
+    enum_specialization: Vec<EnumSpecialization>,
+
     // implemented stuff on types
     // e.g. `impl Number { ... }`
     type_impls: HashMap<TypeId, TypeVarScope<'a>>,
@@ -134,7 +151,7 @@ pub struct TypedAst {
     pub resolved_pattern_var: HashMap<PatternId, TypeVarId>,
 
     pub resolved_impl_self_type: HashMap<ExprId, TypeId>,
-    pub resolved_type_instantian_not_a_tuple: HashSet<ExprId>,
+    pub resolved_type_instantian: HashMap<ExprId, ResolvedTypeInstantiation>,
     pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
     
     pub resolved_tuple_arr_length: HashMap<ExprId, usize>,
@@ -218,6 +235,13 @@ pub enum ResolvedMemberAccess {
     EnumWithNoData { i: usize }  // Option.None
 }
 
+#[derive(Debug)]
+pub enum ResolvedTypeInstantiation {
+    NewType,
+    Tuple,
+    EnumVariant(usize),
+}
+
 impl TypeChecker<'_> {
     pub fn start(error_data: &mut ProgramErrorData, ast: &AstArena) -> (TypedAst, FunctionRegistry) {
         let mut tc = TypeChecker {
@@ -226,6 +250,7 @@ impl TypeChecker<'_> {
             var_scopes: vec![TypeVarScope::default()],
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
+            enum_specialization: Vec::new(),
             type_impls: HashMap::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
@@ -327,6 +352,60 @@ impl TypeChecker<'_> {
                     }
                 } else {
                     mismatch = true;
+                }
+            }
+
+            (Type::Enum(a_id, a_spec), Type::Enum(b_id, b_spec)) => {
+                if a_id != b_id {
+                    mismatch = true;
+                } else {
+                    let enum_spec_a = self.enum_specialization[a_spec.0 as usize];
+                    let enum_spec_b = self.enum_specialization[b_spec.0 as usize];
+
+                    let merged_result = match (enum_spec_a, enum_spec_b) {
+                        // Nothing means that it wasn't unified yet => just adopt the other
+                        (EnumSpecialization::NothingYet, other)
+                        | (other, EnumSpecialization::NothingYet) => Some(other),
+
+                        // --- SOFT SPECIALIZATIONS ---
+                        // two soft specializations of the same variant stay specialized!
+                        // otherwise it turns into `Multiple`
+                        // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
+                        (EnumSpecialization::Specialized(x), EnumSpecialization::Specialized(y)) => {
+                            if x == y { Some(EnumSpecialization::Specialized(x)) } 
+                            else { Some(EnumSpecialization::Multiple) }
+                        }
+                        
+                        // --- HARD SPECIALIZATIONS ---
+                        // Hard specializations CAN'T upcast.
+                        // they have to either meet the same variant or a Nothing, otherwise WoOOPs error.
+                        (EnumSpecialization::HardSpecialized(x), EnumSpecialization::HardSpecialized(y)) => {
+                            (x == y).then(|| EnumSpecialization::HardSpecialized(x))
+                        }
+
+                        (EnumSpecialization::HardSpecialized(hard), EnumSpecialization::Specialized(soft))
+                        | (EnumSpecialization::Specialized(soft), EnumSpecialization::HardSpecialized(hard)) => {
+                            // upgrading soft => hard is fine, IF they are the same variant.
+                            (soft == hard).then(|| EnumSpecialization::HardSpecialized(hard))
+                        }
+
+                        // Hard <=> Multiple is an error
+                        (EnumSpecialization::Multiple, EnumSpecialization::HardSpecialized(_)) |
+                        (EnumSpecialization::HardSpecialized(_), EnumSpecialization::Multiple) => None,
+
+
+                        // Multiple with anything else just stays Multiple
+                        (EnumSpecialization::Multiple, _) | (_, EnumSpecialization::Multiple) => {
+                            Some(EnumSpecialization::Multiple)
+                        }
+                    };
+
+                    if let Some(new_spec) = merged_result {
+                        self.enum_specialization[a_spec.0 as usize] = new_spec;
+                        self.enum_specialization[b_spec.0 as usize] = new_spec;
+                    } else {
+                        mismatch = true;
+                    }
                 }
             }
 
@@ -449,7 +528,7 @@ impl TypeChecker<'_> {
 
             // simple types don't need zonking
             Type::Num | Type::Str | Type::Bool | Type::Void | Type::Never
-            | Type::MetaType | Type::Error | Type::Enum(_) => id
+            | Type::MetaType | Type::Error | Type::Enum(_, _) => id
         };
 
         // resize the cache dynamically, because `self.type_arena.add_type()` might have added stuff

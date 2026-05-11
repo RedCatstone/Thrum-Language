@@ -139,6 +139,8 @@ pub enum ErrType {
     TyperExpectedTypeIsntAnEnum { typ: Type },
     #[display("Enum {enum_} doesn't have variant: .{variant}")]
     TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },
+    #[display("Enum variant .{variant} requires data.")]
+    TyperVariantRequiresData { variant: String },
 
     #[display("Runtime values aren't allowed in impl-blocks.")]
     TyperRuntimeValuesArentAllowedInImplBlocks,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::{
-    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{EnumSpecialization, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -255,7 +255,8 @@ impl<'ast> TypeChecker<'ast> {
                     }
                     self.typed_ast.resolved_enum_variant_pattern.insert(pattern, (enum_id, variant_index));
 
-                    expected_type.unwrap()
+                    // return a new soft-specialized enum type
+                    self.make_wrapped_enum_specialized(expected_type.unwrap(), EnumSpecialization::Specialized(variant_index))
                 } else {
                     TypeId::ERROR
                 }

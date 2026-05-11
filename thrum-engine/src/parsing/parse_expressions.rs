@@ -126,7 +126,8 @@ impl Parser<'_> {
             TokenKind::Dot => {
                 // supports both x.member and x.2
                 let member = self.expect_identifier_relaxed("to name the member");
-                self.add_expr(start, Expr::MemberAccess { left: left_expr, member })
+                let member_expr = self.add_expr(start, Expr::MemberAccess { left: left_expr, member });
+                self.wrap_in_optional_type_instantiation(member_expr)
             },
 
             TokenKind::ColonColon => {
@@ -202,15 +203,7 @@ impl Parser<'_> {
             TokenKind::Identifier => {
                 let name = self.get_from_source(op.span).to_string();
                 let name_expr = self.add_expr(start, Expr::IdentifierRef { name, mutable: false });
-
-                // Number{ 3 } is only allowed if there is no whitespace after 'Number'
-                if self.peek_spaces_before() == 0 && self.optional_token(TokenKind::LeftBrace) {
-                    let data = self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace);
-                    
-                    self.add_expr(start, Expr::TypeInstantiation { typ: name_expr, data })
-                } else {
-                    name_expr
-                }
+                self.wrap_in_optional_type_instantiation(name_expr)
             }
 
             TokenKind::Mut => {
@@ -527,6 +520,18 @@ impl Parser<'_> {
         });
 
         AstEnumExpression { variant_name, attached_tuple }
+    }
+
+    fn wrap_in_optional_type_instantiation(&mut self, wrap: ExprId) -> ExprId {
+        // Number{ 3 } is only allowed if there is no space after 'Number'
+        if self.peek_spaces_before() == 0 && self.optional_token(TokenKind::LeftBrace) {
+            let data = self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace);
+            
+            let wrap_span = self.ast.get_expr_span(wrap);
+            self.add_expr(wrap_span, Expr::TypeInstantiation { typ: wrap, data })
+        } else {
+            wrap
+        }
     }
 
 

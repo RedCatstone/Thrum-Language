@@ -4,11 +4,13 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, AstIds, Expr, ExprId},
-    typing::{EnumDefinition, EnumId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
+    typing::{EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
 
+/// The current scope
+/// `let x = 5` would insert "x"
 #[derive(Default)]
 pub struct TypeVarScope<'a> {
     pub scope: HashMap<&'a str, TypeVarId>,
@@ -23,12 +25,13 @@ pub struct TypeVar {
 
     pub declared_at: Span,  // Source code location - for error messages
     pub is_declared_mut: bool,
-    pub is_init: MemState,
+    pub is_init: TypeVarMemState,
     pub const_val: TypeVarConstVal,
 
-    pub is_used: bool,
-    pub is_used_mut: bool,
+    // unused variables warnings
+    pub is_used: TypeVarIsUsed,
 
+    // borrow counting
     pub immut_borrows_count: usize,
     pub mut_borrows_count: usize,
 }
@@ -44,18 +47,23 @@ pub enum TypeVarConstVal {
     Evaluated(RuntimeValue),
 }
 
+/// This enum tracks if a `TypeVar` is initialized or not.
+/// 
+/// Maybe happens when one if-branch initializes a var and the other branch doesnt.\
+/// (`NotInit` / `Moved`) and (`MaybeInit` / `MaybeMoved`) are effectively the same, just for different error messages
 #[derive(Clone, Copy, Debug)]
-pub enum MemState {
+pub enum TypeVarMemState {
     NotInit, Init, MaybeInit,
     Moved, MaybeMoved,
 }
 
+#[derive(Clone, Debug)]
+pub enum TypeVarIsUsed {
+    No, Immut, Mut
+}
 
-pub type SnapshotVarsState = HashMap<TypeVarId, MemState>;
-// pub struct SnapshotVar {
-//     init: MemState,
-//     moved: bool
-// }
+
+pub type SnapshotVarsState = HashMap<TypeVarId, TypeVarMemState>;
 
 
 impl<'ast> TypeChecker<'ast> {
@@ -78,9 +86,8 @@ impl<'ast> TypeChecker<'ast> {
             name: name.to_string(),
             declared_at: span,
             is_declared_mut: mutable,
-            is_init: if is_init { MemState::Init } else { MemState::NotInit },
-            is_used: false,
-            is_used_mut: false,
+            is_init: if is_init { TypeVarMemState::Init } else { TypeVarMemState::NotInit },
+            is_used: TypeVarIsUsed::No,
             immut_borrows_count: 0,
             mut_borrows_count: 0,
         };
@@ -162,9 +169,9 @@ impl<'ast> TypeChecker<'ast> {
                         (variant_name.clone(), attached_tuple_type)
                     }).collect();
 
-                let enum_id = self.typed_ast.enum_defs.len();
-                let enum_type = self.type_arena.add_type(Type::Enum(EnumId(enum_id.try_into().unwrap())));
-                self.typed_ast.enum_defs.push(EnumDefinition { variants });
+                let enum_id = self.add_enum_def(EnumDefinition { variants });
+                let enum_spec_id = self.add_enum_specialization(EnumSpecialization::NothingYet);
+                let enum_type = self.type_arena.add_type(Type::Enum(enum_id, enum_spec_id));
                 
                 Some(RuntimeValue::Type(enum_type))
             }
@@ -179,6 +186,17 @@ impl<'ast> TypeChecker<'ast> {
                 }
             }
         }
+    }
+
+    pub(super) fn add_enum_specialization(&mut self, spec: EnumSpecialization) -> EnumSpecializationId {
+        let id = EnumSpecializationId(self.enum_specialization.len().try_into().unwrap());
+        self.enum_specialization.push(spec);
+        id
+    }
+    fn add_enum_def(&mut self, def: EnumDefinition) -> EnumId {
+        let id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
+        self.typed_ast.enum_defs.push(def);
+        id
     }
 
 
@@ -275,6 +293,12 @@ impl<'ast> TypeChecker<'ast> {
             var.immut_borrows_count += 1;
         }
 
+        if mutable {
+            var.is_used = TypeVarIsUsed::Mut;
+        } else if let TypeVarIsUsed::No = var.is_used {
+            var.is_used = TypeVarIsUsed::Immut;
+        }
+
         self.type_arena.add_type(Type::Borrow { mutable, inner, borrows_var: Some(var_id) })
     }
 
@@ -283,17 +307,16 @@ impl<'ast> TypeChecker<'ast> {
         let var = self.typed_ast.get_var_mut(var_id);
         let mut errors = Vec::new();
         
-        var.is_used = true;
-        var.is_used_mut = true;
+        var.is_used = TypeVarIsUsed::Mut;
 
         if !var.is_declared_mut {
             match var.is_init {
-                MemState::NotInit => { /* perfectly fine, do nothing */ },
-                MemState::MaybeInit => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
-                MemState::Init | MemState::MaybeMoved | MemState::Moved => errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.clone() })
+                TypeVarMemState::NotInit => { /* perfectly fine, do nothing */ },
+                TypeVarMemState::MaybeInit => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+                TypeVarMemState::Init | TypeVarMemState::MaybeMoved | TypeVarMemState::Moved => errors.push(ErrType::TyperVarIsntDeclaredMut { var: var.clone() })
             }
         }
-        var.is_init = MemState::Init;  // if variable was moved, doing `a = ...` unmoves it again.
+        var.is_init = TypeVarMemState::Init;  // if variable was moved, doing `a = ...` unmoves it again.
         
         for e in errors { self.error(e, span); }
     }
@@ -303,11 +326,11 @@ impl<'ast> TypeChecker<'ast> {
         let mut errors = Vec::new();
 
         match var.is_init {
-            MemState::Moved      => errors.push(ErrType::TyperCantUseMovedVar            { var: var.clone() }),
-            MemState::NotInit    => errors.push(ErrType::TyperCantUseUninitializedVar    { var: var.clone() }),
-            MemState::MaybeMoved => errors.push(ErrType::TyperCantUseMaybeMovedVar       { var: var.clone() }),
-            MemState::MaybeInit  => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
-            MemState::Init       => { /* perfectly fine, do nothing */ },
+            TypeVarMemState::Moved      => errors.push(ErrType::TyperCantUseMovedVar            { var: var.clone() }),
+            TypeVarMemState::NotInit    => errors.push(ErrType::TyperCantUseUninitializedVar    { var: var.clone() }),
+            TypeVarMemState::MaybeMoved => errors.push(ErrType::TyperCantUseMaybeMovedVar       { var: var.clone() }),
+            TypeVarMemState::MaybeInit  => errors.push(ErrType::TyperCantUseMaybeInitializedVar { var: var.clone() }),
+            TypeVarMemState::Init       => { /* perfectly fine, do nothing */ },
         }
 
         for e in errors { self.error(e, span); }
@@ -316,7 +339,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn move_variable(&mut self, var_id: TypeVarId, span: Span) {
         self.clone_variable(var_id, span);
         let var = self.typed_ast.get_var_mut(var_id);
-        var.is_init = MemState::Moved;
+        var.is_init = TypeVarMemState::Moved;
     }
 
 
@@ -359,21 +382,21 @@ impl<'ast> TypeChecker<'ast> {
             for branch_snap in branch_snaps.iter().filter_map(|x| x.as_ref()) {
                 let branch_state = branch_snap.get(&original_snap_var_id).unwrap();
 
-                if let MemState::MaybeInit | MemState::MaybeMoved | MemState::Init = branch_state { any_branch_init = true; }
-                if let MemState::MaybeInit | MemState::MaybeMoved | MemState::Moved | MemState::NotInit = branch_state { all_branches_init = false; }
-                if let MemState::MaybeMoved | MemState::Moved = branch_state { was_moved = true; } 
+                if let TypeVarMemState::MaybeInit | TypeVarMemState::MaybeMoved | TypeVarMemState::Init = branch_state { any_branch_init = true; }
+                if let TypeVarMemState::MaybeInit | TypeVarMemState::MaybeMoved | TypeVarMemState::Moved | TypeVarMemState::NotInit = branch_state { all_branches_init = false; }
+                if let TypeVarMemState::MaybeMoved | TypeVarMemState::Moved = branch_state { was_moved = true; } 
             }
 
             self.typed_ast.get_var_mut(original_snap_var_id).is_init = match (all_branches_init, any_branch_init, was_moved) {
                 // every single branch initialized this var -> var is initialized.
-                (true, true, _) => MemState::Init,
+                (true, true, _) => TypeVarMemState::Init,
 
                 // some branches did, some didn't -> uncertain...
-                (false, true, moved) | (true, false, moved) => if moved { MemState::MaybeMoved } else { MemState::MaybeInit },
+                (false, true, moved) | (true, false, moved) => if moved { TypeVarMemState::MaybeMoved } else { TypeVarMemState::MaybeInit },
 
                 // no branch touched it -> keep NotInit/Moved
-                (false, false, false) => MemState::NotInit,
-                (false, false, true) => MemState::Moved,
+                (false, false, false) => TypeVarMemState::NotInit,
+                (false, false, true) => TypeVarMemState::Moved,
             }
         }
     }
