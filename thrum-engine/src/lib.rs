@@ -2,7 +2,7 @@ use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;
 
-use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::{Type, type_vars::TypeVar}, vm_compiling::RuntimeValue, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::type_vars::TypeVar, vm_compiling::RuntimeValue, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod typing;
@@ -64,13 +64,13 @@ pub enum ErrType {
     ParserNumberParseError,
 
     #[display("Expected type: {expected}, found: {found}")]
-    TyperMismatch { expected: Type, found: Type },
+    TyperMismatch { expected: String, found: String, },
     #[display("Undefined identifier: {name}")]
     TyperUndefinedIdentifier { name: String },
     #[display("Can't infer type {}", typ)]
-    TyperCantInferType { typ: Type },
+    TyperCantInferType { typ: String, },
     #[display("Type {typ} must be known at this point.")]
-    TyperTypeMustBeKnownHere { typ: Type },
+    TyperTypeMustBeKnownHere { typ: String, },
     #[display("Pattern doesn't cover all cases. Missing cases: {remaining}")]
     TyperPatternDoesntCoverAllCases { remaining: String },
     #[display("Pattern can't be reached.")]
@@ -88,10 +88,10 @@ pub enum ErrType {
     #[display("Expected {expected} arguments, found {found}.")]
     TyperWrongNumberOfArguments { expected: usize, found: usize },
     #[display("Can't call a non-function type: {typ}.")]
-    TyperCantCallNonFnType { typ: Type },
+    TyperCantCallNonFnType { typ: String, },
     #[display("member .{member} does not exist on typ: {typ}")]
-    TyperTypeDoesntHaveMember { typ: Type, member: String },
-    #[display("{} is not allowed in patterns.", Type::Never)]
+    TyperTypeDoesntHaveMember { typ: String, member: String },
+    #[display("<never> is not allowed in patterns.")]
     TyperPatternNeverType,
     #[display("All or-patterns must bind the same variables. This pattern binds {}.", slice_to_string(vars, ", "))]
     TyperOrPatternBindsVarsTooMuch { vars: Vec<String> },
@@ -110,21 +110,21 @@ pub enum ErrType {
     #[display("Can't use {var} because it was moved.")]
     TyperCantUseMovedVar { var: TypeVar },
     #[display("Can't dereference non-pointer type: {typ}")]
-    TyperCantDerefNonPointerType { typ: Type },
+    TyperCantDerefNonPointerType { typ: String, },
     #[display("Can't deref a non local pointer.")]
     TyperCantDerefUnknownPointerType,
     #[display("Can't index non array type: {typ}")]
-    TyperCantIndexNonArrType { typ: Type },
+    TyperCantIndexNonArrType { typ: String, },
     #[display("Return is only allowed inside functions.")]
     TyperReturnOutsideFunction,
     #[display("Self is only available inside impl-blocks.")]
     TyperSelfOutsideImplBlock,
     #[display("Can't index heterogenous tuple: {typ}")]
-    TyperCantIndexHeterogenousTuple { typ: Type },
+    TyperCantIndexHeterogenousTuple { typ: String, },
     #[display("Can't index empty tuple: {typ}")]
-    TyperCantIndexEmptyTuple { typ: Type },
+    TyperCantIndexEmptyTuple { typ: String, },
     #[display("Must be a customtype, found: {typ}")]
-    TyperMustBeCustomtypeType { typ: Type },
+    TyperMustBeCustomtypeType { typ: String, },
     #[display("New-types expect exactly one unlabeled expr.")]
     TyperNewTypesExpectOneUnlabeledExpr,
 
@@ -136,9 +136,9 @@ pub enum ErrType {
     TyperConstNameAlreadyExists { name: String },
 
     #[display("Expected type is not an enum: {typ}. Can't infer the enum variant here.")]
-    TyperExpectedTypeIsntAnEnum { typ: Type },
+    TyperExpectedTypeIsntAnEnum { typ: String, },
     #[display("Enum {enum_} doesn't have variant: .{variant}")]
-    TyperEnumDoesntHaveVariant { enum_: Type, variant: Box<str> },
+    TyperEnumDoesntHaveVariant { enum_: String, variant: Box<str> },
     #[display("Enum variant .{variant} requires data.")]
     TyperVariantRequiresData { variant: String },
 

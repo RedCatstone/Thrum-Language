@@ -81,7 +81,7 @@ impl<'ast> TypeChecker<'ast> {
 
                 // we need to split the expected type up, and pass that
                 let expected_elems = expected_type.and_then(|exp| {
-                    match self.prune_type_once(exp, None) {
+                    match self.prune_type_once(exp) {
                         Type::Tup(fields) => Some(fields),
                         _ => None
                     }
@@ -105,13 +105,12 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 covered_cases = PatternSpace::tuple_cartesian_product(&tuple_covered_cases);
-                let typ = Type::Tup(tuple_types);
+                let typ = self.type_arena.add_type(Type::Tup(tuple_types));
 
                 if mismatch {
-                    let expected = self.prune_type_once(expected_type.unwrap(), None);
-                    self.type_mismatch(expected, typ, span)
+                    self.type_mismatch(expected_type.unwrap(), typ, span)
                 } else {
-                    self.type_arena.add_type(typ)
+                    typ
                 }
             }
 
@@ -189,10 +188,10 @@ impl<'ast> TypeChecker<'ast> {
             Pattern::TypeDestructor { typ, data } => {
                 // basically copy-pasted from check_expressions.rs `Expr::TypeInstantiation`
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
-                match self.prune_type_once(meta_id, Some(span)) {
+                match self.prune_type_once_infer_err(meta_id, span) {
                     Type::CustomType(inner_new_type) => {
 
-                        match self.prune_type_once(inner_new_type, Some(span)) {
+                        match self.prune_type_once_infer_err(inner_new_type, span) {
                             Type::Error => TypeId::ERROR,
                             Type::Tup(_) => {
                                 // if it expects a tuple, e.g. `type Point = { num, num }`
@@ -226,7 +225,7 @@ impl<'ast> TypeChecker<'ast> {
                         meta_id
                     }
                     Type::Error => TypeId::ERROR,
-                    t => self.error(ErrType::TyperMustBeCustomtypeType { typ: t }, self.ast.get_expr_span(*typ))
+                    _ => self.error(ErrType::TyperMustBeCustomtypeType { typ: self.fmt_type(meta_id) }, self.ast.get_expr_span(*typ))
                 }
             }
 
@@ -293,8 +292,7 @@ impl<'ast> TypeChecker<'ast> {
                 // PlacePointer can never fail, so any case is covered here now.
                 covered_cases.push(PatternSpace::All);
 
-                let pruned_expr = self.prune_type_once(expr_type, Some(span));
-                match pruned_expr {
+                match self.prune_type_once_infer_err(expr_type, span) {
                     Type::Borrow { inner, mutable: true, borrows_var } => {
                         if let Some(x) = borrows_var {
                             self.update_variable(x, span);
@@ -302,9 +300,10 @@ impl<'ast> TypeChecker<'ast> {
                         inner
                     }
                     Type::Error => TypeId::ERROR,
-                    _ => self.type_mismatch(
-                        Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: None }, pruned_expr, span
-                    )
+                    _ => {
+                        let err_borrow = self.type_arena.add_type(Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: None });
+                        self.type_mismatch(err_borrow, expr_type, span)
+                    }
                 }
             }
 
@@ -351,9 +350,9 @@ impl<'ast> TypeChecker<'ast> {
         match val {
             RuntimeValue::Type(id) => id,
             RuntimeValue::Tup(elems) => {
-                let typ = self.prune_type_once(expected_type, None);
+                let typ = self.prune_type_once(expected_type);
                 let Type::Tup(expected_tup) = typ else {
-                    unreachable!("type mismatch at runtime!? {typ}")
+                    unreachable!("type mismatch at runtime!? {}", self.fmt_type(expected_type))
                 };
 
                 let meta_elems = elems.into_iter()
@@ -367,7 +366,7 @@ impl<'ast> TypeChecker<'ast> {
 
                 self.type_arena.add_type(Type::Tup(meta_elems))
             }
-            _ => unreachable!("not a meta type?! {val} \nexpected: {}", self.type_arena.get_type(expected_type))
+            _ => unreachable!("not a meta type?! {val} \nexpected: {}", self.fmt_type(expected_type))
         }
     }
 

@@ -431,6 +431,22 @@ fn enum_impl_test() {
     ", RuntimeValue::Bool(true));
 }
 
+#[test]
+fn enum_impl_test_2() {
+    test!("
+        const Option = enum { None, Some(num) }
+        impl Option {
+            fn is_some(self: Self) -> bool {
+                self^ is .Some(_)
+            }
+        }
+
+        Option.Some{ 3 } is .Some(_)
+        and Option.Some{ 3 }.is_some()
+        and !Option.None.is_some()
+    ", RuntimeValue::Bool(true));
+}
+
 
 #[test]
 fn random_examples() {

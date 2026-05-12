@@ -1,4 +1,4 @@
-use thrum_engine::{ErrType, lexing::tokens::{AssignOp, TokenKind}, typing::{Type, TypeInferId}};
+use thrum_engine::{ErrType, lexing::tokens::{AssignOp, TokenKind}};
 mod common;
 
 
@@ -37,7 +37,7 @@ fn typecheck_var_errors() {
 #[test]
 fn type_mismatch_errors() {
     test_err!("if true { 1 } else { (1,) }", ErrType::TyperMismatch { .. });
-    test_err!("let x: num = true", ErrType::TyperMismatch { expected: Type::Num, found: Type::Bool });
+    test_err!("let x: num = true", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is (1, 2, 3)", ErrType::TyperMismatch { .. });
 
     // operators
@@ -61,7 +61,7 @@ fn typecheck_misc_errors() {
     test_err!("return", ErrType::TyperReturnOutsideFunction);
     test_err!("Self", ErrType::TyperSelfOutsideImplBlock);
 
-    test_err!("let x", ErrType::TyperCantInferType { typ: Type::Infer(TypeInferId(0)) });
+    test_err!("let x", ErrType::TyperCantInferType { .. });
 }
 
 #[test]

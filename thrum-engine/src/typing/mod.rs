@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, fmt::{self, Write}};
 use derive_more::Display;
 
 use crate::{
     ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
-    parsing::ast::{AstArena, AstIds, ExprId, PatternId}, pretty_printing::{slice_to_debug_string, slice_to_string},
+    parsing::ast::{AstArena, AstIds, ExprId, PatternId},
     typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, RuntimeValue}
 };
 
@@ -13,49 +13,35 @@ mod check_patterns;
 mod exhaustiveness;
 
 
-#[derive(Debug, Display, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Type {
-    #[display("num")]
     Num,
-    #[display("str")]
     Str,
-    #[display("bool")]
     Bool,
 
-    // 0-bit type
-    #[display("void")]
+    /// 0-bit type
     Void,
-    // something that never happens at runtime
-    // e.g. the type of return, break, continue
-    #[display("never")]
+    /// something that never happens at runtime
+    /// e.g. the type of (return, break, continue)-exprs
     Never,
 
-    #[display("type")]
+    /// `const X = bool`, X has type `MetaType`
     MetaType,
 
-    #[display("enum<{_0:?}>")]
-    Enum(EnumId, EnumSpecializationId),
-
-    #[display("customtype<{_0:?}>")]
+    Enum(EnumId, Option<EnumSpecializationId>),
     CustomType(TypeId),
 
-    // Nested
-    #[display("tup<{}>", slice_to_string(_0, ", "))]
     Tup(Vec<TypeTuple>),
-    #[display("tupArr<{_0:?}; {_1}>")]
     TupArr(TypeId, usize),
 
-    #[display("|{} -> {return_type:?}", slice_to_debug_string(param_types, ", "))]
     Fn { param_types: Vec<TypeId>, return_type: TypeId },
 
-    #[display("{}ref {borrows_var:?} {inner:?}", if *mutable { "mut" } else { "" })]
     Borrow { inner: TypeId, mutable: bool, borrows_var: Option<TypeVarId> },
 
-    #[display("?{}", _0.0)]
     Infer(TypeInferId),
-    #[display("error")]
     Error,
 }
+
 #[derive(Debug, Display, Clone, Eq, Hash, PartialEq)]
 #[display("{label}: {typ:?}")]
 pub struct TypeTuple {
@@ -65,8 +51,6 @@ pub struct TypeTuple {
 
 #[derive(Debug, Clone, Copy)]
 pub enum EnumSpecialization {
-    /// enum type was just initalized, e.g. `let x: Option`
-    NothingYet,
     /// "currently" its this variant. could change though
     Specialized(usize),
     /// always this exact variant. `e.g. fn handle_some(x: Option.Some)`
@@ -279,8 +263,11 @@ impl TypeChecker<'_> {
     }
 
     #[track_caller]
-    fn type_mismatch(&mut self, expected: Type, found: Type, span: Span) -> TypeId {
-        self.error(ErrType::TyperMismatch { expected, found }, span)
+    fn type_mismatch(&mut self, expected: TypeId, found: TypeId, span: Span) -> TypeId {
+        self.error(ErrType::TyperMismatch {
+            expected: self.fmt_type(expected),
+            found: self.fmt_type(found)
+        }, span)
     }
 
     pub fn new_infer_type(&mut self) -> TypeId {
@@ -288,8 +275,9 @@ impl TypeChecker<'_> {
         self.inference_types.push(None);  // unresolved initially
         self.type_arena.add_type(Type::Infer(id))
     }
-
-    pub fn prune_id_once(&mut self, id: TypeId) -> TypeId {
+    
+    #[must_use]
+    pub fn prune_id_once(&self, id: TypeId) -> TypeId {
         let mut current_id = id;
         while let Type::Infer(infer_id) = self.type_arena.types[current_id.0 as usize] {
             if let Some(resolved_id) = self.inference_types[infer_id.0 as usize] {
@@ -298,11 +286,16 @@ impl TypeChecker<'_> {
         }
         current_id
     }
-    pub fn prune_type_once(&mut self, id: TypeId, err_span: Option<Span>) -> Type {
+    #[must_use]
+    pub fn prune_type_once(&self, id: TypeId) -> Type {
         let id = self.prune_id_once(id);
-        let typ = self.type_arena.types[id.0 as usize].clone();
-        if let Some(span) = err_span && let Type::Infer(_) = typ {
-            self.error(ErrType::TyperTypeMustBeKnownHere { typ }, span);
+        self.type_arena.get_type(id)
+    }
+    #[must_use]
+    pub fn prune_type_once_infer_err(&mut self, id: TypeId, err_span: Span) -> Type {
+        let typ = self.prune_type_once(id);
+        if let Type::Infer(_) = typ {
+            self.error(ErrType::TyperTypeMustBeKnownHere { typ: self.fmt_type(id) }, err_span);
             Type::Error
         } else {
             typ
@@ -323,7 +316,7 @@ impl TypeChecker<'_> {
 
         assert!(a != b, "only equal after?");
 
-        match (a.clone(), b.clone()) {            
+        match (a, b) {            
             // if one is an inference variable, bind it to the other type.
             (Type::Infer(id), _) => self.inference_types[id.0 as usize] = Some(id_b),
             (_, Type::Infer(id)) => self.inference_types[id.0 as usize] = Some(id_a),
@@ -356,55 +349,54 @@ impl TypeChecker<'_> {
             }
 
             (Type::Enum(a_id, a_spec), Type::Enum(b_id, b_spec)) => {
+                #[allow(clippy::if_not_else, reason = "clippy wants to obscure the error path :(")]
                 if a_id != b_id {
                     mismatch = true;
                 } else {
-                    let enum_spec_a = self.enum_specialization[a_spec.0 as usize];
-                    let enum_spec_b = self.enum_specialization[b_spec.0 as usize];
+                    // if both are actually an instance of an enum, and not just the enum type
+                    // (otherwise just do nothing, its fine)
+                    if let (Some(spec_id_a), Some(spec_id_b)) = (a_spec, b_spec) {
+                        let enum_spec_a = self.enum_specialization[spec_id_a.0 as usize];
+                        let enum_spec_b = self.enum_specialization[spec_id_b.0 as usize];
 
-                    let merged_result = match (enum_spec_a, enum_spec_b) {
-                        // Nothing means that it wasn't unified yet => just adopt the other
-                        (EnumSpecialization::NothingYet, other)
-                        | (other, EnumSpecialization::NothingYet) => Some(other),
+                        let merged_result = match (enum_spec_a, enum_spec_b) {
+                            // --- SOFT SPECIALIZATIONS ---
+                            // two soft specializations of the same variant stay specialized!
+                            // otherwise it turns into `Multiple`
+                            // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
+                            (EnumSpecialization::Specialized(x), EnumSpecialization::Specialized(y)) => {
+                                if x == y { Some(EnumSpecialization::Specialized(x)) } 
+                                else { Some(EnumSpecialization::Multiple) }
+                            }
+                            
+                            // --- HARD SPECIALIZATIONS ---
+                            // Hard specializations have to meet the same variant, otherwise WoOOPs error.
+                            (EnumSpecialization::HardSpecialized(x), EnumSpecialization::HardSpecialized(y)) => {
+                                (x == y).then_some(EnumSpecialization::HardSpecialized(x))
+                            }
+    
+                            (EnumSpecialization::HardSpecialized(hard), EnumSpecialization::Specialized(soft))
+                            | (EnumSpecialization::Specialized(soft), EnumSpecialization::HardSpecialized(hard)) => {
+                                // upgrading soft => hard is fine, IF they are the same variant.
+                                (soft == hard).then_some(EnumSpecialization::HardSpecialized(hard))
+                            }
+    
+                            // Hard <=> Multiple is an error
+                            (EnumSpecialization::Multiple, EnumSpecialization::HardSpecialized(_)) |
+                            (EnumSpecialization::HardSpecialized(_), EnumSpecialization::Multiple) => None,
 
-                        // --- SOFT SPECIALIZATIONS ---
-                        // two soft specializations of the same variant stay specialized!
-                        // otherwise it turns into `Multiple`
-                        // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
-                        (EnumSpecialization::Specialized(x), EnumSpecialization::Specialized(y)) => {
-                            if x == y { Some(EnumSpecialization::Specialized(x)) } 
-                            else { Some(EnumSpecialization::Multiple) }
+                            // Multiple with anything else just stays Multiple
+                            (EnumSpecialization::Multiple, _) | (_, EnumSpecialization::Multiple) => {
+                                Some(EnumSpecialization::Multiple)
+                            }
+                        };
+
+                        if let Some(new_spec) = merged_result {
+                            self.enum_specialization[spec_id_a.0 as usize] = new_spec;
+                            self.enum_specialization[spec_id_b.0 as usize] = new_spec;
+                        } else {
+                            mismatch = true;
                         }
-                        
-                        // --- HARD SPECIALIZATIONS ---
-                        // Hard specializations CAN'T upcast.
-                        // they have to either meet the same variant or a Nothing, otherwise WoOOPs error.
-                        (EnumSpecialization::HardSpecialized(x), EnumSpecialization::HardSpecialized(y)) => {
-                            (x == y).then(|| EnumSpecialization::HardSpecialized(x))
-                        }
-
-                        (EnumSpecialization::HardSpecialized(hard), EnumSpecialization::Specialized(soft))
-                        | (EnumSpecialization::Specialized(soft), EnumSpecialization::HardSpecialized(hard)) => {
-                            // upgrading soft => hard is fine, IF they are the same variant.
-                            (soft == hard).then(|| EnumSpecialization::HardSpecialized(hard))
-                        }
-
-                        // Hard <=> Multiple is an error
-                        (EnumSpecialization::Multiple, EnumSpecialization::HardSpecialized(_)) |
-                        (EnumSpecialization::HardSpecialized(_), EnumSpecialization::Multiple) => None,
-
-
-                        // Multiple with anything else just stays Multiple
-                        (EnumSpecialization::Multiple, _) | (_, EnumSpecialization::Multiple) => {
-                            Some(EnumSpecialization::Multiple)
-                        }
-                    };
-
-                    if let Some(new_spec) = merged_result {
-                        self.enum_specialization[a_spec.0 as usize] = new_spec;
-                        self.enum_specialization[b_spec.0 as usize] = new_spec;
-                    } else {
-                        mismatch = true;
                     }
                 }
             }
@@ -441,7 +433,7 @@ impl TypeChecker<'_> {
         }
         
         if mismatch {
-            self.type_mismatch(a, b, span);
+            self.type_mismatch(expected, other, span);
         }
     }
 
@@ -453,6 +445,88 @@ impl TypeChecker<'_> {
             first
         } else {
             self.new_infer_type()
+        }
+    }
+
+
+    /// creates the string and starts the formatting
+    pub(super) fn fmt_type(&self, typ: TypeId) -> String {
+        let mut s = String::new();
+        self.write_type(typ, &mut s).unwrap();
+        s
+    }
+
+    fn write_type(&self, id: TypeId, s: &mut String) -> fmt::Result {
+        match self.type_arena.get_type(self.prune_id_once(id)) {
+            Type::Num => write!(s, "num"),
+            Type::Str => write!(s, "str"),
+            Type::Bool => write!(s, "bool"),
+            Type::Void => write!(s, "void"),
+            Type::Never => write!(s, "never"),
+            Type::MetaType => write!(s, "type"),
+            Type::Error => write!(s, "error"),
+            Type::Infer(infer) => write!(s, "?{}", infer.0),
+
+            Type::Enum(enum_id, spec_note) => {
+                write!(s, "enum<{enum_id:?}")?;
+                
+                if let Some(note) = spec_note {
+                    match self.enum_specialization[note.0 as usize] {
+                        EnumSpecialization::Multiple => write!(s, ", Multiple")?,
+                        EnumSpecialization::Specialized(i) => write!(s, ", Soft({i})")?,
+                        EnumSpecialization::HardSpecialized(i) => write!(s, ", Hard({i})")?,
+                    }
+                }
+                write!(s, ">")
+            }
+
+            Type::CustomType(inner) => {
+                write!(s, "customtype<")?;
+                self.write_type(inner, s)?;
+                write!(s, ">")
+            }
+
+            Type::Tup(elems) => {
+                write!(s, "tup<")?;
+                for (i, elem) in elems.into_iter().enumerate() {
+                    if i > 0 { write!(s, ", ")?; }
+                    
+                    // Only print the label if it isn't an auto-generated number label
+                    if !elem.label.as_bytes()[0].is_ascii_digit() {
+                        write!(s, "{}: ", elem.label)?;
+                    }
+                    self.write_type(elem.typ, s)?;
+                }
+                write!(s, ">")
+            }
+
+            Type::TupArr(inner, length) => {
+                write!(s, "tupArr<")?;
+                self.write_type(inner, s)?;
+                write!(s, "; {length}>")
+            }
+
+            Type::Fn { param_types, return_type } => {
+                write!(s, "|")?;
+                for (i, param) in param_types.into_iter().enumerate() {
+                    if i > 0 { write!(s, ", ")?; }
+                    self.write_type(param, s)?;
+                }
+                write!(s, " -> ")?;
+                self.write_type(return_type, s)
+            }
+
+            Type::Borrow { inner, mutable, borrows_var } => {
+                if mutable {
+                    write!(s, "mut ")?;
+                }
+                write!(s, "ref")?;
+                if let Some(var) = borrows_var {
+                    write!(s, " {}", self.typed_ast.get_var(var).name)?;
+                }
+                write!(s, " ")?;
+                self.write_type(inner, s)
+            }
         }
     }
 
@@ -496,7 +570,7 @@ impl TypeChecker<'_> {
                     // resolved! keep recursively zonking.
                     self.zonk_type(resolved_id, span, cache)
                 } else {
-                    self.error(ErrType::TyperCantInferType { typ }, span)
+                    self.error(ErrType::TyperCantInferType { typ: self.fmt_type(id) }, span)
                 }
             }
 

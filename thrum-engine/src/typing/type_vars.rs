@@ -170,8 +170,7 @@ impl<'ast> TypeChecker<'ast> {
                     }).collect();
 
                 let enum_id = self.add_enum_def(EnumDefinition { variants });
-                let enum_spec_id = self.add_enum_specialization(EnumSpecialization::NothingYet);
-                let enum_type = self.type_arena.add_type(Type::Enum(enum_id, enum_spec_id));
+                let enum_type = self.type_arena.add_type(Type::Enum(enum_id, None));
                 
                 Some(RuntimeValue::Type(enum_type))
             }

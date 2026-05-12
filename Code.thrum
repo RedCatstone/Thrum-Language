@@ -1,14 +1,16 @@
-const Option = enum { None, Some(num) }
+type Option = enum { None, Some(num) }
 impl Option {
     fn is_some(self: Self) -> bool {
         self^ is .Some(_)
     }
+    fn is_none(self: Self) -> bool {
+        self^ is .None
+    }
 }
 
 Option.Some{ 3 } is .Some(_)
-&&
-Option.Some{ 3 }.is_some()
-
+and Option.Some{ 3 }.is_some()
+and !Option.None.is_some()
 
 
 // const Option = enum { None, Some(num) }
