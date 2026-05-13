@@ -146,6 +146,8 @@ pub enum ErrType {
     TyperRuntimeValuesArentAllowedInImplBlocks,
     #[display("Expected a const, found a runtime value: {name}")]
     TyperExpectedConstFoundRuntimeValue { name: String },
+    #[display("impl can only be used on custom types, found: {typ}")]
+    TyperCantImplNonCustomType { typ: String },
 
     // #[display("Can't borrow because already borrowed mutably.")]
     // TyperCantBorrowBecauseAlreadyBorrowedMut,

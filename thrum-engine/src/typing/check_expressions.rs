@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    typing::{CustomTypeId, EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -413,27 +413,31 @@ impl TypeChecker<'_> {
                 let callee_type = self.check_expression(*callee, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
                 let callee_span = self.ast.get_expr_span(*callee);
 
-                let mut call_param_types = Vec::new();
-
-                // `4.square()` is sugar for `u32.square(4)`, this handles that:
-                if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
-                    call_param_types.push(self.typed_ast.get_expr_type(*self_sugar_expr));
-                }
-
-                for &arg in arguments {
-                    call_param_types.push(self.check_expression(arg, is_never, &ctx));
-                }
-
                 match self.prune_type_once_infer_err(callee_type, callee_span) {
                     Type::Fn { param_types, return_type } => {
-                        if param_types.len() == call_param_types.len() {
-                            for (param_type, arg_type) in param_types.into_iter().zip(call_param_types) {
-                                self.unify_types(param_type, arg_type, callee_span);
+                        
+                        // `4.square()` is sugar for `u32.square(4)`, this handles that:
+                        let extra_arg = 
+                        if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
+                            let first_arg_type = self.typed_ast.get_expr_type(*self_sugar_expr);
+                            if let Some(first_param) = param_types.first() {
+                                self.unify_types(*first_param, first_arg_type, self.ast.get_expr_span(*self_sugar_expr));
+                                // if there isn't a first param it will error on the arg_count check anyways
                             }
-                            return_type
+                            1
                         } else {
-                            self.error(ErrType::TyperWrongNumberOfArguments { expected: param_types.len(), found: call_param_types.len() }, span)
+                            0
+                        };
+
+                        if param_types.len() == arguments.len() + extra_arg {
+                            for (param_type, arg) in param_types[extra_arg..].iter().zip(arguments) {
+                                self.check_expression(*arg, is_never, &ctx.expect(*param_type));
+                            }
+                        } else {
+                            self.error(ErrType::TyperWrongNumberOfArguments { expected: param_types.len(), found: arguments.len() + extra_arg }, span);
                         }
+
+                        return_type
                     }
                     Type::Error => TypeId::ERROR,
                     _ => self.error(ErrType::TyperCantCallNonFnType { typ: self.fmt_type(callee_type) }, callee_span)
@@ -451,7 +455,7 @@ impl TypeChecker<'_> {
 
             Expr::EnumVariant { data: AstEnumExpression { variant_name, attached_tuple } } => {
                 // using `.Variant` syntax requires that the Typechecker knows the expected Enumtype.
-                if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(variant_name, old_ctx.expected_type, span) {
+                if let Some((enum_id, variant_index, attached_type, spec_type)) = self.check_enum_variant(variant_name, old_ctx.expected_type, span) {
                     if let Some(tup) = attached_tuple {
                         self.check_expression(*tup, is_never, &ctx.expect(attached_type));
                     } else {
@@ -460,64 +464,66 @@ impl TypeChecker<'_> {
                     }
                     self.typed_ast.resolved_enum_variant.insert(check_expr, (enum_id, variant_index));
 
-                    // return a SOFT specialized enum type!
-                    self.make_wrapped_enum_specialized(old_ctx.expected_type.unwrap(), EnumSpecialization::Specialized(variant_index))
+                    spec_type
                 } else {
                     TypeId::ERROR
                 }
             }
 
-            Expr::TypeInstantiation { typ, data } => 'block: {
+            Expr::TypeInstantiation { typ, data } => {
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
 
+                let (core_id, wrappers) = self.peel_custom_types(meta_id, span);
+                
                 // it needs to peel CustomTypes over and over again until it reaches the core.
                 // if that core is a HardSpecialized Enum, then construct that and put all layers back on.
-                // e.g. `type Opt2 = Option; type Opt3 = Opt2; const X = Opt3.Some; X{ 3 }` should result in something of type Opt3
-                let mut current_peel = meta_id;
-                loop {
-                    match self.prune_type_once(current_peel) {
-                        Type::CustomType(inner) => current_peel = inner,
-                        Type::Enum(enum_id, Some(spec_note)) => {
-                            if let EnumSpecialization::HardSpecialized(i) = self.enum_specialization[spec_note.0 as usize] {
+                // e.g. `type Opt2 = Option; type Opt3 = Opt2; const X = Opt3.Some; X{ 3 }` should result in an Opt3 enum-Some-instance
+                if let Type::Enum(enum_id, Some(spec_note)) = self.prune_type_once(core_id)
+                && let EnumSpecialization::HardSpecialized(i) = self.enum_specialization[spec_note.0 as usize] {
+    
+                    let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[i].1;
+                    self.check_instantiation_payload(attached_type, check_expr, *data, is_never, &ctx);
+                    self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(i));
 
-                                let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[i].1;
-                                self.check_instantiation_payload(attached_type, check_expr, *data, is_never, &ctx);
-                                self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(i));
-
-                                // Return the meta_id, but softly specialized! (Deep Re-wrap)
-                                break 'block self.make_wrapped_enum_specialized(meta_id, EnumSpecialization::Specialized(i))
-                            }
-                            break;
-                        }
-                        _ => break,
-                    }
+                    self.apply_spec_to_enum(enum_id, EnumSpecialization::Specialized(i), &wrappers)
                 }
-
-                match self.prune_type_once_infer_err(meta_id, span) {
-                    Type::CustomType(inner_new_type) => {
-
-                        self.check_instantiation_payload(inner_new_type, check_expr, *data, is_never, &ctx);
-
-                        // `N{ 2 }` returns the type `N`
-                        meta_id
+                else {
+                    match self.prune_type_once_infer_err(meta_id, span) {
+                        Type::CustomType(custom_id, inner_new_type) => {
+    
+                            let inner = self.check_instantiation_payload(inner_new_type, check_expr, *data, is_never, &ctx);
+    
+                            // `N{ 2 }` returns the type `N`
+                            self.type_arena.add_type(Type::CustomType(custom_id, inner))
+                        }
+                        Type::Error => TypeId::ERROR,
+                        _ => self.error(ErrType::TyperMustBeCustomtypeType { typ: self.fmt_type(meta_id) }, self.ast.get_expr_span(*typ))
                     }
-                    Type::Error => TypeId::ERROR,
-                    _ => self.error(ErrType::TyperMustBeCustomtypeType { typ: self.fmt_type(meta_id) }, self.ast.get_expr_span(*typ))
                 }
             }
 
             Expr::ImplBlock { typ, const_exprs } => {
-                self.enter_scope();
                 let meta_type = self.check_annotation_meta_type_id(*typ, true);
-                let backup = self.curr_impl_self.replace(meta_type);
+                
+                if let Type::CustomType(custom_id, _) = self.prune_type_once_infer_err(meta_type, span) {
+                    let self_before = self.curr_impl_self.replace(meta_type);
 
-                self.hoisting_pass(const_exprs, false);
+                    // add the impl-scope as a normal var scope,
+                    // all consts will just end up in there then!1!!
+                    let impl_scope = std::mem::take(&mut self.custom_type_impls[custom_id.0 as usize]);
+                    self.var_scopes.push(impl_scope);
 
-                // steal the scope that was just added
-                let stolen_scope = self.var_scopes.pop().unwrap();
-                self.type_impls.insert(meta_type, stolen_scope);
+                    self.hoisting_pass(const_exprs, false);
 
-                self.curr_impl_self = backup;
+                    // and insert the impl scope back to where it came from
+                    self.custom_type_impls[custom_id.0 as usize] = self.var_scopes.pop().unwrap();
+
+                    // println!("Added impl for type: {}", self.fmt_type(meta_type));
+
+                    self.curr_impl_self = self_before;
+                } else {
+                    self.error(ErrType::TyperCantImplNonCustomType { typ: self.fmt_type(meta_type) }, span);
+                }
 
                 TypeId::VOID
             }
@@ -584,7 +590,7 @@ impl TypeChecker<'_> {
         inferred_type
     }
 
-    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: &CheckExprCtx) {
+    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: &CheckExprCtx) -> TypeId {
         let span = self.ast.get_expr_span(check_expr);
 
         match self.prune_type_once_infer_err(instance_type, span) {
@@ -609,7 +615,7 @@ impl TypeChecker<'_> {
                     self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
                 }
             }
-        };
+        }
     }
 
 
@@ -632,7 +638,7 @@ impl TypeChecker<'_> {
 
         let left_type = self.prune_type_once_infer_err(left, op_span);
 
-        if let Type::CustomType(id) = left_type {
+        if let Type::CustomType(_, id) = left_type {
             // if its a customType, try to unify the inner types for now
             // TODO: make better
             let infixed_type = self.check_infix(op, op_span, id, id);
@@ -844,11 +850,10 @@ impl TypeChecker<'_> {
 
                     if expected_type == Some(TypeId::TYPE) {
                         // if it expects a type, return a hard specialized type.
-                        // e.g. `let x: Option.Some`, this can never be assigned any other enum variants
-                        let spec_note = self.add_enum_specialization(EnumSpecialization::HardSpecialized(i));
-                        let specialized_type = self.type_arena.add_type(Type::Enum(*enum_id, Some(spec_note)));
+                        // e.g. `let x: Option.Some`, this can never be assigned any other enum variants, only .Some{ ... }
+                        let spec_type = self.apply_spec_to_enum(*enum_id, EnumSpecialization::HardSpecialized(i), &[]);
                         
-                        let constant = RuntimeValue::Type(specialized_type);
+                        let constant = RuntimeValue::Type(spec_type);
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant });
 
                         return self.type_arena.add_type(Type::Borrow { inner: TypeId::TYPE, mutable: false, borrows_var: None });
@@ -859,11 +864,9 @@ impl TypeChecker<'_> {
 
                     return if self.prune_type_once(variant_type_id) == Type::Void {
                         // if the variant has no data, return a soft specialized type, e.g. `Option.None`
-                        // soft allows it to smoothly unify with `.Some` later
+                        // soft allows it to unify with `.Some` later
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::EnumWithNoData { i });
-
-                        let spec_note = self.add_enum_specialization(EnumSpecialization::Specialized(i));
-                        self.type_arena.add_type(Type::Enum(*enum_id, Some(spec_note)))
+                        self.apply_spec_to_enum(*enum_id, EnumSpecialization::Specialized(i), &[])
                     } else {
                         // if it has data, error. `Option.Some` without anything extra is invalid
                         self.error(ErrType::TyperVariantRequiresData { variant: member.clone() }, left_span)
@@ -877,7 +880,7 @@ impl TypeChecker<'_> {
 
 
         // if there wasn't any type specific things that matched check the types impls
-        if let Some((constant, typ)) = self.check_type_impl_const(left_type_id, member) {
+        if let Some((constant, typ)) = self.check_type_impl_const(&left_type, member) {
             let resolved = if came_from_meta {
                 // `i32.square(5)`
                 ResolvedMemberAccess::Member { constant }
@@ -892,20 +895,12 @@ impl TypeChecker<'_> {
 
         // if it still didn't find anything, recursively check inner types (if any)
         match left_type {
-            Type::CustomType(custom_inner_id) => {
-                // recursively check for CustomTypes inner
-                let mut resolved_type = self.check_member_access(custom_inner_id, member_expr, came_from_ref, came_from_meta, expected_type);
+            Type::CustomType(custom_id, custom_inner) => {
+                // recursively check member_access for CustomTypes inner
+                let resolved_type = self.check_member_access(custom_inner, member_expr, came_from_ref, came_from_meta, expected_type);
 
-                // Magic wrapping for impl consts
-                // if the resolved_type evaluates to the custom inner type, we lift it back to the CustomType.
-                // e.g.
-                // const N = num
-                // N{ 4 }.square()  // should be lifted to type N
-                if resolved_type == custom_inner_id {
-                    resolved_type = left_type_id;
-                }
-
-                return resolved_type
+                // and if needed wrap it back in the custom_id
+                return self.member_access_magic_wrapping(resolved_type, custom_id, custom_inner, member_expr)
             }
 
             Type::Borrow { inner, mutable, borrows_var } => {
@@ -929,22 +924,16 @@ impl TypeChecker<'_> {
     }
 
 
-    fn check_type_impl_const(&mut self, typ: TypeId, member: &str) -> Option<(RuntimeValue, TypeId)> {
-        let pruned = self.prune_type_once(typ);
-        let check_id = if let Type::Enum(enum_id, Some(_)) = pruned {
-            // it can't lookup a specialized enum, so it has to unspecialize it first.
-            self.type_arena.add_type(Type::Enum(enum_id, None))
-        } else {
-            typ
-        };
+    fn check_type_impl_const(&mut self, typ: &Type, member: &str) -> Option<(RuntimeValue, TypeId)> {
+        println!("checking impl for {typ:?}");
 
-        if let Some(type_impls) = self.type_impls.get(&check_id)
-        && let Some(&member) = type_impls.scope.get(member) {
+        if let Type::CustomType(custom_id, _) = typ
+        && let Some(&member) = self.custom_type_impls[custom_id.0 as usize].scope.get(member) {
             // found a member!
             
             match &self.typed_ast.get_var(member).const_val {
                 TypeVarConstVal::Evaluated(constant) => Some((constant.clone(), self.make_var_id_ref(member, false))),
-                other => unreachable!("should be an evaluated const... {:?}", other)
+                other => unreachable!("should be an evaluated const... {other:?}")
             }
         } else {
             None
@@ -952,37 +941,89 @@ impl TypeChecker<'_> {
     }
 
 
+    /// Magic wrapping for impl consts
+    /// if the `resolved_type` evaluates to the inner type, it gets lifted back to the `CustomType`.
+    /// e.g.
+    /// `const N = num`
+    /// `N{ 4 }.square()`  // should result in `N`, even though `num.square()` itself returns num
+    fn member_access_magic_wrapping(&mut self, resolved_type: TypeId, custom_id: CustomTypeId, custom_inner: TypeId, member_expr: ExprId) -> TypeId {
+
+        // member access yielded the inner type
+        // e.g. `const TRUE = true` turns into `CustomBool`
+        if self.are_types_equivalent_ignore_spec(custom_inner, resolved_type) {
+            self.type_arena.add_type(Type::CustomType(custom_id, resolved_type))
+        }
+        
+        // member access yielded a function
+        // e.g. `fn(bool) -> bool` becomes `fn(CustomBool) -> CustomBool`
+        else if let Type::Fn { param_types, return_type } = self.prune_type_once(resolved_type) {
+            let new_return = if self.are_types_equivalent_ignore_spec(custom_inner, return_type) {
+                self.type_arena.add_type(Type::CustomType(custom_id, return_type))
+            } else {
+                return_type
+            };
+
+            let new_params = param_types.into_iter().map(|p| {
+                if self.are_types_equivalent_ignore_spec(custom_inner, p) {
+                    self.type_arena.add_type(Type::CustomType(custom_id, p))
+                } else {
+                    p
+                }
+            }).collect();
+
+            self.type_arena.add_type(Type::Fn { param_types: new_params, return_type: new_return })
+        }
+        
+        // member access yielded a MetaType
+        // e.g. `const X: type = Opt2.Some`
+        // adjust the typed_ast note
+        else {
+            let Some(res) = self.typed_ast.resolved_member_access.get_mut(&member_expr) else {
+                unreachable!("every member_access_expr should get a note here... {}", self.fmt_type(resolved_type))
+            };
+            if let ResolvedMemberAccess::Member { constant: RuntimeValue::Type(inner_val_type) } = *res
+            && self.are_types_equivalent_ignore_spec(custom_inner, inner_val_type) {
+
+                let new_constant = RuntimeValue::Type(self.type_arena.add_type(Type::CustomType(custom_id, inner_val_type)));
+                self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant: new_constant });
+            }
+
+            resolved_type
+        }
+    }
 
 
-    pub(super) fn check_enum_variant(&mut self, variant_name: &str, expected_type: Option<TypeId>, span: Span) -> Option<(EnumId, usize, TypeId)> {
+
+
+    pub(super) fn check_enum_variant(&mut self, variant_name: &str, expected_type: Option<TypeId>, span: Span) -> Option<(EnumId, usize, TypeId, TypeId)> {
         // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
         let Some(expected) = expected_type else {
             self.error(ErrType::TyperRequiresTypeAnnotation, span);
             return None
         };
 
-        // make sure that the expected type is an Enum
-        match self.prune_type_once_infer_err(expected, span) {
+        let (core_type, wrappers) = self.peel_custom_types(expected, span);
+
+        match self.prune_type_once_infer_err(core_type, span) {
             Type::Enum(enum_id, _) => {
                 let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
 
                 // try to find the correct .Variant
-                let find_variant = enum_def.variants.iter().position(|(name, _)| **name == *variant_name);
-                let Some(variant_index) = find_variant else {
+                let Some(variant_index) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
                     self.error(ErrType::TyperEnumDoesntHaveVariant { 
-                        enum_: self.fmt_type(expected), 
+                        enum_: self.fmt_type(core_type), 
                         variant: variant_name.into()
                     }, span);
                     return None;
                 };
-
+                
                 let attached_type = enum_def.variants[variant_index].1;
 
-                Some((enum_id, variant_index, attached_type))
-            }
-            Type::CustomType(id) => {
-                // if its a custom type, recursively go down until we find Type::Enum
-                self.check_enum_variant(variant_name, Some(id), span)
+                // soft specialize it and wrap it back in the custom types
+                // so this function will turn `CustomType(1, Enum<0>)` -> `CustomType(1, Enum<0, Soft<1>>)`
+                let spec_type = self.apply_spec_to_enum(enum_id, EnumSpecialization::Specialized(variant_index), &wrappers);
+
+                Some((enum_id, variant_index, attached_type, spec_type))
             }
             Type::Error => None,
             _ => {
@@ -993,36 +1034,40 @@ impl TypeChecker<'_> {
     }
 
 
-    /// takes a `TypeId`, which is wrapped any amount of layers in `CustomType`s
-    /// and "applies" a hard `EnumSpecialization` to the core Enum
-    /// complicated, but this makes newtype enum construction work, e.g. `const X: type = OptionWrapper.Some; X{ 3 }`
-    pub(super) fn make_wrapped_enum_specialized(&mut self, id: TypeId, new_spec: EnumSpecialization) -> TypeId {
-        match self.prune_type_once(id) {
-            Type::CustomType(inner) => {
-                let new_inner = self.make_wrapped_enum_specialized(inner, new_spec);
-                self.type_arena.add_type(Type::CustomType(new_inner))
-            }
-            Type::Enum(eid, _) => {
-                let spec_note = self.add_enum_specialization(new_spec);
-                self.type_arena.add_type(Type::Enum(eid, Some(spec_note)))
-            }
-            _ => id // Safety fallback
+    fn apply_spec_to_enum(&mut self, enum_id: EnumId, spec: EnumSpecialization, custom_wrapers: &[CustomTypeId]) -> TypeId {
+        let spec = self.add_enum_specialization(spec);
+        let spec_type = self.type_arena.add_type(Type::Enum(enum_id, Some(spec)));
+        self.wrap_back_in_custom_types(spec_type, custom_wrapers)
+    }
+
+
+    pub fn peel_custom_types(&mut self, mut id: TypeId, err_span: Span) -> (TypeId, Vec<CustomTypeId>) {
+        let mut wrappers = Vec::new();
+        while let Type::CustomType(custom_id, inner) = self.prune_type_once_infer_err(id, err_span) {
+            wrappers.push(custom_id);
+            id = inner;
         }
+        (id, wrappers)
+    }
+
+    pub fn wrap_back_in_custom_types(&mut self, mut core: TypeId, wrappers: &[CustomTypeId]) -> TypeId {
+        for &custom_id in wrappers.iter().rev() {
+            core = self.type_arena.add_type(Type::CustomType(custom_id, core));
+        }
+        core
     }
 
 
 
-    // this function allows auto-deref to autoclone types
-    // e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 moves
-    // e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 move
+    /// this function allows auto-deref to autoclone types
+    /// e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 moves
+    /// e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 move
     fn unify_expression_with_type(&mut self, expr: ExprId, expected_type: TypeId) {
         let expr_type = self.typed_ast.get_expr_type(expr);
         let span = self.ast.get_expr_span(expr);
         
         let (expr_p_count, is_auto_clone_after) = self.count_initial_pointers(expr_type, span);
         let (expected_p_count, _) = self.count_initial_pointers(expected_type, span);
-
-        let before_typ = self.prune_type_once(expr_type);
 
         // if we have more pointers than the expected_type, AND everything that needs to be derefed is auto_clone
         if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {
@@ -1032,7 +1077,7 @@ impl TypeChecker<'_> {
                         self.insert_deref(expr, false, inner);
                     }
                     _ => unreachable!("i just checked the amount of pointers, so this is unreachable \
-                        ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({expected_type:?}, {before_typ:?})")
+                        ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({}, {})", self.fmt_type(expr_type), self.fmt_type(expected_type))
                 }
             }
         }
@@ -1143,7 +1188,7 @@ impl TypeChecker<'_> {
             | Type::Tup(_)
             | Type::Enum(_, _) => false,
 
-            Type::CustomType(id) => {
+            Type::CustomType(_, id) => {
                 let inner = self.prune_type_once_infer_err(*id, span);
                 self.is_auto_clone(&inner, span)
             }

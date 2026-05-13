@@ -80,9 +80,9 @@ fn invalid_op_types() {
 fn exhaustive_pattern_matching() {
     test_err!("match 5 is 1 => 2", ErrType::TyperPatternDoesntCoverAllCases { .. });
     test_err!("
-        const Opt = enum { None, Some(bool) }
-        let val: Opt = .Some(true)
-        match val^ is .None | .Some(true) => 0
+        const Opt = enum { None, Some{ bool } }
+        let val: Opt = .Some{ true }
+        match val^ is .None | .Some{ true } => 0
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
 
@@ -134,6 +134,7 @@ fn array_bounds() {
 fn new_types() {
     test_err!("type Number = num; Number{ 320 } is 320", ErrType::TyperMismatch { .. });
     test_err!("type Number = num; let x: Number = 5", ErrType::TyperMismatch { .. });
+    test_err!("type N1 = num;  type N2 = num;  N1{ 6 } + N2{ 9 }", ErrType::TyperMismatch { .. });
 }
 
 

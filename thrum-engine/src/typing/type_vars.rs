@@ -4,7 +4,7 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, AstIds, Expr, ExprId},
-    typing::{EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
+    typing::{CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
@@ -153,7 +153,11 @@ impl<'ast> TypeChecker<'ast> {
                 self.evaluate_expr(*expr).map(|val| {
                     let expected_type = self.typed_ast.get_expr_type(*expr);
                     let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
-                    let new_type = self.type_arena.add_type(Type::CustomType(runtime_type_id));
+
+                    let new_type_id = CustomTypeId(self.custom_type_impls.len().try_into().unwrap());
+                    self.custom_type_impls.push(TypeVarScope::default());
+
+                    let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, runtime_type_id));
                     RuntimeValue::Type(new_type)
                 })
             }

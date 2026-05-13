@@ -29,7 +29,7 @@ pub enum Type {
     MetaType,
 
     Enum(EnumId, Option<EnumSpecializationId>),
-    CustomType(TypeId),
+    CustomType(CustomTypeId, TypeId),
 
     Tup(Vec<TypeTuple>),
     TupArr(TypeId, usize),
@@ -66,6 +66,8 @@ pub struct TypeId(pub AstIds);
 pub struct EnumId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct EnumSpecializationId(pub AstIds);
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
+pub struct CustomTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct TypeInferId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -106,7 +108,7 @@ pub struct TypeChecker<'a> {
 
     // implemented stuff on types
     // e.g. `impl Number { ... }`
-    type_impls: HashMap<TypeId, TypeVarScope<'a>>,
+    custom_type_impls: Vec<TypeVarScope<'a>>,  // indexed with CustomTypeId
     
     // for return
     curr_function_return_type: Option<TypeId>,
@@ -235,7 +237,7 @@ impl TypeChecker<'_> {
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
             enum_specialization: Vec::new(),
-            type_impls: HashMap::new(),
+            custom_type_impls: Vec::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
             curr_impl_self: None,
@@ -348,6 +350,16 @@ impl TypeChecker<'_> {
                 }
             }
 
+            (Type::CustomType(id_a, inner_a), Type::CustomType(id_b, inner_b)) => {
+                if id_a == id_b {
+                    self.unify_types(inner_a, inner_b, span);
+                } else {
+                    // Different custom_id => they can't unify
+                    // e.g. `type N1 = num;  type N2 = num;  N1{ 2 } + N2{ 2 }`
+                    mismatch = true;
+                }
+            }
+
             (Type::Enum(a_id, a_spec), Type::Enum(b_id, b_spec)) => {
                 #[allow(clippy::if_not_else, reason = "clippy wants to obscure the error path :(")]
                 if a_id != b_id {
@@ -392,6 +404,7 @@ impl TypeChecker<'_> {
                         };
 
                         if let Some(new_spec) = merged_result {
+                            // update the spec on both types!
                             self.enum_specialization[spec_id_a.0 as usize] = new_spec;
                             self.enum_specialization[spec_id_b.0 as usize] = new_spec;
                         } else {
@@ -448,8 +461,19 @@ impl TypeChecker<'_> {
         }
     }
 
+    pub(super) fn are_types_equivalent_ignore_spec(&self, left: TypeId, right: TypeId) -> bool {
+        if left == right { return true }
 
-    /// creates the string and starts the formatting
+        match (self.prune_type_once(left), self.prune_type_once(right)) {
+            (Type::Enum(id1, _), Type::Enum(id2, _)) => id1 == id2,
+            (Type::CustomType(left_id, left_inner), Type::CustomType(right_id, right_inner)) => {
+                left_id == right_id && self.are_types_equivalent_ignore_spec(left_inner, right_inner)
+            }
+            _ => false
+        }
+    }
+
+
     pub(super) fn fmt_type(&self, typ: TypeId) -> String {
         let mut s = String::new();
         self.write_type(typ, &mut s).unwrap();
@@ -480,8 +504,8 @@ impl TypeChecker<'_> {
                 write!(s, ">")
             }
 
-            Type::CustomType(inner) => {
-                write!(s, "customtype<")?;
+            Type::CustomType(id, inner) => {
+                write!(s, "customtype<{id:?}, ")?;
                 self.write_type(inner, s)?;
                 write!(s, ">")
             }
@@ -520,12 +544,12 @@ impl TypeChecker<'_> {
                 if mutable {
                     write!(s, "mut ")?;
                 }
-                write!(s, "ref")?;
+                write!(s, "ref ")?;
+                self.write_type(inner, s)?;
                 if let Some(var) = borrows_var {
-                    write!(s, " {}", self.typed_ast.get_var(var).name)?;
+                    write!(s, " ({})", self.typed_ast.get_var(var).name)?;
                 }
-                write!(s, " ")?;
-                self.write_type(inner, s)
+                Ok(())
             }
         }
     }
@@ -595,9 +619,9 @@ impl TypeChecker<'_> {
                 let new_inner = self.zonk_type(inner, span, cache);
                 self.type_arena.add_type(Type::Borrow { inner: new_inner, mutable, borrows_var })
             }
-            Type::CustomType(inner) => {
+            Type::CustomType(custom_id, inner) => {
                 let new_inner = self.zonk_type(inner, span, cache);
-                self.type_arena.add_type(Type::CustomType(new_inner))
+                self.type_arena.add_type(Type::CustomType(custom_id, new_inner))
             }
 
             // simple types don't need zonking

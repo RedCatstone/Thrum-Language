@@ -515,8 +515,8 @@ impl Parser<'_> {
         // Some(T)
         let variant_name = self.expect_identifier("to name an enum variant").into_boxed_str();
 
-        let attached_tuple = self.optional_token(TokenKind::LeftParen).then(|| {
-            self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightParen)
+        let attached_tuple = self.optional_token(TokenKind::LeftBrace).then(|| {
+            self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace)
         });
 
         AstEnumExpression { variant_name, attached_tuple }

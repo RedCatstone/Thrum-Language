@@ -266,15 +266,15 @@ fn match_exprs() {
 #[test]
 fn enum_match_expr() {
     test!("
-        const Opt = enum { None, Some(num) }
+        const Opt = enum { None, Some{ num } }
         
-        let val: Opt = .Some(42)
+        let val: Opt = .Some{ 42 }
         
         match val^
         is .None => -1
-        is .Some(0 | 1 | 2) => 0
-        is .Some(!42) => 1
-        is .Some(let x) => x^
+        is .Some{ 0 | 1 | 2 } => 0
+        is .Some{ !42 } => 1
+        is .Some{ let x } => x^
     ", RuntimeValue::Num(42.0));
 }
 
@@ -379,24 +379,24 @@ fn consts() {
 #[test]
 fn enums() {
     test!("
-        const Dir = enum { Up, Down(bool, bool) }
+        const Dir = enum { Up, Down{ bool, bool } }
 
-        let down: Dir = .Down(true, false)
-        let down2: Dir = .Down(true, false)
+        let down: Dir = .Down{ true, false }
+        let down2: Dir = .Down{ true, false }
         let up: Dir = .Up
         let up2 = Dir.Up
 
         up^ is .Up
-        and down^ is .Down(_, false)
-        and up2^ is !.Down(_, _)
+        and down^ is .Down{ _, false }
+        and up2^ is !.Down{ _, _ }
         and down2^ is !.Up
     ", RuntimeValue::Bool(true));
 
     test!("
-        const Res = enum { Err, Ok((num, bool)) }
-        let r: Res = .Ok((100, true))
+        const Res = enum { Err, Ok{ (num, bool) } }
+        let r: Res = .Ok{ (100, true) }
 
-        r^ is .Ok((100, !false))
+        r^ is .Ok{ (100, !false) }
     ", RuntimeValue::Bool(true));
 }
 
@@ -420,30 +420,22 @@ fn point_impl_test() {
 #[test]
 fn enum_impl_test() {
     test!("
-        type Option = enum { None, Some(num) }
+        type Option = enum { None, Some{ num } }
         impl Option {
+            fn is_some(self: Self) -> bool {
+                self^ is .Some{ _ }
+            }
             fn is_none(self: Self) -> bool {
                 self^ is .None
             }
         }
 
-        Option.None.is_none()
-    ", RuntimeValue::Bool(true));
-}
-
-#[test]
-fn enum_impl_test_2() {
-    test!("
-        const Option = enum { None, Some(num) }
-        impl Option {
-            fn is_some(self: Self) -> bool {
-                self^ is .Some(_)
-            }
-        }
-
-        Option.Some{ 3 } is .Some(_)
+        Option.Some{ 3 } is .Some{ _ }
         and Option.Some{ 3 }.is_some()
+        and Option.is_some(.Some{ 3 })
+        and !Option.Some{ 3 }.is_none()
         and !Option.None.is_some()
+        and Option.None.is_none()
     ", RuntimeValue::Bool(true));
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::{
-    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{EnumSpecialization, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -189,7 +189,7 @@ impl<'ast> TypeChecker<'ast> {
                 // basically copy-pasted from check_expressions.rs `Expr::TypeInstantiation`
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
                 match self.prune_type_once_infer_err(meta_id, span) {
-                    Type::CustomType(inner_new_type) => {
+                    Type::CustomType(_, inner_new_type) => {
 
                         match self.prune_type_once_infer_err(inner_new_type, span) {
                             Type::Error => TypeId::ERROR,
@@ -231,7 +231,7 @@ impl<'ast> TypeChecker<'ast> {
 
             Pattern::EnumVariant { name, attached_tuple } => {
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
-                if let Some((enum_id, variant_index, attached_type)) = self.check_enum_variant(name, expected_type, span) {
+                if let Some((enum_id, variant_index, attached_type, spec_type)) = self.check_enum_variant(name, expected_type, span) {
                     if let Some(tup) = attached_tuple {
                         let (_, covered) = self.check_match_pattern(
                             *tup, Some(attached_type), has_value, const_update, vars_defined
@@ -254,8 +254,7 @@ impl<'ast> TypeChecker<'ast> {
                     }
                     self.typed_ast.resolved_enum_variant_pattern.insert(pattern, (enum_id, variant_index));
 
-                    // return a new soft-specialized enum type
-                    self.make_wrapped_enum_specialized(expected_type.unwrap(), EnumSpecialization::Specialized(variant_index))
+                    spec_type
                 } else {
                     TypeId::ERROR
                 }

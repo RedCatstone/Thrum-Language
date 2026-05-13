@@ -1,19 +1,10 @@
-type Option = enum { None, Some(num) }
-impl Option {
-    fn is_some(self: Self) -> bool {
-        self^ is .Some(_)
-    }
-    fn is_none(self: Self) -> bool {
-        self^ is .None
-    }
-}
+type N1 = num
+type N2 = num
 
-Option.Some{ 3 } is .Some(_)
-and Option.Some{ 3 }.is_some()
-and !Option.None.is_some()
+N1{ 6 } + N2{ 9 }
 
 
-// const Option = enum { None, Some(num) }
+// type Option = enum { None, Some{ num } }
 // 
 // type Range = (start: num, end: num);
 // type RangeIter = (curr: num, end: num);
@@ -27,7 +18,7 @@ and !Option.None.is_some()
 // impl RangeIter {
 //     fn next(self: &mut Self) -> Option {
 //         if self.curr < self.end {
-//             let x: Option = .Some(self.curr)
+//             let x = Option.Some{ self.curr }
 //             self.curr += 1
 //             x^
 //         } else {
@@ -37,7 +28,7 @@ and !Option.None.is_some()
 // }
 // 
 // // let i = (1..10).iter()
-// // while mut i.next() is let .Some(x) {
+// // while mut i.next() is let .Some{ x } {
 // //     sum += x
 // // }
 // 

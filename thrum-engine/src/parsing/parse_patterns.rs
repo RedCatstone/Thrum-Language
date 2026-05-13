@@ -74,8 +74,8 @@ impl Parser<'_> {
                 // .Some(T)
                 let variant_name = self.expect_identifier("to name an enum variant");
 
-                let attached_tuple = self.optional_token(TokenKind::LeftParen).then(|| {
-                    self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightParen)
+                let attached_tuple = self.optional_token(TokenKind::LeftBrace).then(|| {
+                    self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightBrace)
                 });
 
                 self.add_pattern(start, Pattern::EnumVariant { name: variant_name, attached_tuple })
