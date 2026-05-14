@@ -189,7 +189,7 @@ impl TypeArena {
         if let Some(&id) = self.type_dedup.get(&typ) {
             id
         } else {
-            let id = TypeId(AstIds::try_from(self.types.len()).unwrap());
+            let id = TypeId(self.types.len().try_into().unwrap());
             self.types.push(typ.clone());
             self.type_dedup.insert(typ, id);
             id
@@ -273,7 +273,7 @@ impl TypeChecker<'_> {
     }
 
     pub fn new_infer_type(&mut self) -> TypeId {
-        let id = TypeInferId(AstIds::try_from(self.inference_types.len()).unwrap());
+        let id = TypeInferId(self.inference_types.len().try_into().unwrap());
         self.inference_types.push(None);  // unresolved initially
         self.type_arena.add_type(Type::Infer(id))
     }

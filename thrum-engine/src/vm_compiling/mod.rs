@@ -657,7 +657,7 @@ impl VmCompiler<'_> {
                 self.compile_enum_variant(i, data.attached_tuple);
             }
 
-            Expr::ImplSelf { } => {
+            Expr::ImplSelf => {
                 let meta_type = self.typed_ast.resolved_impl_self_type[&compile_expr];
                 self.push_get_constant_op(RuntimeValue::Type(meta_type));
             }
@@ -669,6 +669,7 @@ impl VmCompiler<'_> {
 
             // do nothing here, these are only for the typechecker.
             Expr::Const { .. }
+            | Expr::CustomType { .. }
             | Expr::ImplBlock { .. } => self.push_op(OpCode::PushVoid),
 
             _ => panic!("{expr:?} not yet implemented")
@@ -789,7 +790,9 @@ impl VmCompiler<'_> {
                     TypeVarConstVal::Evaluated(val) => {
                         self.push_get_constant_ref_op(val.clone());
                     }
-                    TypeVarConstVal::NotYetEvaluated(expr) => unreachable!("const was not evaluated yet... {:?}", self.ast.display_expr(*expr)),
+                    TypeVarConstVal::NotYetEvaluated { value, bind_to } => {
+                        unreachable!("const was not evaluated yet... {:?} {bind_to:?}", self.ast.display_expr(*value))
+                    }
                     _ => unreachable!("{var_id:?} is not in the current variables..."),
                 }
             }

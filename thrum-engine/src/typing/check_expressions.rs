@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    typing::{CustomTypeId, EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::{PatternOrName, TypeVarConstVal}}, vm_compiling::RuntimeValue
 };
 
 
@@ -528,7 +528,7 @@ impl TypeChecker<'_> {
                 TypeId::VOID
             }
 
-            Expr::ImplSelf {  } => {
+            Expr::ImplSelf => {
                 if let Some(id) = self.curr_impl_self {
                     self.typed_ast.resolved_impl_self_type.insert(check_expr, id);
                     TypeId::TYPE
@@ -545,11 +545,8 @@ impl TypeChecker<'_> {
 
             // --- CONST STUFF ---
             // already handled in the hoisting phase
-            | Expr::Const { .. } => TypeId::VOID,
-            Expr::CustomType { expr } => {
-                self.check_expression(*expr, is_never, &ctx.expect(TypeId::TYPE).is_const());
-                TypeId::TYPE
-            }
+            | Expr::Const { .. } | Expr::CustomType { .. } => TypeId::VOID,
+            
             Expr::EnumDefinition { variants } => {
                 // the actual enum-type is defined in the hoisting_pass
                 for variant in variants {
@@ -677,22 +674,35 @@ impl TypeChecker<'_> {
     fn hoisting_pass(&mut self, exprs: &[ExprId], allow_non_const: bool) {
         // 1. it collects all const exprs and defines them as Unresolved.
         for &expr in exprs {
-            if let Expr::Const { pattern, value: _ } = self.ast.get_expr(expr) {
-                self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked(expr));
-            }
-            else if !allow_non_const {
-                self.error(ErrType::TyperRuntimeValuesArentAllowedInImplBlocks, self.ast.get_expr_span(expr));
+            match self.ast.get_expr(expr) {
+                Expr::Const { pattern, value } => {
+                    self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrName::Pattern(*pattern) });
+                }
+                Expr::CustomType { name, value } => {
+                    let expr_span = self.ast.get_expr_span(expr);
+
+                    let guess_var_id = TypeVarId(self.typed_ast.vars.len().try_into().unwrap());
+                    let var_id = self.define_variable(
+                        name, TypeId::TYPE, false, true, expr_span,
+                        TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrName::CustomTypeVarId(guess_var_id) }
+                    );
+                    assert_eq!(guess_var_id, var_id);
+                }
+                _ => if !allow_non_const {
+                    self.error(ErrType::TyperRuntimeValuesArentAllowedInImplBlocks, self.ast.get_expr_span(expr));
+                }
             }
         }
 
         // 2. typechecks all collected Unresolved vars.
         // if one depends on another, typecheck another first, then back to first.
         // if there is a self-dependency-cycle, throw an error
-        while let Some(expr) = self.var_scopes.last().unwrap()
+        while let Some((value, bind_to)) = self.var_scopes.last().unwrap()
         .scope.values()
-        .find_map(|&var_id| if let TypeVarConstVal::NotYetTypechecked(x) = self.typed_ast.get_var(var_id).const_val { Some(x) } else { None }) {
+        .find_map(|&var_id| if let TypeVarConstVal::NotYetTypechecked { value, bind_to }
+        = self.typed_ast.get_var(var_id).const_val { Some((value, bind_to)) } else { None }) {
             // found a var that was not checked yet!
-            self.check_evaluate_and_bind_const(expr);
+            self.check_evaluate_and_bind_const(value, bind_to);
         }
     }
 

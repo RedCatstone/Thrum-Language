@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use derive_more::Display;
 
 use crate::{
-    ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, AstIds, Expr, ExprId},
-    typing::{CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId}, vm_compiling::{RuntimeValue, VmCompiler}
+    ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
+    typing::{CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx}, vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
@@ -41,10 +41,15 @@ pub enum TypeVarConstVal {
     /// its a runtime variable
     No,
     // all others are consts
-    NotYetTypechecked(ExprId),
+    NotYetTypechecked { value: ExprId, bind_to: PatternOrName },
     CurrTypechecking,
-    NotYetEvaluated(ExprId),
+    NotYetEvaluated { value: ExprId, bind_to: PatternOrName },
     Evaluated(RuntimeValue),
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PatternOrName {
+    Pattern(PatternId),
+    CustomTypeVarId(TypeVarId),
 }
 
 /// This enum tracks if a `TypeVar` is initialized or not.
@@ -92,7 +97,7 @@ impl<'ast> TypeChecker<'ast> {
             mut_borrows_count: 0,
         };
         
-        let var_id = TypeVarId(AstIds::try_from(self.typed_ast.vars.len()).unwrap());
+        let var_id = TypeVarId(self.typed_ast.vars.len().try_into().unwrap());
         self.typed_ast.vars.push(new_var);
         let previous = self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
 
@@ -111,17 +116,17 @@ impl<'ast> TypeChecker<'ast> {
 
                 // it needs to ensure that the var was typechecked and compiled
                 let var = self.typed_ast.get_var_mut(variable_id);
-                match var.const_val {
-                    TypeVarConstVal::NotYetTypechecked(expr) => {
+                match var.const_val.clone() {
+                    TypeVarConstVal::NotYetTypechecked { value, bind_to } => {
                         // and resolve it!
-                        self.check_evaluate_and_bind_const(expr);
+                        self.check_evaluate_and_bind_const(value, bind_to);
                     }
                     TypeVarConstVal::CurrTypechecking => {
                         let span = var.declared_at;
                         self.error(ErrType::TyperConstResolvingCycle, span);
                     }
-                    TypeVarConstVal::NotYetEvaluated(expr) => {
-                        self.evaluate_and_bind_const(expr);
+                    TypeVarConstVal::NotYetEvaluated { value, bind_to } => {
+                        self.evaluate_and_bind_const(value, bind_to);
                     }
                     TypeVarConstVal::No
                     | TypeVarConstVal::Evaluated(_) =>  {/* all good, do nothing */}
@@ -131,6 +136,103 @@ impl<'ast> TypeChecker<'ast> {
         }
         None
     }
+
+
+    pub(super) fn add_enum_specialization(&mut self, spec: EnumSpecialization) -> EnumSpecializationId {
+        let id = EnumSpecializationId(self.enum_specialization.len().try_into().unwrap());
+        self.enum_specialization.push(spec);
+        id
+    }
+    
+    fn add_enum_def(&mut self, def: EnumDefinition) -> EnumId {
+        let id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
+        self.typed_ast.enum_defs.push(def);
+        id
+    }
+
+
+
+    pub(super) fn check_evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrName) {
+        // mark the pattern as curr typechecking, so it can detect cycles
+        match &bind_to {
+            PatternOrName::Pattern(pattern) => {
+                self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::CurrTypechecking);
+            }
+            PatternOrName::CustomTypeVarId(var_id) => {
+                self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::CurrTypechecking;
+            }
+        }
+        
+        // typecheck it:
+        // remove these while typechecking consts so it literally can't break/return
+        let prev_fn = self.curr_function_return_type.take();
+        let prev_labels = std::mem::take(&mut self.curr_label_infos);
+
+        match &bind_to {
+            PatternOrName::Pattern(pattern) => {
+                self.check_assign_pattern_and_value(
+                    *pattern, Some(value), &mut false, true, false, false,
+                    Some(TypeVarConstVal::NotYetEvaluated { value, bind_to })
+                );
+            }
+            PatternOrName::CustomTypeVarId(var_id) => {
+                self.check_expression(value, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
+                self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::NotYetEvaluated { value, bind_to };
+            }
+        }
+
+        self.curr_function_return_type = prev_fn;
+        self.curr_label_infos = prev_labels;
+
+
+        // evaluate and bind it:
+        self.evaluate_and_bind_const(value, bind_to);
+    }
+
+
+
+    pub(super) fn evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrName) {
+        let value_expr = self.ast.get_expr(value);
+        let evaluated = match value_expr {
+            Expr::Closure { .. } => {
+                // closures can have cyclic dependencies (recursion), so it
+                // needs to first bind to the pattern, and AFTER typecheck
+                Some(RuntimeValue::Fn {
+                    slot: self.typed_ast.resolved_closure_fn_id[&value]
+                })
+            }
+
+            _ => self.evaluate_expr(value)
+        };
+
+        if let Some(val) = evaluated {
+            match bind_to {
+                PatternOrName::Pattern(pattern) => {
+                    self.mark_vars_in_pattern_as_const(pattern, TypeVarConstVal::Evaluated(val));
+                }
+                PatternOrName::CustomTypeVarId(var_id) => {
+                    // TODO: make tuple types better
+                    let expected_type = self.typed_ast.get_expr_type(value);
+                    let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
+
+                    let new_type_id = CustomTypeId(self.custom_type_impls.len().try_into().unwrap());
+                    self.custom_type_impls.push(TypeVarScope::default());
+
+                    let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, runtime_type_id));
+                    let type_const = RuntimeValue::Type(new_type);
+
+                    self.typed_ast.get_var_mut(var_id).const_val = TypeVarConstVal::Evaluated(type_const);
+                }
+            }
+        }
+
+        if let Expr::Closure { closure, .. } = value_expr {
+            // AFTER binding typecheck the body
+            let fn_type = self.typed_ast.get_expr_type(value);
+            self.check_fn_expression(closure, fn_type);
+        }
+    }
+
 
 
     /// this function actually evaluates a const-expr
@@ -147,21 +249,6 @@ impl<'ast> TypeChecker<'ast> {
         }
 
         match self.ast.get_expr(expr) {
-            // the typechecker needs to handle CustomType because the
-            // vm can't add types. so special case this.
-            Expr::CustomType { expr } => {
-                self.evaluate_expr(*expr).map(|val| {
-                    let expected_type = self.typed_ast.get_expr_type(*expr);
-                    let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
-
-                    let new_type_id = CustomTypeId(self.custom_type_impls.len().try_into().unwrap());
-                    self.custom_type_impls.push(TypeVarScope::default());
-
-                    let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, runtime_type_id));
-                    RuntimeValue::Type(new_type)
-                })
-            }
-
             // also needs to handle EnumDefinitions
             Expr::EnumDefinition { variants } => {
                 let variants = variants.iter()
@@ -191,75 +278,8 @@ impl<'ast> TypeChecker<'ast> {
         }
     }
 
-    pub(super) fn add_enum_specialization(&mut self, spec: EnumSpecialization) -> EnumSpecializationId {
-        let id = EnumSpecializationId(self.enum_specialization.len().try_into().unwrap());
-        self.enum_specialization.push(spec);
-        id
-    }
-    fn add_enum_def(&mut self, def: EnumDefinition) -> EnumId {
-        let id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
-        self.typed_ast.enum_defs.push(def);
-        id
-    }
 
 
-
-    pub(super) fn evaluate_and_bind_const(&mut self, expr: ExprId) {
-        match self.ast.get_expr(expr) {
-            Expr::Const { pattern, value } => {
-                match self.ast.get_expr(*value) {
-                    Expr::Closure { closure, requires_type_annotation: _ } => {
-                        // closures can have cyclic dependencies, so:
-                        // 1. bind the RuntimeValue to the pattern
-                        let closure_val = RuntimeValue::Fn {
-                            slot: self.typed_ast.resolved_closure_fn_id[value]
-                        };
-                        self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::Evaluated(closure_val));
-        
-                        // 2. typecheck the body
-                        let fn_type = self.typed_ast.get_expr_type(*value);
-                        self.check_fn_expression(closure, fn_type);
-                    }
-
-                    // all other expressions can just be evaluated as normal
-                    _ => {
-                        // now distribute the new runtime value across the pattern (if it didn't error)
-                        if let Some(val) = self.evaluate_expr(*value) {
-                            self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::Evaluated(val));
-                        }
-                    }
-                }
-            }
-            _ => unreachable!("not a const expr")
-        }
-    }
-
-
-    pub(super) fn check_evaluate_and_bind_const(&mut self, expr: ExprId) {
-        match self.ast.get_expr(expr) {
-            Expr::Const { pattern, value } => {
-                // mark the pattern as curr typechecking, so it can detect cycles
-                self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::CurrTypechecking);
-
-                // typecheck it:
-                // remove these while typechecking consts so it literally can't break/return
-                let prev_fn = self.curr_function_return_type.take();
-                let prev_labels = std::mem::take(&mut self.curr_label_infos);
-
-                self.check_assign_pattern_and_value(
-                    *pattern, Some(*value), &mut false, true, false, false,
-                    Some(TypeVarConstVal::NotYetEvaluated(expr))
-                );
-
-                self.curr_function_return_type = prev_fn;
-                self.curr_label_infos = prev_labels;
-
-                // evaluate and bind it:
-                self.evaluate_and_bind_const(expr);
-            }
-            _ => unreachable!("not a const expr")
-        }
-    }
 
     pub(super) fn make_variable_ref(&mut self, name: &str, mutable: bool, is_const: bool, expr: ExprId) -> TypeId {
         let expr_span = self.ast.get_expr_span(expr);

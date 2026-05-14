@@ -130,7 +130,11 @@ impl AstArena {
                 self.format_pattern_recursive(*pattern, s, ind + 1, "pattern", false)?;
                 self.format_expr_recursive(*value, s, ind + 1, "value", true)
             }
-            Expr::CustomType { expr } | Expr::Move { expr } => {
+            Expr::CustomType { name, value } => {
+                writeln!(s, " - name: {name}")?;
+                self.format_expr_recursive(*value, s, ind + 1, "value", true)
+            }
+            Expr::Move { expr } => {
                 writeln!(s)?;
                 self.format_expr_recursive(*expr, s, ind + 1, "expr", true)
             }
@@ -259,7 +263,7 @@ impl AstArena {
                 }
                 Ok(())
             }
-            Expr::ImplSelf {  } => {
+            Expr::ImplSelf => {
                 writeln!(s)
             }
             Expr::Return { expr } => {

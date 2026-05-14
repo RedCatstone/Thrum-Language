@@ -23,7 +23,7 @@ pub struct AstArena {
 impl AstArena {
     pub fn add_expr(&mut self, span: Span, expr: Expr) -> ExprId {
         debug_assert_eq!(self.exprs.len(), self.expr_spans.len());
-        let id = AstIds::try_from(self.exprs.len()).unwrap();
+        let id = self.exprs.len().try_into().unwrap();
         self.exprs.push(expr);
         self.expr_spans.push(span);
         ExprId(id)
@@ -33,7 +33,7 @@ impl AstArena {
 
     pub fn add_pattern(&mut self, span: Span, pattern: Pattern) -> PatternId {
         debug_assert_eq!(self.patterns.len(), self.pattern_spans.len());
-        let id =  AstIds::try_from(self.patterns.len()).unwrap();
+        let id =  self.patterns.len().try_into().unwrap();
         self.patterns.push(pattern);
         self.pattern_spans.push(span);
         PatternId(id)
@@ -55,7 +55,7 @@ pub enum Expr {
     Assign { pattern: PatternId, value: ExprId, extra_op: Option<AssignOp>, op_span: Span }, // x = 2  or  let x = 2
     EmptyLet { pattern: PatternId },  // let x
     Const { pattern: PatternId, value: ExprId },  // const x = 5
-    CustomType { expr: ExprId },  // type x = 5  (for now paired with const)
+    CustomType { name: Box<str>, value: ExprId },  // type x = 5
     Move { expr: ExprId },  // x^
     Borrow { expr: ExprId, mutable: bool },  // &u32
     MemberAccess { left: ExprId, member: String },  // arr.len
@@ -83,7 +83,7 @@ pub enum Expr {
     EnumVariant { data: AstEnumExpression },  // .North
 
     ImplBlock { typ: ExprId, const_exprs: Vec<ExprId> },  // impl Expr { ... }
-    ImplSelf { },
+    ImplSelf,
 
     Return { expr: ExprId },  // return ...
     Break { label: Option<String>, expr: ExprId },  // break #label ...

@@ -345,6 +345,7 @@ impl<'ast> TypeChecker<'ast> {
         )
     }
 
+    /// TODO: get rid of this stoopid function
     pub(super) fn extract_meta_type_from_runtime_val(&mut self, val: RuntimeValue, expected_type: TypeId) -> TypeId {
         match val {
             RuntimeValue::Type(id) => id,
@@ -400,7 +401,7 @@ impl<'ast> TypeChecker<'ast> {
                     self.typed_ast.get_var_mut(*var_id).const_val = const_val;
                 } else {
                     // pattern var doesn't exist so make one
-                    let var_id = self.define_variable(name, TypeId::ERROR, false, true, span, const_val);
+                    let var_id = self.define_variable(name, TypeId::VOID, false, true, span, const_val);
                     self.typed_ast.resolved_pattern_var.insert(pattern, var_id);
 
                     if *mutable {

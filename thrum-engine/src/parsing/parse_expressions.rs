@@ -292,13 +292,11 @@ impl Parser<'_> {
                 self.add_expr(start, Expr::Const { pattern, value })
             }
             TokenKind::Type => {
-                let pattern = self.parse_pattern(true);
+                let name = self.expect_identifier("to name the type").into_boxed_str();
                 self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the type.");
-                let expr = self.parse_expression_default();
+                let value = self.parse_expression_default();
 
-                let value = self.add_expr(start, Expr::CustomType { expr });
-
-                self.add_expr(start, Expr::Const { pattern, value })
+                self.add_expr(start, Expr::CustomType { name, value })
             }
 
             TokenKind::If => {
@@ -379,7 +377,7 @@ impl Parser<'_> {
             }
 
             TokenKind::ImplSelf => {
-                self.add_expr(start, Expr::ImplSelf { })
+                self.add_expr(start, Expr::ImplSelf)
             }
 
             TokenKind::Dot => {
