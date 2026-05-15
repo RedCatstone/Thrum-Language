@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::{PatternOrName, TypeVarConstVal}}, vm_compiling::RuntimeValue
+    typing::{CustomTypeId, EnumId, EnumSpecialization, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}}, vm_compiling::RuntimeValue
 };
 
 
@@ -510,13 +510,13 @@ impl TypeChecker<'_> {
 
                     // add the impl-scope as a normal var scope,
                     // all consts will just end up in there then!1!!
-                    let impl_scope = std::mem::take(&mut self.custom_type_impls[custom_id.0 as usize]);
+                    let impl_scope = std::mem::take(&mut self.custom_types[custom_id.0 as usize].impls);
                     self.var_scopes.push(impl_scope);
 
                     self.hoisting_pass(const_exprs, false);
 
                     // and insert the impl scope back to where it came from
-                    self.custom_type_impls[custom_id.0 as usize] = self.var_scopes.pop().unwrap();
+                    self.custom_types[custom_id.0 as usize].impls = self.var_scopes.pop().unwrap();
 
                     // println!("Added impl for type: {}", self.fmt_type(meta_type));
 
@@ -676,7 +676,7 @@ impl TypeChecker<'_> {
         for &expr in exprs {
             match self.ast.get_expr(expr) {
                 Expr::Const { pattern, value } => {
-                    self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrName::Pattern(*pattern) });
+                    self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrVarId::Pattern(*pattern) });
                 }
                 Expr::CustomType { name, value } => {
                     let expr_span = self.ast.get_expr_span(expr);
@@ -684,7 +684,7 @@ impl TypeChecker<'_> {
                     let guess_var_id = TypeVarId(self.typed_ast.vars.len().try_into().unwrap());
                     let var_id = self.define_variable(
                         name, TypeId::TYPE, false, true, expr_span,
-                        TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrName::CustomTypeVarId(guess_var_id) }
+                        TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrVarId::CustomTypeVarId(guess_var_id) }
                     );
                     assert_eq!(guess_var_id, var_id);
                 }
@@ -938,7 +938,7 @@ impl TypeChecker<'_> {
         println!("checking impl for {typ:?}");
 
         if let Type::CustomType(custom_id, _) = typ
-        && let Some(&member) = self.custom_type_impls[custom_id.0 as usize].scope.get(member) {
+        && let Some(&member) = self.custom_types[custom_id.0 as usize].impls.scope.get(member) {
             // found a member!
             
             match &self.typed_ast.get_var(member).const_val {

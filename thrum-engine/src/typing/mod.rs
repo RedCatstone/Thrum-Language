@@ -59,6 +59,12 @@ pub enum EnumSpecialization {
     Multiple,
 }
 
+#[derive(Debug)]
+pub struct CustomType<'a> {
+    name: Box<str>,
+    impls: TypeVarScope<'a>
+}
+
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct TypeId(pub AstIds);
@@ -108,7 +114,7 @@ pub struct TypeChecker<'a> {
 
     // implemented stuff on types
     // e.g. `impl Number { ... }`
-    custom_type_impls: Vec<TypeVarScope<'a>>,  // indexed with CustomTypeId
+    custom_types: Vec<CustomType<'a>>,  // indexed with CustomTypeId
     
     // for return
     curr_function_return_type: Option<TypeId>,
@@ -237,7 +243,7 @@ impl TypeChecker<'_> {
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
             enum_specialization: Vec::new(),
-            custom_type_impls: Vec::new(),
+            custom_types: Vec::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
             curr_impl_self: None,
@@ -504,10 +510,8 @@ impl TypeChecker<'_> {
                 write!(s, ">")
             }
 
-            Type::CustomType(id, inner) => {
-                write!(s, "customtype<{id:?}, ")?;
-                self.write_type(inner, s)?;
-                write!(s, ">")
+            Type::CustomType(id, _) => {
+                write!(s, "{}", self.custom_types[id.0 as usize].name)
             }
 
             Type::Tup(elems) => {

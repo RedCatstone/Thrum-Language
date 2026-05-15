@@ -4,14 +4,14 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx}, vm_compiling::{RuntimeValue, VmCompiler}
+    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx}, vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
 
 /// The current scope
 /// `let x = 5` would insert "x"
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TypeVarScope<'a> {
     pub scope: HashMap<&'a str, TypeVarId>,
 }
@@ -41,13 +41,13 @@ pub enum TypeVarConstVal {
     /// its a runtime variable
     No,
     // all others are consts
-    NotYetTypechecked { value: ExprId, bind_to: PatternOrName },
+    NotYetTypechecked { value: ExprId, bind_to: PatternOrVarId },
     CurrTypechecking,
-    NotYetEvaluated { value: ExprId, bind_to: PatternOrName },
+    NotYetEvaluated { value: ExprId, bind_to: PatternOrVarId },
     Evaluated(RuntimeValue),
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PatternOrName {
+pub enum PatternOrVarId {
     Pattern(PatternId),
     CustomTypeVarId(TypeVarId),
 }
@@ -112,11 +112,11 @@ impl<'ast> TypeChecker<'ast> {
 
     pub(super) fn lookup_variable(&mut self, name: &str) -> Option<TypeVarId> {
         for i in (0..self.var_scopes.len()).rev() {
-            if let Some(&variable_id) = self.var_scopes[i].scope.get(name) {
+            if let Some(&var_id) = self.var_scopes[i].scope.get(name) {
 
                 // it needs to ensure that the var was typechecked and compiled
-                let var = self.typed_ast.get_var_mut(variable_id);
-                match var.const_val.clone() {
+                let var = self.typed_ast.get_var(var_id);
+                match var.const_val {
                     TypeVarConstVal::NotYetTypechecked { value, bind_to } => {
                         // and resolve it!
                         self.check_evaluate_and_bind_const(value, bind_to);
@@ -131,7 +131,7 @@ impl<'ast> TypeChecker<'ast> {
                     TypeVarConstVal::No
                     | TypeVarConstVal::Evaluated(_) =>  {/* all good, do nothing */}
                 }
-                return Some(variable_id)
+                return Some(var_id)
             }
         }
         None
@@ -152,13 +152,13 @@ impl<'ast> TypeChecker<'ast> {
 
 
 
-    pub(super) fn check_evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrName) {
+    pub(super) fn check_evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrVarId) {
         // mark the pattern as curr typechecking, so it can detect cycles
         match &bind_to {
-            PatternOrName::Pattern(pattern) => {
+            PatternOrVarId::Pattern(pattern) => {
                 self.mark_vars_in_pattern_as_const(*pattern, TypeVarConstVal::CurrTypechecking);
             }
-            PatternOrName::CustomTypeVarId(var_id) => {
+            PatternOrVarId::CustomTypeVarId(var_id) => {
                 self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::CurrTypechecking;
             }
         }
@@ -169,13 +169,13 @@ impl<'ast> TypeChecker<'ast> {
         let prev_labels = std::mem::take(&mut self.curr_label_infos);
 
         match &bind_to {
-            PatternOrName::Pattern(pattern) => {
+            PatternOrVarId::Pattern(pattern) => {
                 self.check_assign_pattern_and_value(
                     *pattern, Some(value), &mut false, true, false, false,
                     Some(TypeVarConstVal::NotYetEvaluated { value, bind_to })
                 );
             }
-            PatternOrName::CustomTypeVarId(var_id) => {
+            PatternOrVarId::CustomTypeVarId(var_id) => {
                 self.check_expression(value, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
                 self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::NotYetEvaluated { value, bind_to };
             }
@@ -191,7 +191,7 @@ impl<'ast> TypeChecker<'ast> {
 
 
 
-    pub(super) fn evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrName) {
+    pub(super) fn evaluate_and_bind_const(&mut self, value: ExprId, bind_to: PatternOrVarId) {
         let value_expr = self.ast.get_expr(value);
         let evaluated = match value_expr {
             Expr::Closure { .. } => {
@@ -207,16 +207,18 @@ impl<'ast> TypeChecker<'ast> {
 
         if let Some(val) = evaluated {
             match bind_to {
-                PatternOrName::Pattern(pattern) => {
+                PatternOrVarId::Pattern(pattern) => {
                     self.mark_vars_in_pattern_as_const(pattern, TypeVarConstVal::Evaluated(val));
                 }
-                PatternOrName::CustomTypeVarId(var_id) => {
+                PatternOrVarId::CustomTypeVarId(var_id) => {
                     // TODO: make tuple types better
                     let expected_type = self.typed_ast.get_expr_type(value);
                     let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
 
-                    let new_type_id = CustomTypeId(self.custom_type_impls.len().try_into().unwrap());
-                    self.custom_type_impls.push(TypeVarScope::default());
+                    // add the new CustomType!!
+                    let new_type_id = CustomTypeId(self.custom_types.len().try_into().unwrap());
+                    let var_name = self.typed_ast.get_var(var_id).name.clone().into_boxed_str();
+                    self.custom_types.push(CustomType { name: var_name, impls: TypeVarScope::default() });
 
                     let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, runtime_type_id));
                     let type_const = RuntimeValue::Type(new_type);
