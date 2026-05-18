@@ -4,7 +4,8 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
-    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx}, vm_compiling::{RuntimeValue, VmCompiler}
+    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, LabelInfo, RefinementId, RefinementType, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx},
+    vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
@@ -138,9 +139,9 @@ impl<'ast> TypeChecker<'ast> {
     }
 
 
-    pub(super) fn add_enum_specialization(&mut self, spec: EnumSpecialization) -> EnumSpecializationId {
-        let id = EnumSpecializationId(self.enum_specialization.len().try_into().unwrap());
-        self.enum_specialization.push(spec);
+    pub(super) fn add_type_refinement(&mut self, refinement: RefinementType) -> RefinementId {
+        let id = RefinementId(self.refinement_types.len().try_into().unwrap());
+        self.refinement_types.push(refinement);
         id
     }
     
@@ -263,7 +264,7 @@ impl<'ast> TypeChecker<'ast> {
                     }).collect();
 
                 let enum_id = self.add_enum_def(EnumDefinition { variants });
-                let enum_type = self.type_arena.add_type(Type::Enum(enum_id, None));
+                let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
                 
                 Some(RuntimeValue::Type(enum_type))
             }

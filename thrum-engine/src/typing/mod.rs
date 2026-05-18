@@ -28,11 +28,13 @@ pub enum Type {
     /// `const X = bool`, X has type `MetaType`
     MetaType,
 
-    Enum(EnumId, Option<EnumSpecializationId>),
+    Enum(EnumId),
     CustomType(CustomTypeId, TypeId),
 
     Tup(Vec<TypeTuple>),
     TupArr(TypeId, usize),
+
+    Refined(TypeId, RefinementId),
 
     Fn { param_types: Vec<TypeId>, return_type: TypeId },
 
@@ -50,12 +52,17 @@ pub struct TypeTuple {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum EnumSpecialization {
-    /// "currently" its this variant. could change though
-    Specialized(usize),
-    /// always this exact variant. `e.g. fn handle_some(x: Option.Some)`
-    HardSpecialized(usize),
-    /// can be multiple
+pub enum RefinementType {
+    Enum(EnumRefinement),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EnumRefinement {
+    /// "currently" its this variant. could change though. e.g. `let mut x = Option.None`
+    Soft(usize),
+    /// always this exact variant. e.g. `fn handle_some(x: Option.Some)`
+    Hard(usize),
+    /// can be multiple variants. e.g. `if ... { Option.None } else { Option.Some{ 3 } }`
     Multiple,
 }
 
@@ -71,7 +78,7 @@ pub struct TypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct EnumId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
-pub struct EnumSpecializationId(pub AstIds);
+pub struct RefinementId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct CustomTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -110,7 +117,7 @@ pub struct TypeChecker<'a> {
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
 
-    enum_specialization: Vec<EnumSpecialization>,
+    refinement_types: Vec<RefinementType>,
 
     // implemented stuff on types
     // e.g. `impl Number { ... }`
@@ -242,7 +249,7 @@ impl TypeChecker<'_> {
             var_scopes: vec![TypeVarScope::default()],
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
-            enum_specialization: Vec::new(),
+            refinement_types: Vec::new(),
             custom_types: Vec::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
@@ -366,57 +373,60 @@ impl TypeChecker<'_> {
                 }
             }
 
-            (Type::Enum(a_id, a_spec), Type::Enum(b_id, b_spec)) => {
-                #[allow(clippy::if_not_else, reason = "clippy wants to obscure the error path :(")]
-                if a_id != b_id {
-                    mismatch = true;
-                } else {
-                    // if both are actually an instance of an enum, and not just the enum type
-                    // (otherwise just do nothing, its fine)
-                    if let (Some(spec_id_a), Some(spec_id_b)) = (a_spec, b_spec) {
-                        let enum_spec_a = self.enum_specialization[spec_id_a.0 as usize];
-                        let enum_spec_b = self.enum_specialization[spec_id_b.0 as usize];
+            (Type::Refined(a_type, a_ref_id), Type::Refined(b_type, b_ref_id)) => {
+                self.unify_types(a_type, b_type, span);
 
-                        let merged_result = match (enum_spec_a, enum_spec_b) {
+                let a_ref = self.refinement_types[a_ref_id.0 as usize];
+                let b_ref = self.refinement_types[b_ref_id.0 as usize];
+
+                let merged_result = match (a_ref, b_ref) {
+                    (RefinementType::Enum(a_enum_ref), RefinementType::Enum(b_enum_ref)) => {
+                        match (a_enum_ref, b_enum_ref) {
                             // --- SOFT SPECIALIZATIONS ---
                             // two soft specializations of the same variant stay specialized!
                             // otherwise it turns into `Multiple`
                             // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
-                            (EnumSpecialization::Specialized(x), EnumSpecialization::Specialized(y)) => {
-                                if x == y { Some(EnumSpecialization::Specialized(x)) } 
-                                else { Some(EnumSpecialization::Multiple) }
+                            (EnumRefinement::Soft(x), EnumRefinement::Soft(y)) => {
+                                if x == y { Some(EnumRefinement::Soft(x)) } 
+                                else { Some(EnumRefinement::Multiple) }
                             }
                             
                             // --- HARD SPECIALIZATIONS ---
                             // Hard specializations have to meet the same variant, otherwise WoOOPs error.
-                            (EnumSpecialization::HardSpecialized(x), EnumSpecialization::HardSpecialized(y)) => {
-                                (x == y).then_some(EnumSpecialization::HardSpecialized(x))
+                            (EnumRefinement::Hard(x), EnumRefinement::Hard(y)) => {
+                                (x == y).then_some(EnumRefinement::Hard(x))
                             }
     
-                            (EnumSpecialization::HardSpecialized(hard), EnumSpecialization::Specialized(soft))
-                            | (EnumSpecialization::Specialized(soft), EnumSpecialization::HardSpecialized(hard)) => {
+                            (EnumRefinement::Hard(hard), EnumRefinement::Soft(soft))
+                            | (EnumRefinement::Soft(soft), EnumRefinement::Hard(hard)) => {
                                 // upgrading soft => hard is fine, IF they are the same variant.
-                                (soft == hard).then_some(EnumSpecialization::HardSpecialized(hard))
+                                (soft == hard).then_some(EnumRefinement::Hard(hard))
                             }
     
                             // Hard <=> Multiple is an error
-                            (EnumSpecialization::Multiple, EnumSpecialization::HardSpecialized(_)) |
-                            (EnumSpecialization::HardSpecialized(_), EnumSpecialization::Multiple) => None,
+                            (EnumRefinement::Multiple, EnumRefinement::Hard(_)) |
+                            (EnumRefinement::Hard(_), EnumRefinement::Multiple) => None,
 
                             // Multiple with anything else just stays Multiple
-                            (EnumSpecialization::Multiple, _) | (_, EnumSpecialization::Multiple) => {
-                                Some(EnumSpecialization::Multiple)
+                            (EnumRefinement::Multiple, _) | (_, EnumRefinement::Multiple) => {
+                                Some(EnumRefinement::Multiple)
                             }
-                        };
-
-                        if let Some(new_spec) = merged_result {
-                            // update the spec on both types!
-                            self.enum_specialization[spec_id_a.0 as usize] = new_spec;
-                            self.enum_specialization[spec_id_b.0 as usize] = new_spec;
-                        } else {
-                            mismatch = true;
                         }
                     }
+                };
+
+                if let Some(new_spec) = merged_result {
+                    // update the spec on both types!
+                    self.refinement_types[a_ref_id.0 as usize] = RefinementType::Enum(new_spec);
+                    self.refinement_types[b_ref_id.0 as usize] = RefinementType::Enum(new_spec);
+                } else {
+                    mismatch = true;
+                }
+            }
+
+            (Type::Enum(a_id), Type::Enum(b_id)) => {
+                if a_id != b_id {
+                    mismatch = true;
                 }
             }
 
@@ -467,13 +477,15 @@ impl TypeChecker<'_> {
         }
     }
 
-    pub(super) fn are_types_equivalent_ignore_spec(&self, left: TypeId, right: TypeId) -> bool {
+    pub(super) fn are_types_equivalent_ignore_notes(&self, left: TypeId, right: TypeId) -> bool {
         if left == right { return true }
 
         match (self.prune_type_once(left), self.prune_type_once(right)) {
-            (Type::Enum(id1, _), Type::Enum(id2, _)) => id1 == id2,
+            (Type::Refined(left_type, _), Type::Refined(right_type, _)) => {
+                self.are_types_equivalent_ignore_notes(left_type, right_type)
+            }
             (Type::CustomType(left_id, left_inner), Type::CustomType(right_id, right_inner)) => {
-                left_id == right_id && self.are_types_equivalent_ignore_spec(left_inner, right_inner)
+                left_id == right_id && self.are_types_equivalent_ignore_notes(left_inner, right_inner)
             }
             _ => false
         }
@@ -497,21 +509,30 @@ impl TypeChecker<'_> {
             Type::Error => write!(s, "error"),
             Type::Infer(infer) => write!(s, "?{}", infer.0),
 
-            Type::Enum(enum_id, spec_note) => {
-                write!(s, "enum<{enum_id:?}")?;
-                
-                if let Some(note) = spec_note {
-                    match self.enum_specialization[note.0 as usize] {
-                        EnumSpecialization::Multiple => write!(s, ", Multiple")?,
-                        EnumSpecialization::Specialized(i) => write!(s, ", Soft({i})")?,
-                        EnumSpecialization::HardSpecialized(i) => write!(s, ", Hard({i})")?,
-                    }
-                }
-                write!(s, ">")
+            Type::Enum(enum_id) => {
+                write!(s, "enum<{enum_id:?}>")
             }
 
-            Type::CustomType(id, _) => {
-                write!(s, "{}", self.custom_types[id.0 as usize].name)
+            Type::CustomType(custom_id, _) => {
+                write!(s, "{}", self.custom_types[custom_id.0 as usize].name)
+            }
+
+            Type::Refined(refined_inner, ref_id) => {
+                self.write_type(refined_inner, s)?;
+
+                match self.refinement_types[ref_id.0 as usize] {
+                    RefinementType::Enum(enum_ref) => {
+                        let enum_id = self.get_core_enum_id_panicky(refined_inner);
+                        let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
+
+                        match enum_ref {
+                            EnumRefinement::Multiple => { },
+                            EnumRefinement::Soft(i) => write!(s, ".?{}", variants[i].0)?,
+                            EnumRefinement::Hard(i) => write!(s, ".{}", variants[i].0)?,
+                        }
+                    }
+                }
+                Ok(())
             }
 
             Type::Tup(elems) => {
@@ -627,10 +648,14 @@ impl TypeChecker<'_> {
                 let new_inner = self.zonk_type(inner, span, cache);
                 self.type_arena.add_type(Type::CustomType(custom_id, new_inner))
             }
+            Type::Refined(typ, ref_id) => {
+                let new_typ = self.zonk_type(typ, span, cache);
+                self.type_arena.add_type(Type::Refined(new_typ, ref_id))
+            }
 
             // simple types don't need zonking
             Type::Num | Type::Str | Type::Bool | Type::Void | Type::Never
-            | Type::MetaType | Type::Error | Type::Enum(_, _) => id
+            | Type::MetaType | Type::Error | Type::Enum(_) => id
         };
 
         // resize the cache dynamically, because `self.type_arena.add_type()` might have added stuff
