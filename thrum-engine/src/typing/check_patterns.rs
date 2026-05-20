@@ -231,7 +231,10 @@ impl<'ast> TypeChecker<'ast> {
 
             Pattern::EnumVariant { name, attached_tuple } => {
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
-                if let Some((enum_id, variant_index, attached_type, spec_type)) = self.check_enum_variant(name, expected_type, span) {
+                if let Some(
+                    (enum_id, variant_index, attached_type, refine_type)
+                ) = self.check_enum_variant(name, expected_type, Some(span), false) {
+
                     if let Some(tup) = attached_tuple {
                         let (_, covered) = self.check_match_pattern(
                             *tup, Some(attached_type), has_value, const_update, vars_defined
@@ -254,7 +257,7 @@ impl<'ast> TypeChecker<'ast> {
                     }
                     self.typed_ast.resolved_enum_variant_pattern.insert(pattern, (enum_id, variant_index));
 
-                    spec_type
+                    refine_type
                 } else {
                     TypeId::ERROR
                 }

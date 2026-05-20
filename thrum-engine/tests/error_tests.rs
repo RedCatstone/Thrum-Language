@@ -27,7 +27,7 @@ fn typecheck_var_errors() {
     test_err!("let x = 10; x = 20", ErrType::TyperVarIsntDeclaredMut { .. });
     test_err!("let tup = (1, 2); tup[0] = 99", ErrType::TyperVarIsntDeclaredMut { .. });
 
-    test_err!("let x; x + 5", ErrType::TyperCantUseUninitializedVar { .. });
+    test_err!("let x: num; x + 5", ErrType::TyperCantUseUninitializedVar { .. });
     test_err!("let x; if true { x = 2 }; x^", ErrType::TyperCantUseMaybeInitializedVar { .. });
 
     test_err!("let s = \"hello\"; s^; s^", ErrType::TyperCantUseMovedVar { .. });

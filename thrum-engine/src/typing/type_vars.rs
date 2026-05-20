@@ -4,7 +4,7 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
-    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, LabelInfo, RefinementId, RefinementType, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx},
+    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, LabelInfo, FlowTypeId, FlowType, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx},
     vm_compiling::{RuntimeValue, VmCompiler}
 };
 
@@ -139,9 +139,9 @@ impl<'ast> TypeChecker<'ast> {
     }
 
 
-    pub(super) fn add_type_refinement(&mut self, refinement: RefinementType) -> RefinementId {
-        let id = RefinementId(self.refinement_types.len().try_into().unwrap());
-        self.refinement_types.push(refinement);
+    pub(super) fn add_type_refinement(&mut self, refinement: FlowType) -> FlowTypeId {
+        let id = FlowTypeId(self.specialized_types.len().try_into().unwrap());
+        self.specialized_types.push(refinement);
         id
     }
     

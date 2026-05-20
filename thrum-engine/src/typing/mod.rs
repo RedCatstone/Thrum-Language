@@ -29,12 +29,13 @@ pub enum Type {
     MetaType,
 
     Enum(EnumId),
+    FlowType(TypeId, FlowTypeId),
+    RefinedEnum(TypeId, EnumRefinement),
+
     CustomType(CustomTypeId, TypeId),
 
     Tup(Vec<TypeTuple>),
     TupArr(TypeId, usize),
-
-    Refined(TypeId, RefinementId),
 
     Fn { param_types: Vec<TypeId>, return_type: TypeId },
 
@@ -52,18 +53,30 @@ pub struct TypeTuple {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum RefinementType {
-    Enum(EnumRefinement),
+/// ## Example of flow types flowing:
+/// ```rs
+/// let mut x: Option = .Some{ 3 }
+/// handle_some(x)  // works, because `x` was specialized to be .Some
+/// x = .None
+/// handle_some(x)  // now it would error, because `handle_some` expects .Some
+/// ```
+pub enum FlowType {
+    Enum(EnumFlowType),
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum EnumRefinement {
-    /// "currently" its this variant. could change though. e.g. `let mut x = Option.None`
-    Soft(usize),
-    /// always this exact variant. e.g. `fn handle_some(x: Option.Some)`
-    Hard(usize),
+pub enum EnumFlowType {
+    /// currently its this variant. e.g. `let mut x = Option.None`
+    CurrVariant(usize),
     /// can be multiple variants. e.g. `if ... { Option.None } else { Option.Some{ 3 } }`
     Multiple,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// e.g. `type Percentage = num is 0..=100`
+/// e.g. `fn handle_some(x: Option.Some) { ... }`
+pub enum EnumRefinement {
+    ExactVariant(usize),
 }
 
 #[derive(Debug)]
@@ -78,7 +91,7 @@ pub struct TypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct EnumId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
-pub struct RefinementId(pub AstIds);
+pub struct FlowTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct CustomTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -117,7 +130,7 @@ pub struct TypeChecker<'a> {
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
 
-    refinement_types: Vec<RefinementType>,
+    specialized_types: Vec<FlowType>,
 
     // implemented stuff on types
     // e.g. `impl Number { ... }`
@@ -249,7 +262,7 @@ impl TypeChecker<'_> {
             var_scopes: vec![TypeVarScope::default()],
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
-            refinement_types: Vec::new(),
+            specialized_types: Vec::new(),
             custom_types: Vec::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
@@ -373,56 +386,39 @@ impl TypeChecker<'_> {
                 }
             }
 
-            (Type::Refined(a_type, a_ref_id), Type::Refined(b_type, b_ref_id)) => {
+            (Type::FlowType(a_type, a_refine_id), Type::FlowType(b_type, b_refine_id)) => {
                 self.unify_types(a_type, b_type, span);
 
-                let a_ref = self.refinement_types[a_ref_id.0 as usize];
-                let b_ref = self.refinement_types[b_ref_id.0 as usize];
+                let a_refine = self.specialized_types[a_refine_id.0 as usize];
+                let b_refine = self.specialized_types[b_refine_id.0 as usize];
 
-                let merged_result = match (a_ref, b_ref) {
-                    (RefinementType::Enum(a_enum_ref), RefinementType::Enum(b_enum_ref)) => {
-                        match (a_enum_ref, b_enum_ref) {
-                            // --- SOFT SPECIALIZATIONS ---
+                let merged_result = match (a_refine, b_refine) {
+                    (FlowType::Enum(a_enum_refine), FlowType::Enum(b_enum_refine)) => {
+                        FlowType::Enum(match (a_enum_refine, b_enum_refine) {
                             // two soft specializations of the same variant stay specialized!
                             // otherwise it turns into `Multiple`
                             // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
-                            (EnumRefinement::Soft(x), EnumRefinement::Soft(y)) => {
-                                if x == y { Some(EnumRefinement::Soft(x)) } 
-                                else { Some(EnumRefinement::Multiple) }
+                            (EnumFlowType::CurrVariant(x), EnumFlowType::CurrVariant(y)) => {
+                                if x == y { EnumFlowType::CurrVariant(x) } 
+                                else { EnumFlowType::Multiple }
                             }
                             
-                            // --- HARD SPECIALIZATIONS ---
-                            // Hard specializations have to meet the same variant, otherwise WoOOPs error.
-                            (EnumRefinement::Hard(x), EnumRefinement::Hard(y)) => {
-                                (x == y).then_some(EnumRefinement::Hard(x))
+                            (EnumFlowType::Multiple, _) | (_, EnumFlowType::Multiple) => {
+                                EnumFlowType::Multiple
                             }
-    
-                            (EnumRefinement::Hard(hard), EnumRefinement::Soft(soft))
-                            | (EnumRefinement::Soft(soft), EnumRefinement::Hard(hard)) => {
-                                // upgrading soft => hard is fine, IF they are the same variant.
-                                (soft == hard).then_some(EnumRefinement::Hard(hard))
-                            }
-    
-                            // Hard <=> Multiple is an error
-                            (EnumRefinement::Multiple, EnumRefinement::Hard(_)) |
-                            (EnumRefinement::Hard(_), EnumRefinement::Multiple) => None,
-
-                            // Multiple with anything else just stays Multiple
-                            (EnumRefinement::Multiple, _) | (_, EnumRefinement::Multiple) => {
-                                Some(EnumRefinement::Multiple)
-                            }
-                        }
+                        })
                     }
                 };
 
-                if let Some(new_spec) = merged_result {
-                    // update the spec on both types!
-                    self.refinement_types[a_ref_id.0 as usize] = RefinementType::Enum(new_spec);
-                    self.refinement_types[b_ref_id.0 as usize] = RefinementType::Enum(new_spec);
-                } else {
-                    mismatch = true;
-                }
+                // update the spec on both types!
+                self.specialized_types[a_refine_id.0 as usize] = merged_result;
+                self.specialized_types[b_refine_id.0 as usize] = merged_result;
             }
+
+            // if one is specialized and the other isn't => just ignore the specs
+            (Type::FlowType(spec_type, _), _) => self.unify_types(spec_type, id_b, span),
+            (_, Type::FlowType(spec_type, _)) => self.unify_types(id_a, spec_type, span),
+
 
             (Type::Enum(a_id), Type::Enum(b_id)) => {
                 if a_id != b_id {
@@ -481,7 +477,7 @@ impl TypeChecker<'_> {
         if left == right { return true }
 
         match (self.prune_type_once(left), self.prune_type_once(right)) {
-            (Type::Refined(left_type, _), Type::Refined(right_type, _)) => {
+            (Type::FlowType(left_type, _), Type::FlowType(right_type, _)) => {
                 self.are_types_equivalent_ignore_notes(left_type, right_type)
             }
             (Type::CustomType(left_id, left_inner), Type::CustomType(right_id, right_inner)) => {
@@ -517,22 +513,31 @@ impl TypeChecker<'_> {
                 write!(s, "{}", self.custom_types[custom_id.0 as usize].name)
             }
 
-            Type::Refined(refined_inner, ref_id) => {
-                self.write_type(refined_inner, s)?;
+            Type::FlowType(spec_inner, spec_id) => {
+                self.write_type(spec_inner, s)?;
 
-                match self.refinement_types[ref_id.0 as usize] {
-                    RefinementType::Enum(enum_ref) => {
-                        let enum_id = self.get_core_enum_id_panicky(refined_inner);
+                match self.specialized_types[spec_id.0 as usize] {
+                    FlowType::Enum(enum_spec) => {
+                        let enum_id = self.get_wrapped_enum_id(spec_inner).unwrap();
                         let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
 
-                        match enum_ref {
-                            EnumRefinement::Multiple => { },
-                            EnumRefinement::Soft(i) => write!(s, ".?{}", variants[i].0)?,
-                            EnumRefinement::Hard(i) => write!(s, ".{}", variants[i].0)?,
+                        match enum_spec {
+                            EnumFlowType::Multiple => write!(s, ".?")?,
+                            EnumFlowType::CurrVariant(i) => write!(s, ".?{}", variants[i].0)?,
                         }
                     }
                 }
                 Ok(())
+            }
+
+            Type::RefinedEnum(refined_inner, refinement) => {
+                self.write_type(refined_inner, s)?;
+                
+                let enum_id = self.get_wrapped_enum_id(refined_inner).unwrap();
+                let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
+                let EnumRefinement::ExactVariant(i) = refinement;
+
+                write!(s, ".{}", variants[i].0)
             }
 
             Type::Tup(elems) => {
@@ -648,9 +653,13 @@ impl TypeChecker<'_> {
                 let new_inner = self.zonk_type(inner, span, cache);
                 self.type_arena.add_type(Type::CustomType(custom_id, new_inner))
             }
-            Type::Refined(typ, ref_id) => {
+            Type::FlowType(typ, spec_id) => {
                 let new_typ = self.zonk_type(typ, span, cache);
-                self.type_arena.add_type(Type::Refined(new_typ, ref_id))
+                self.type_arena.add_type(Type::FlowType(new_typ, spec_id))
+            }
+            Type::RefinedEnum(typ, refinement) => {
+                let new_typ = self.zonk_type(typ, span, cache);
+                self.type_arena.add_type(Type::RefinedEnum(new_typ, refinement))
             }
 
             // simple types don't need zonking

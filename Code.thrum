@@ -1,7 +1,10 @@
-type N1 = num
-type N2 = num
+type Option = enum { None, Some{ num } }
 
-N1{ 6 } + N2{ 9 }
+let x: Option.Some = Option.Some{ 15 }
+
+match x^
+is .Some{ _ } => "balls"
+
 
 
 // type Option = enum { None, Some{ num } }

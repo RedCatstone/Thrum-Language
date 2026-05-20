@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumId, EnumRefinement, RefinementType, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}}, vm_compiling::RuntimeValue
+    typing::{CustomTypeId, EnumId, EnumRefinement, EnumFlowType, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, FlowType, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}}, vm_compiling::RuntimeValue
 };
 
 
@@ -63,8 +63,8 @@ impl TypeChecker<'_> {
         }
 
         let span = self.ast.get_expr_span(check_expr);
-
         let expr_expr = self.ast.get_expr(check_expr);
+
         let mut inferred_type = match expr_expr {
             Expr::Literal { val } => self.check_literal(val),
 
@@ -111,33 +111,34 @@ impl TypeChecker<'_> {
                 let left_pointer_type = self.check_expression(*left, is_never, &arr_ctx.auto_deref(AutoDerefMode::LeaveOnePointer));
 
                 let left_span = self.ast.get_expr_span(*left);
-                match self.prune_type_once_infer_err(left_pointer_type, left_span) {
-                    Type::Borrow { inner, mutable, borrows_var } => {
+                if let Type::Borrow { inner, mutable, borrows_var } = self.prune_type_once_infer_err(left_pointer_type, left_span) {
 
-                        let arr_inner_type = match self.prune_type_once_infer_err(inner, left_span) {
-                            Type::TupArr(inner, _) => inner,
-                            Type::Tup(elems) => {
-                                if elems.is_empty() {
-                                    self.error(ErrType::TyperCantIndexEmptyTuple { typ: self.fmt_type(inner) }, span)
+                    let arr_inner_type = match self.prune_type_once_infer_err(inner, left_span) {
+                        Type::TupArr(inner, _) => inner,
+                        Type::Tup(elems) => {
+                            if elems.is_empty() {
+                                self.error(ErrType::TyperCantIndexEmptyTuple { typ: self.fmt_type(inner) }, span)
+                            } else {
+                                // tuple indexing is allowed if all types are equal
+                                let first_typ = elems[0].typ;
+                                if elems.iter().all(|e| e.typ == first_typ) {
+                                    first_typ
                                 } else {
-                                    // tuple indexing is allowed if all types are equal
-                                    let first_typ = elems[0].typ;
-                                    if elems.iter().all(|e| e.typ == first_typ) {
-                                        first_typ
-                                    } else {
-                                        self.error(ErrType::TyperCantIndexHeterogenousTuple { typ: self.fmt_type(inner) }, span)
-                                    }
+                                    self.error(ErrType::TyperCantIndexHeterogenousTuple { typ: self.fmt_type(inner) }, span)
                                 }
                             }
-                            Type::Error => TypeId::ERROR,
-                            _ => self.error(ErrType::TyperCantIndexNonArrType { typ: self.fmt_type(inner) }, span)
-                        };
-        
-                        self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
-        
-                        self.type_arena.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
-                    },
-                    _ => TypeId::ERROR
+                        }
+                        Type::Error => TypeId::ERROR,
+                        _ => self.error(ErrType::TyperCantIndexNonArrType { typ: self.fmt_type(inner) }, span)
+                    };
+    
+                    self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
+    
+                    self.type_arena.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
+                }
+                else {
+                    let arr_type = self.type_arena.add_type(Type::TupArr(TypeId::ERROR, 1));
+                    self.type_mismatch(arr_type, left_pointer_type, span)
                 }
             }
 
@@ -455,7 +456,10 @@ impl TypeChecker<'_> {
 
             Expr::EnumVariant { data: AstEnumExpression { variant_name, attached_tuple } } => {
                 // using `.Variant` syntax requires that the Typechecker knows the expected Enumtype.
-                if let Some((enum_id, variant_index, attached_type, spec_type)) = self.check_enum_variant(variant_name, old_ctx.expected_type, span) {
+                if let Some(
+                    (enum_id, variant_index, attached_type, refine_type)
+                ) = self.check_enum_variant(variant_name, old_ctx.expected_type, Some(span), false) {
+
                     if let Some(tup) = attached_tuple {
                         self.check_expression(*tup, is_never, &ctx.expect(attached_type));
                     } else {
@@ -464,7 +468,7 @@ impl TypeChecker<'_> {
                     }
                     self.typed_ast.resolved_enum_variant.insert(check_expr, (enum_id, variant_index));
 
-                    spec_type
+                    refine_type
                 } else {
                     TypeId::ERROR
                 }
@@ -473,18 +477,17 @@ impl TypeChecker<'_> {
             Expr::TypeInstantiation { typ, data } => {
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
 
-                if let Type::Refined(refined_inner, ref_id) = self.prune_type_once_infer_err(meta_id, span)
-                && let RefinementType::Enum(EnumRefinement::Hard(i)) = self.refinement_types[ref_id.0 as usize] {
-                    // its a specialized constructor. e.g. `type X = Opt.Some; X{ 3 }`
+                if let Type::RefinedEnum(refined_inner, EnumRefinement::ExactVariant(i)) = self.prune_type_once_infer_err(meta_id, span) {
+                    // its a refined constructor. e.g. `type X = Opt.Some; X{ 3 }`
 
-                    let enum_id = self.get_core_enum_id_panicky(refined_inner);
+                    let enum_id = self.get_wrapped_enum_id(refined_inner).unwrap();
                     let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[i].1;
                     self.check_instantiation_payload(attached_type, check_expr, *data, is_never, &ctx);
                     self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(i));
 
                     // Return the Soft Specialized instance, wrapping the base_type!
-                    let spec = self.add_type_refinement(RefinementType::Enum(EnumRefinement::Soft(i)));
-                    self.type_arena.add_type(Type::Refined(refined_inner, spec))
+                    let spec = self.add_type_refinement(FlowType::Enum(EnumFlowType::CurrVariant(i)));
+                    self.type_arena.add_type(Type::FlowType(refined_inner, spec))
                 }
                 else {
                     match self.prune_type_once_infer_err(meta_id, span) {
@@ -559,60 +562,23 @@ impl TypeChecker<'_> {
             // should be desugared stuff
             Expr::While { .. } | Expr::For { .. } | Expr::FnDefinition { .. } => unreachable!("should be desugared already... {expr_expr:?}"),
         };
-
-        if inferred_type == TypeId::NEVER { *is_never = true; }
         
-        // insert the inferred_type into the typed_ast
-        inferred_type = if *is_never { TypeId::NEVER } else { inferred_type };
+        if inferred_type == TypeId::NEVER { *is_never = true; }
+        if *is_never { inferred_type = TypeId::NEVER; }
+
         self.typed_ast.expr_types[check_expr.0 as usize] = inferred_type;
 
-        // handle AutoDerefModes
         inferred_type = self.handle_deref_mode(old_ctx.deref_mode, check_expr);
 
         // unify it with the expected type (if something was expected)
         if let Some(expected) = old_ctx.expected_type {
-            // if type is know we can do auto-deref stuff. otherwise just unify
-            match self.prune_type_once(expected) {
-                Type::Infer(_) => self.unify_types(expected, inferred_type, span),
-                Type::Error => {}
-                _ => {
-                    self.unify_expression_with_type(check_expr, expected);
-                    inferred_type = self.typed_ast.get_expr_type(check_expr);
-                }
-            }
+            inferred_type = self.auto_deref_to_expected_type(check_expr, expected);
+            self.unify_types(expected, inferred_type, span);
         }
 
-        // return the new updated infered type
         inferred_type
     }
 
-    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: &CheckExprCtx) -> TypeId {
-        let span = self.ast.get_expr_span(check_expr);
-
-        match self.prune_type_once_infer_err(instance_type, span) {
-            Type::Error => TypeId::ERROR,
-            Type::Tup(_) => {
-                // if it expects a tuple, e.g. `type Point = { num, num }; Point{ 1, 2 }`
-                // then just typecheck normally. (`data` is already a tuple expr)
-                self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::Tuple);
-                self.check_expression(data, is_never, &ctx.expect(instance_type))
-            }
-            _ => {
-                // if it doesn't expect a tuple, it needs to extract the first element.
-                // e.g. `type N = num; N{ 3 }`
-                let Expr::Tuple { elems } = self.ast.get_expr(data) else {
-                    unreachable!("this is always a tuple.")
-                };
-                if let [first] = elems.as_slice() && first.label == "0" {
-                    self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::NewType);
-                    self.check_expression(first.expr, is_never, &ctx.expect(instance_type))
-                }
-                else {
-                    self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
-                }
-            }
-        }
-    }
 
 
 
@@ -623,9 +589,6 @@ impl TypeChecker<'_> {
             AstValue::Bool(_) => self.type_arena.add_type(Type::Bool),
         }
     }
-
-
-
 
 
     fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId) -> TypeId {
@@ -848,40 +811,42 @@ impl TypeChecker<'_> {
                     assert!(self.deref_if_pointer(*left));
                 }
                 let meta_type_id = self.check_annotation_meta_type_id(*left, false);
-                return self.check_member_access(meta_type_id, member_expr, None, true, expected_type);
-            }
-            
-            Type::Enum(enum_id, _) if came_from_meta => {
-                // enum member access only works if we came from a meta type
-                // e.g. `Option.None`
-                let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
-                if let Some(i) = variants.iter().position(|(x, _)| **x == **member) {
+
+                // if its an enum, check if the member is a variant
+                let expr_expects_type = expected_type == Some(TypeId::TYPE);
+                if let Some(
+                    (_, variant_index, attached_type, refined_type)
+                ) = self.check_enum_variant(member, Some(meta_type_id), None, expr_expects_type) {
                     // found a variant!
 
-                    if expected_type == Some(TypeId::TYPE) {
+                    return if expr_expects_type {
                         // if it expects a type, return a hard specialized type.
                         // e.g. `let x: Option.Some`, this can never be assigned any other enum variants, only .Some{ ... }
-                        let spec_type = self.apply_spec_to_enum(*enum_id, EnumRefinement::Hard(i), &[]);
-                        
-                        let constant = RuntimeValue::Type(spec_type);
+                        let constant = RuntimeValue::Type(refined_type);
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant });
 
-                        return self.type_arena.add_type(Type::Borrow { inner: TypeId::TYPE, mutable: false, borrows_var: None });
+                        self.type_arena.add_type(Type::Borrow { inner: TypeId::TYPE, mutable: false, borrows_var: None })
                     }
-
-                    // otherwise, its a runtime enum value
-                    let variant_type_id = variants[i].1;
-
-                    return if self.prune_type_once(variant_type_id) == Type::Void {
-                        // if the variant has no data, return a soft specialized type, e.g. `Option.None`
-                        // soft allows it to unify with `.Some` later
-                        self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::EnumWithNoData { i });
-                        self.apply_spec_to_enum(*enum_id, EnumRefinement::Soft(i), &[])
-                    } else {
-                        // if it has data, error. `Option.Some` without anything extra is invalid
-                        self.error(ErrType::TyperVariantRequiresData { variant: member.clone() }, left_span)
+                    else {
+                        // otherwise, its a runtime enum value
+                        if self.prune_type_once(attached_type) == Type::Void {
+                            // if the variant has no data, return a soft specialized type, e.g. `Option.None`
+                            // soft allows it to unify with `.Some` later
+                            self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::EnumWithNoData { i: variant_index });
+                            refined_type
+                        } else {
+                            // has data => error. `Option.Some` without anything extra is invalid
+                            self.error(ErrType::TyperVariantRequiresData { variant: member.clone() }, left_span)
+                        }
                     }
                 }
+
+                return self.check_member_access(meta_type_id, member_expr, None, true, expected_type);
+            }
+
+            // ignore specs here
+            Type::FlowType(spec_type, _) => {
+                return self.check_member_access(*spec_type, member_expr, came_from_ref, came_from_meta, expected_type)
             }
 
             Type::Error => return TypeId::ERROR,
@@ -1005,42 +970,49 @@ impl TypeChecker<'_> {
 
 
 
-    pub(super) fn check_enum_variant(&mut self, variant_name: &str, expected_type: Option<TypeId>, span: Span) -> Option<(EnumId, usize, TypeId, TypeId)> {
+    pub(super) fn check_enum_variant(
+        &mut self, variant_name: &str, expected_type: Option<TypeId>, err_span: Option<Span>, refine_hard: bool
+    ) -> Option<(EnumId, usize, TypeId, TypeId)> {
         // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
         let Some(expected) = expected_type else {
-            self.error(ErrType::TyperRequiresTypeAnnotation, span);
+            if let Some(span) = err_span {
+                self.error(ErrType::TyperRequiresTypeAnnotation, span);
+            }
             return None
         };
 
-        let (core_type, _) = self.peel_custom_types(expected, span);
+        if let Some(enum_id) = self.get_wrapped_enum_id(expected) {
+            let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
 
-        match self.prune_type_once_infer_err(core_type, span) {
-            Type::Enum(enum_id) => {
-                let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
-
-                // try to find the correct .Variant
-                let Some(variant_index) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
+            // try to find the correct .Variant
+            let Some(variant_index) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
+                if let Some(span) = err_span {
                     self.error(ErrType::TyperEnumDoesntHaveVariant { 
-                        enum_: self.fmt_type(core_type), 
+                        enum_: self.fmt_type(expected), 
                         variant: variant_name.into()
                     }, span);
-                    return None;
-                };
-                
-                let attached_type = enum_def.variants[variant_index].1;
+                }
+                return None;
+            };
+            
+            let attached_type = enum_def.variants[variant_index].1;
 
-                // soft specialize it and wrap it back in the custom types
-                // so this function will turn `CustomType(1, Enum<0>)` -> `Refined<CustomType(1, Enum<0>), Soft<0>>`
-                let refinement = self.add_type_refinement(RefinementType::Enum(EnumRefinement::Soft(variant_index)));
-                let ref_type = self.type_arena.add_type(Type::Refined(core_type, refinement));
+            // refine/specialize it and wrap it back in the custom types
+            // so this function will turn `CustomType(1, Enum<0>)` -> `Refined<CustomType(1, Enum<0>), Soft<0>>`
+            let refine_type = if refine_hard {
+                self.type_arena.add_type(Type::RefinedEnum(expected, EnumRefinement::ExactVariant(variant_index)))
+            } else {
+                let spec_id = self.add_type_refinement(FlowType::Enum(EnumFlowType::CurrVariant(variant_index)));
+                self.type_arena.add_type(Type::FlowType(expected, spec_id))
+            };
 
-                Some((enum_id, variant_index, attached_type, ref_type))
-            }
-            Type::Error => None,
-            _ => {
+            Some((enum_id, variant_index, attached_type, refine_type))
+        }
+        else {
+            if let Some(span) = err_span {
                 self.error(ErrType::TyperExpectedTypeIsntAnEnum { typ: self.fmt_type(expected) }, span);
-                None
             }
+            None
         }
     }
 
@@ -1061,64 +1033,93 @@ impl TypeChecker<'_> {
         core
     }
 
-    pub fn get_core_enum_id_panicky(&self, mut id: TypeId) -> EnumId {
-        while let Type::CustomType(_, inner) = self.prune_type_once(id) {
-            id = inner;
+    #[must_use]
+    pub fn get_wrapped_enum_id(&self, mut id: TypeId) -> Option<EnumId> {
+        loop {
+            match self.prune_type_once(id) {
+                Type::CustomType(_, inner) | Type::FlowType(inner, _) => {
+                    id = inner;
+                }
+                Type::Enum(enum_id) => return Some(enum_id),
+                _ => return None
+            }
         }
-        let Type::Enum(enum_id) = self.prune_type_once(id) else {
-            panic!("customwrapper core was not an enum type...")
-        };
-        enum_id
     }
+
+
+
+    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: &CheckExprCtx) -> TypeId {
+        let span = self.ast.get_expr_span(check_expr);
+
+        match self.prune_type_once_infer_err(instance_type, span) {
+            Type::Error => TypeId::ERROR,
+            Type::Tup(_) => {
+                // if it expects a tuple, e.g. `type Point = { num, num }; Point{ 1, 2 }`
+                // then just typecheck normally. (`data` is already a tuple expr)
+                self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::Tuple);
+                self.check_expression(data, is_never, &ctx.expect(instance_type))
+            }
+            _ => {
+                // if it doesn't expect a tuple, it needs to extract the first element.
+                // e.g. `type N = num; N{ 3 }`
+                let Expr::Tuple { elems } = self.ast.get_expr(data) else {
+                    unreachable!("this is always a tuple.")
+                };
+                if let [first] = elems.as_slice() && first.label == "0" {
+                    self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::NewType);
+                    self.check_expression(first.expr, is_never, &ctx.expect(instance_type))
+                }
+                else {
+                    self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
+                }
+            }
+        }
+    }
+    
 
 
 
     /// this function allows auto-deref to autoclone types
     /// e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 moves
     /// e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 move
-    fn unify_expression_with_type(&mut self, expr: ExprId, expected_type: TypeId) {
+    fn auto_deref_to_expected_type(&mut self, expr: ExprId, expected_type: TypeId) -> TypeId {
         let expr_type = self.typed_ast.get_expr_type(expr);
         let span = self.ast.get_expr_span(expr);
         
-        let (expr_p_count, is_auto_clone_after) = self.count_initial_pointers(expr_type, span);
-        let (expected_p_count, _) = self.count_initial_pointers(expected_type, span);
+        if let Some((expr_p_count, is_auto_clone_after)) = self.count_initial_pointers(expr_type)
+        && let Some((expected_p_count, _)) = self.count_initial_pointers(expected_type) {
 
-        // if we have more pointers than the expected_type, AND everything that needs to be derefed is auto_clone
-        if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {
-            for _ in 0..(expr_p_count - expected_p_count) {
-                match self.prune_type_once_infer_err(expr_type, span) {
-                    Type::Borrow { inner, mutable: _, borrows_var: _ } => {
-                        self.insert_deref(expr, false, inner);
-                    }
-                    _ => unreachable!("i just checked the amount of pointers, so this is unreachable \
-                        ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({}, {})", self.fmt_type(expr_type), self.fmt_type(expected_type))
+            // if we have more pointers than the expected_type, AND everything that needs to be derefed is auto_clone
+            if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {
+                for _ in 0..(expr_p_count - expected_p_count) {
+                    let Type::Borrow { inner, .. } = self.prune_type_once_infer_err(expr_type, span) else {
+                        unreachable!("i just checked the amount of pointers, so this is unreachable \
+                            ({expr_p_count}, {expected_p_count}, {is_auto_clone_after}) ({}, {})", self.fmt_type(expr_type), self.fmt_type(expected_type))
+                    };
+                    self.insert_deref(expr, false, inner);
                 }
             }
         }
-        // just unify after dereferencing pointers
-        let new_expr_type = self.typed_ast.get_expr_type(expr);
-        self.unify_types(expected_type, new_expr_type, span);
+
+        self.typed_ast.get_expr_type(expr)
     }
 
-    fn count_initial_pointers(&mut self, typ: TypeId, err_span: Span) -> (usize, bool) {
+    fn count_initial_pointers(&self, typ: TypeId) -> Option<(usize, bool)> {
         let mut curr_typ = typ;
         let mut count = 0;
 
-        while let Type::Borrow { inner, .. } = self.prune_type_once_infer_err(curr_typ, err_span) {
+        while let Type::Borrow { inner, .. } = self.prune_type_once(curr_typ) {
             curr_typ = inner;
             count += 1;
         }
 
-        let final_pruned = self.prune_type_once_infer_err(curr_typ, err_span);
-        let final_pruned_auto_clone = self.is_auto_clone(&final_pruned, err_span);
-        (count, final_pruned_auto_clone)
+        self.is_auto_clone(curr_typ)
+            .map(|final_auto_clone| (count, final_auto_clone))
     }
 
 
 
     pub fn handle_deref_mode(&mut self, deref_mode: AutoDerefMode, check_expr: ExprId) -> TypeId {
-        let span = self.ast.get_expr_span(check_expr);
-
         match deref_mode {
             AutoDerefMode::None => {/* do nothing */}
             AutoDerefMode::Once => {
@@ -1128,12 +1129,7 @@ impl TypeChecker<'_> {
                 while self.deref_if_pointer(check_expr) { }
             }
             AutoDerefMode::LeaveOnePointer => {
-                let expr_type = self.typed_ast.get_expr_type(check_expr);
-                if 0 == self.count_initial_pointers(expr_type, span).0 {
-                    let err_borrow = self.type_arena.add_type(Type::Borrow { inner: TypeId::ERROR, mutable: false, borrows_var: None });
-                    self.type_mismatch(err_borrow, expr_type, span);
-                }
-                while 1 < self.count_initial_pointers(self.typed_ast.get_expr_type(check_expr), span).0 {
+                while let Some((2.., _)) = self.count_initial_pointers(self.typed_ast.get_expr_type(check_expr)) {
                     assert!(self.deref_if_pointer(check_expr));
                 }
             }
@@ -1156,25 +1152,26 @@ impl TypeChecker<'_> {
         }
     }
 
-    fn check_deref_memory_rules(&mut self, inner_type: TypeId, borrows_var: Option<TypeVarId>, span: Span) -> bool {
-        let pruned_inner = self.prune_type_once_infer_err(inner_type, span);
-        let auto_clone = self.is_auto_clone(&pruned_inner, span);
-
-        if auto_clone {
-            if let Some(x) = borrows_var {
-                self.clone_variable(x, span);
+    fn check_deref_memory_rules(&mut self, inner: TypeId, borrows_var: Option<TypeVarId>, span: Span) -> bool {
+        if let Some(auto_clone) = self.is_auto_clone(inner) {
+            if auto_clone {
+                if let Some(x) = borrows_var {
+                    self.clone_variable(x, span);
+                }
+            } else {
+                // if it isn't autoclone, it needs to move it
+                if let Some(x) = borrows_var {
+                    self.move_variable(x, span);
+                }
+                else {
+                    self.error(ErrType::TyperCantDerefUnknownPointerType, span); 
+                }
             }
+            auto_clone
         } else {
-            // if it isn't autoclone, it needs to move it
-            if let Some(x) = borrows_var {
-                self.move_variable(x, span);
-            }
-            else {
-                self.error(ErrType::TyperCantDerefUnknownPointerType, span); 
-            }
+            self.error(ErrType::TyperTypeMustBeKnownHere { typ: self.fmt_type(inner) }, span);
+            true  // just return true here for less chained errors
         }
-
-        auto_clone
     }
 
     fn insert_deref(&mut self, expr: ExprId, moves: bool, new_type: TypeId) {
@@ -1186,8 +1183,11 @@ impl TypeChecker<'_> {
         // println!("derefed: {:?}", self.ast.get_expr(expr));
     }
 
-    fn is_auto_clone(&mut self, typ: &Type, span: Span) -> bool {
-        match typ {
+    /// Some(true) - is autoclone
+    /// Some(false) - isn't autoclone
+    /// None - infer error
+    fn is_auto_clone(&self, typ: TypeId) -> Option<bool> {
+        match self.prune_type_once(typ) {
             Type::Num
             | Type::Bool
             | Type::Borrow { .. }
@@ -1195,19 +1195,18 @@ impl TypeChecker<'_> {
             | Type::MetaType
             | Type::Void
             | Type::Never
-            | Type::Error => true,
+            | Type::Error => Some(true),
 
             Type::Str
             | Type::TupArr(_, _)
             | Type::Tup(_)
-            | Type::Enum(_) => false,
+            | Type::Enum(_) => Some(false),
 
-            Type::CustomType(_, id) | Type::Refined(id, _) => {
-                let inner = self.prune_type_once_infer_err(*id, span);
-                self.is_auto_clone(&inner, span)
+            Type::CustomType(_, inner) | Type::FlowType(inner, _) | Type::RefinedEnum(inner, _) => {
+                self.is_auto_clone(inner)
             }
 
-            Type::Infer(_) => unreachable!("is_auto_clone() should not be called with type {typ:?}")
+            Type::Infer(_) => None
         }
     }
 }
