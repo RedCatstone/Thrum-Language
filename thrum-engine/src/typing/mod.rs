@@ -11,6 +11,7 @@ pub mod type_vars;
 mod check_expressions;
 mod check_patterns;
 mod exhaustiveness;
+mod coercion;
 
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -305,14 +306,20 @@ impl TypeChecker<'_> {
     }
     
     #[must_use]
-    pub fn prune_id_once(&self, id: TypeId) -> TypeId {
-        let mut current_id = id;
-        while let Type::Infer(infer_id) = self.type_arena.types[current_id.0 as usize] {
-            if let Some(resolved_id) = self.inference_types[infer_id.0 as usize] {
-                current_id = resolved_id;
-            } else { break }
+    pub fn prune_id_once(&self, mut id: TypeId) -> TypeId {
+        loop {
+            match self.type_arena.types[id.0 as usize] {
+                Type::Infer(infer_id)
+                if let Some(resolved_id) = self.inference_types[infer_id.0 as usize] => {
+                    id = resolved_id;
+                }
+                Type::FlowType(base_id, flow_id)
+                if let FlowType::Enum(EnumFlowType::Multiple) = self.specialized_types[flow_id.0 as usize] => {
+                    id = base_id;
+                }
+                _ => return id
+            }
         }
-        current_id
     }
     #[must_use]
     pub fn prune_type_once(&self, id: TypeId) -> Type {
@@ -426,6 +433,13 @@ impl TypeChecker<'_> {
                 }
             }
 
+            (Type::RefinedEnum(base_a, refined_a), Type::RefinedEnum(base_b, refined_b)) => {
+                self.unify_types(base_a, base_b, span);
+                if refined_a != refined_b {
+                    mismatch = true;
+                }
+            }
+
             // a tuple with only types IS a type itself
             (Type::MetaType, Type::Tup(elems)) => {
                 for elem in elems {
@@ -473,15 +487,15 @@ impl TypeChecker<'_> {
         }
     }
 
-    pub(super) fn are_types_equivalent_ignore_notes(&self, left: TypeId, right: TypeId) -> bool {
+    pub(super) fn are_types_equivalent_ignore_flow(&self, left: TypeId, right: TypeId) -> bool {
         if left == right { return true }
 
         match (self.prune_type_once(left), self.prune_type_once(right)) {
-            (Type::FlowType(left_type, _), Type::FlowType(right_type, _)) => {
-                self.are_types_equivalent_ignore_notes(left_type, right_type)
-            }
+            (Type::FlowType(left_type, _), _) => self.are_types_equivalent_ignore_flow(left_type, right),
+            (_, Type::FlowType(right_type, _)) => self.are_types_equivalent_ignore_flow(left, right_type),
+
             (Type::CustomType(left_id, left_inner), Type::CustomType(right_id, right_inner)) => {
-                left_id == right_id && self.are_types_equivalent_ignore_notes(left_inner, right_inner)
+                left_id == right_id && self.are_types_equivalent_ignore_flow(left_inner, right_inner)
             }
             _ => false
         }
@@ -611,6 +625,8 @@ impl TypeChecker<'_> {
     }
 
     fn zonk_type(&mut self, id: TypeId, span: Span, cache: &mut Vec<Option<TypeId>>) -> TypeId {
+        let id = self.prune_id_once(id);
+
         if let Some(zonked) = cache[id.0 as usize] {
             return zonked;
         }
