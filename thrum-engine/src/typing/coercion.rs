@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::Span,
     parsing::ast::ExprId,
-    typing::{Type, TypeChecker, TypeId, TypeVarId, }
+    typing::{EnumFlowType, EnumRefinement, FlowType, Type, TypeChecker, TypeId, TypeVarId }
 };
 
 
@@ -12,14 +12,65 @@ pub enum AutoDerefMode {
 }
 
 impl TypeChecker<'_> {
-    /// this function allows auto-deref to autoclone types
-    /// e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 moves
-    /// e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 move
-    pub(super) fn auto_deref_to_expected_type(&mut self, expr: ExprId, expected_type: TypeId) -> TypeId {
+    pub(super) fn coerce_to_expected_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
+        // 1. deref pointers so the amounts there match.
+        let expr_type = self.auto_deref_to_expected_type(expr, expected_id);
+        
+        // 2. coercion.
+        let coerced = self.coerce_type(expr_type, expected_id);
+        self.typed_ast.expr_types[expr.0 as usize] = coerced;
+        coerced
+    }
+
+
+
+    fn coerce_type(&self, expr_type_id: TypeId, expected_id: TypeId) -> TypeId {
+        let expr_type = self.prune_type_once(expr_type_id);
+        let expected_type = self.prune_type_once(expected_id);
+
+        match (expr_type, expected_type) {
+            // FlowType -> RefinedEnum
+            // e.g. passing a `.?Some` to a function expecting `.Some`
+            (Type::FlowType(base_a, flow_id), Type::RefinedEnum(base_b, refinement))
+            if self.are_types_equivalent_ignore_flow(base_a, base_b) => {
+                let flow = self.specialized_types[flow_id.0 as usize];
+                match (flow, refinement) {
+                    (FlowType::Enum(EnumFlowType::CurrVariant(i)), EnumRefinement::ExactVariant(j)) if i == j => {
+                        return expected_id;
+                    }
+                    _ => {}
+                }
+            }
+
+            // RefinedEnum -> Enum
+            // e.g. passing a refined `.Some` to a function expecting plain `Option`
+            (Type::RefinedEnum(base_a, _), _)
+            if self.are_types_equivalent_ignore_flow(base_a, expected_id) => {
+                return expected_id;
+            }
+
+            // // Tuple -> MetaType
+            // (Type::Tup(_), Type::MetaType) => {
+            //     // TODO, tuples should coerce to `Type::MetaType`, not behave like a type.
+            // }
+
+            _ => {}
+        }
+        
+        expr_type_id
+    }
+
+
+
+
+    /// this function allows auto-deref to autoclone types\
+    /// e.g. expr.typ: &&bool, expected: bool -> works, inserts 2 copies (only because bool is `auto_clone`)\
+    /// e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 copy
+    fn auto_deref_to_expected_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
         let expr_type = self.typed_ast.get_expr_type(expr);
         
         if let Some((expr_p_count, is_auto_clone_after)) = self.count_initial_pointers(expr_type)
-        && let Some((expected_p_count, _)) = self.count_initial_pointers(expected_type) {
+        && let Some((expected_p_count, _)) = self.count_initial_pointers(expected_id) {
 
             // if we have more pointers than the expected_type, AND everything that needs to be derefed is auto_clone
             if expr_p_count > expected_p_count && (expected_p_count != 0 || is_auto_clone_after) {

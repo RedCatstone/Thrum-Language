@@ -567,7 +567,7 @@ impl TypeChecker<'_> {
 
         // unify it with the expected type (if something was expected)
         if let Some(expected) = old_ctx.expected_type {
-            inferred_type = self.auto_deref_to_expected_type(check_expr, expected);
+            inferred_type = self.coerce_to_expected_type(check_expr, expected);
             self.unify_types(expected, inferred_type, span);
         }
 
@@ -1011,25 +1011,8 @@ impl TypeChecker<'_> {
         }
     }
 
-
-    pub fn peel_custom_types(&mut self, mut id: TypeId, err_span: Span) -> (TypeId, Vec<CustomTypeId>) {
-        let mut wrappers = Vec::new();
-        while let Type::CustomType(custom_id, inner) = self.prune_type_once_infer_err(id, err_span) {
-            wrappers.push(custom_id);
-            id = inner;
-        }
-        (id, wrappers)
-    }
-
-    pub fn wrap_back_in_custom_types(&mut self, mut core: TypeId, wrappers: &[CustomTypeId]) -> TypeId {
-        for &custom_id in wrappers.iter().rev() {
-            core = self.type_arena.add_type(Type::CustomType(custom_id, core));
-        }
-        core
-    }
-
     #[must_use]
-    pub fn get_wrapped_enum_id(&self, mut id: TypeId) -> Option<EnumId> {
+    pub(super) fn get_wrapped_enum_id(&self, mut id: TypeId) -> Option<EnumId> {
         loop {
             match self.prune_type_once(id) {
                 Type::CustomType(_, inner) | Type::FlowType(inner, _) => {
