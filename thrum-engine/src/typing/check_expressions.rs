@@ -697,7 +697,7 @@ impl TypeChecker<'_> {
             }, span);
         }
         if !can_bind_vars && !vars_defined.is_empty() {
-            self.error(ErrType::TyperInvalidBindingCaseExpr, span);
+            self.error(ErrType::TyperInvalidBindingIsExpr, span);
         }
         pattern_type
     }

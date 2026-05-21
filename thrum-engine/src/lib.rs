@@ -80,7 +80,7 @@ pub enum ErrType {
     #[display("Requires type annotation.")]
     TyperRequiresTypeAnnotation,
     #[display("Is-expressions that bind variables aren't allowed here.")]
-    TyperInvalidBindingCaseExpr,
+    TyperInvalidBindingIsExpr,
     #[display("break is not allowed outside of loops.")]
     TyperBreakOutsideLoop,
     #[display("could not find the label #{label}. Current labels in scope: {}", available.join(", "))]
@@ -141,6 +141,8 @@ pub enum ErrType {
     TyperEnumDoesntHaveVariant { enum_: String, variant: Box<str> },
     #[display("Enum variant .{variant} requires data.")]
     TyperVariantRequiresData { variant: String },
+    #[display("Expected exact variant .{variant}, found .{found}")]
+    TyperEnumExpectedExactVariant { variant: String, found: String, },
 
     #[display("Runtime values aren't allowed in impl-blocks.")]
     TyperRuntimeValuesArentAllowedInImplBlocks,

@@ -1,10 +1,9 @@
 type Option = enum { None, Some{ num } }
 
 let x: Option.Some = Option.Some{ 15 }
+let .Some{ inner } = x^
 
-match x^
-is .Some{ _ } => "balls"
-
+inner^
 
 
 // type Option = enum { None, Some{ num } }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::{
-    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
+    ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId}, typing::{EnumId, EnumRefinement, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal}, vm_compiling::RuntimeValue
 };
 
 
@@ -230,34 +230,49 @@ impl<'ast> TypeChecker<'ast> {
             }
 
             Pattern::EnumVariant { name, attached_tuple } => {
+                let mut expected_refined_enum = false;
+
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
-                if let Some(
-                    (enum_id, variant_index, attached_type, refine_type)
-                ) = self.check_enum_variant(name, expected_type, Some(span), false) {
+                let resolved_variant = 
+                    if let Some(expected) = expected_type
+                    && let Type::RefinedEnum(refine_inner, EnumRefinement::ExactVariant(i)) = self.prune_type_once(expected) {
+                        // its a hard refined enum
+                        // e.g. `let .Some{ inner } = Option.Some{ 123 }`
+                        expected_refined_enum = true;
 
-                    if let Some(tup) = attached_tuple {
-                        let (_, covered) = self.check_match_pattern(
-                            *tup, Some(attached_type), has_value, const_update, vars_defined
-                        );
-                        for covered in covered {
-                            covered_cases.push(PatternSpace::EnumVariant {
-                                enum_id,
-                                variant_index,
-                                attached_tuple: Box::new(covered)
-                            });
+                        let enum_id = self.get_wrapped_enum_id(refine_inner).unwrap();
+                        let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
+
+                        let (variant_name, attached_type) = variants[i].clone();
+                        if *variant_name != *name {
+                            self.error(ErrType::TyperEnumExpectedExactVariant { variant: variant_name.to_string(), found: name.clone() }, span);
                         }
-                    } else {
-                        // if the variant had no data, then the defined variant shouldn't have data either!
-                        self.unify_types(TypeId::VOID, attached_type, span);
-                        covered_cases.push(PatternSpace::EnumVariant {
-                            enum_id,
-                            variant_index,
-                            attached_tuple: Box::new(PatternSpace::All)
-                        });
-                    }
-                    self.typed_ast.resolved_enum_variant_pattern.insert(pattern, (enum_id, variant_index));
 
-                    refine_type
+                        Some((enum_id, i, attached_type, expected))
+                    }
+                    else {
+                        self.check_enum_variant(name, expected_type, Some(span), false)
+                    };
+
+
+                if let Some((enum_id, variant_index, attached_type, final_type)) = resolved_variant {
+                    // now that we found a variant, handle the inner data
+
+                    let inner_covered = if let Some(tup) = attached_tuple {
+                        self.check_match_pattern(*tup, Some(attached_type), has_value, const_update, vars_defined).1
+                    } else {
+                        self.unify_types(TypeId::VOID, attached_type, span);
+                        vec![PatternSpace::All]
+                    };
+                    for covered in inner_covered {
+                        if expected_refined_enum {
+                            covered_cases.push(covered);
+                        } else {
+                            covered_cases.push(PatternSpace::EnumVariant { enum_id, variant_index, attached_tuple: Box::new(covered) });
+                        }
+                    }
+                    self.typed_ast.resolved_enum_variant_pattern.insert(pattern,(enum_id,variant_index));
+                    final_type
                 } else {
                     TypeId::ERROR
                 }

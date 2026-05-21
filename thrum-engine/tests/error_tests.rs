@@ -80,14 +80,27 @@ fn invalid_op_types() {
 fn exhaustive_pattern_matching() {
     test_err!("match 5 is 1 => 2", ErrType::TyperPatternDoesntCoverAllCases { .. });
     test_err!("
+        match (true, false)
+        is (true, true) => 0
+        is (false, _) => 1
+    ", ErrType::TyperPatternDoesntCoverAllCases { .. });
+    test_err!("
         const Opt = enum { None, Some{ bool } }
         let val: Opt = .Some{ true }
         match val^ is .None | .Some{ true } => 0
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
+    test_err!("
+        const Opt = enum { None, Some{ bool } }
+        let val: Opt.Some = .Some{ true }
+        match val^ is .Some{ true } => 0
+    ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
+}
 
-    test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingCaseExpr);
-    test_err!("if (5 is let x) is true {}", ErrType::TyperInvalidBindingCaseExpr);
+#[test]
+fn pattern_binding() {
+    test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingIsExpr);
+    test_err!("if (5 is let x) is true {}", ErrType::TyperInvalidBindingIsExpr);
 
     test_err!("5 is !(let x)", ErrType::TyperNotPatternCantBindVars);
 
