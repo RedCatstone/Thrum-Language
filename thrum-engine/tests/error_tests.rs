@@ -166,3 +166,14 @@ fn typecheck_functions() {
 fn deref_non_local_pointer() {
     test_err!("type T = (); impl T { fn f(self: &Self) { self^^; } }", ErrType::TyperCantDerefUnknownPointerType);
 }
+
+#[test]
+fn decay_soft_info_on_variable_bind() {
+    test_err!("
+        type Option = enum { None, Some{ num } };
+
+        let x = Option.Some{ 15 }
+        let .Some{ inner } = x^
+        inner^
+    ", ErrType::TyperFailableAssignPattern { .. });
+}

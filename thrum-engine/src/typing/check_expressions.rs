@@ -1,7 +1,8 @@
 use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumFlowType, EnumId, EnumRefinement, FlowType, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, check_patterns::CheckPatternVars, coercion::AutoDerefMode, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}}, vm_compiling::RuntimeValue
+    typing::{CustomTypeId, EnumId, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode, check_patterns::CheckPatternVars, coercion::AutoDerefMode, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}},
+    vm_compiling::RuntimeValue
 };
 
 
@@ -153,13 +154,13 @@ impl TypeChecker<'_> {
                         self.check_expression(expr, is_never, &ctx);
                     }
 
-                    let last_type = self.check_expression(last_expr, is_never, &ctx.allow_conditional_bindings());
+                    let mut last_type = self.check_expression(last_expr, is_never, &ctx.allow_conditional_bindings());
 
                     // label logic again
                     if let Some(label) = label {
                         let mut label_info = self.curr_label_infos.pop().unwrap();
                         assert_eq!(label_info.label, *label);
-                        self.unify_types(last_type, label_info.typ, self.ast.get_expr_span(last_expr));
+                        last_type = self.unify_types(last_type, label_info.typ, self.ast.get_expr_span(last_expr), UnifyMode::FindParentType);
 
                         // 1 more snapshot after the full block executed
                         label_info.break_snapshots.push(self.snapshot_branch_vars_state(*is_never));
@@ -213,16 +214,8 @@ impl TypeChecker<'_> {
                 let alt_snap = self.snapshot_branch_vars_state(alt_is_never);
                 self.merge_vars_states(snap, &[then_snap, alt_snap]);
 
-                // determine the final type:
-                match (then_is_never, alt_is_never) {
-                    (true, true) => TypeId::NEVER,
-                    (true, false) => alt_typ,
-                    (false, true) => then_typ,
-                    (false, false) => {
-                        self.unify_types(then_typ, alt_typ, span);
-                        then_typ
-                    }
-                }
+                // determine the final type: (used to be more complicated, thats why this comment is here lol)
+                self.unify_types(then_typ, alt_typ, span, UnifyMode::FindParentType)
             },
 
             Expr::Ensure { condition, alt, then } => {
@@ -235,7 +228,7 @@ impl TypeChecker<'_> {
                     self.type_mismatch(TypeId::NEVER, alt_type, self.ast.get_expr_span(*alt));
                 }
 
-                // since alt.typ is always be Type::Never only the then branch snapshot matters
+                // since the alt is always Type::Never, only the then branch snapshot matters
                 self.restore_vars_state(&snap);
 
                 self.check_expression(*then, is_never, &ctx)
@@ -256,7 +249,7 @@ impl TypeChecker<'_> {
                     self.enter_scope();
 
                     let (_, arm_covered) = self.check_match_pattern(
-                        arm.pattern, Some(match_val_type), true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
+                        arm.pattern, Some(match_val_type), false, true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
                     );
                     covered_cases.extend(arm_covered);
                     
@@ -295,8 +288,8 @@ impl TypeChecker<'_> {
                 let label_info = self.curr_label_infos.pop().unwrap();
                 assert_eq!(label_info.label, *label);
                 if loop_break_type == self.prune_id_once(loop_break_type) {
-                    // loop doesn't have any breaks -> infinite loop -> Type::Never
-                    self.unify_types(loop_break_type, TypeId::NEVER, span);
+                    // loop doesn't have any breaks -> infinite loop -> resolve it to Type::Never
+                    self.unify_types(loop_break_type, TypeId::NEVER, span, UnifyMode::Subtype);
                 }
                 self.merge_vars_states(snap_before_loop, &label_info.break_snapshots);
 
@@ -310,7 +303,7 @@ impl TypeChecker<'_> {
 
                 if let Some(extra_op) = extra_op {
                     let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, value_type, value_type);
-                    self.unify_types(value_type, infixed_typ, *op_span);
+                    self.unify_types(value_type, infixed_typ, *op_span, UnifyMode::Subtype);
                 }
                 TypeId::VOID
             },
@@ -417,7 +410,7 @@ impl TypeChecker<'_> {
                         if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
                             let first_arg_type = self.typed_ast.get_expr_type(*self_sugar_expr);
                             if let Some(first_param) = param_types.first() {
-                                self.unify_types(*first_param, first_arg_type, self.ast.get_expr_span(*self_sugar_expr));
+                                self.unify_types(*first_param, first_arg_type, self.ast.get_expr_span(*self_sugar_expr), UnifyMode::Subtype);
                                 // if there isn't a first param it will error on the arg_count check anyways
                             }
                             1
@@ -453,13 +446,13 @@ impl TypeChecker<'_> {
                 // using `.Variant` syntax requires that the Typechecker knows the expected Enumtype.
                 if let Some(
                     (enum_id, variant_index, attached_type, refine_type)
-                ) = self.check_enum_variant(variant_name, old_ctx.expected_type, Some(span), false) {
+                ) = self.check_enum_variant(variant_name, old_ctx.expected_type, Some(span)) {
 
                     if let Some(tup) = attached_tuple {
                         self.check_expression(*tup, is_never, &ctx.expect(attached_type));
                     } else {
                         // if the variant had no data, then the defined variant shouldn't have data either!
-                        self.unify_types(TypeId::VOID, attached_type, span);
+                        self.unify_types(TypeId::VOID, attached_type, span, UnifyMode::Subtype);
                     }
                     self.typed_ast.resolved_enum_variant.insert(check_expr, (enum_id, variant_index));
 
@@ -472,17 +465,15 @@ impl TypeChecker<'_> {
             Expr::TypeInstantiation { typ, data } => {
                 let meta_id = self.check_annotation_meta_type_id(*typ, true);
 
-                if let Type::RefinedEnum(refined_inner, EnumRefinement::ExactVariant(i)) = self.prune_type_once_infer_err(meta_id, span) {
+                if let Type::EnumVariant { inner, variant } = self.prune_type_once_infer_err(meta_id, span) {
                     // its a refined constructor. e.g. `type X = Opt.Some; X{ 3 }`
 
-                    let enum_id = self.get_wrapped_enum_id(refined_inner).unwrap();
-                    let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[i].1;
+                    let enum_id = self.get_wrapped_enum_id(inner).unwrap();
+                    let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[variant].1;
                     self.check_instantiation_payload(attached_type, check_expr, *data, is_never, &ctx);
-                    self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(i));
+                    self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(variant));
 
-                    // Return the Soft Specialized instance, wrapping the base_type!
-                    let spec = self.add_type_refinement(FlowType::Enum(EnumFlowType::CurrVariant(i)));
-                    self.type_arena.add_type(Type::FlowType(refined_inner, spec))
+                    meta_id
                 }
                 else {
                     match self.prune_type_once_infer_err(meta_id, span) {
@@ -568,7 +559,7 @@ impl TypeChecker<'_> {
         // unify it with the expected type (if something was expected)
         if let Some(expected) = old_ctx.expected_type {
             inferred_type = self.coerce_to_expected_type(check_expr, expected);
-            self.unify_types(expected, inferred_type, span);
+            self.unify_types(expected, inferred_type, span, UnifyMode::Subtype);
         }
 
         inferred_type
@@ -588,7 +579,7 @@ impl TypeChecker<'_> {
 
     fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId) -> TypeId {
         // for now left and right have to be the same type, so just unify them.
-        self.unify_types(left, right, op_span);
+        self.unify_types(left, right, op_span, UnifyMode::Subtype);
 
         let left_type = self.prune_type_once_infer_err(left, op_span);
 
@@ -599,7 +590,7 @@ impl TypeChecker<'_> {
 
             // if its the same type as id, it returns the custom type again
             // e.g. `N{ 2 } * N{ 2 } == N{ 4 }`
-            return if self.are_types_equivalent_ignore_flow(infixed_type, id) {
+            return if self.are_types_equivalent(infixed_type, id) {
                 left
             } else {
                 infixed_type
@@ -613,13 +604,13 @@ impl TypeChecker<'_> {
 
             // num operators
             TokenKind::Op(AssignOp::Plus | AssignOp::Minus | AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => {
-                self.unify_types(TypeId::NUM, left, op_span);
+                self.unify_types(TypeId::NUM, left, op_span, UnifyMode::Subtype);
                 TypeId::NUM
             }
 
             // boolean operators
             TokenKind::And | TokenKind::Or => {
-                self.unify_types(TypeId::BOOL, left, op_span);
+                self.unify_types(TypeId::BOOL, left, op_span, UnifyMode::Subtype);
                 TypeId::BOOL
             }
             _ => unreachable!("Unsupported infix operator: {:?}", op)
@@ -640,7 +631,7 @@ impl TypeChecker<'_> {
 
                     let guess_var_id = TypeVarId(self.typed_ast.vars.len().try_into().unwrap());
                     let var_id = self.define_variable(
-                        name, TypeId::TYPE, false, true, expr_span,
+                        name, TypeId::TYPE, true, false, true, expr_span,
                         TypeVarConstVal::NotYetTypechecked { value: *value, bind_to: PatternOrVarId::CustomTypeVarId(guess_var_id) }
                     );
                     assert_eq!(guess_var_id, var_id);
@@ -669,7 +660,8 @@ impl TypeChecker<'_> {
         is_never: &mut bool, can_bind_vars: bool, can_fail: bool, fully_deref_value: bool,
         const_update: Option<TypeVarConstVal>
     ) -> TypeId {
-        let mut pattern_type = self.get_pattern_type(pattern);
+        let explicit_type = self.get_pattern_type(pattern);
+        let mut pattern_type = explicit_type;
 
         if let Some(val) = value {
             let mut ctx = CheckExprCtx::default().maybe_expect(pattern_type);
@@ -679,13 +671,18 @@ impl TypeChecker<'_> {
             if fully_deref_value {
                 ctx.deref_mode = AutoDerefMode::Fully;
             }
+
             let check_typ = self.check_expression(val, is_never, &ctx);
-            pattern_type = Some(check_typ);
+            // only adopt the values type IF the user didn't add a type annotation
+            // (not 100% sure that this is 100% correct)
+            if pattern_type.is_none() {
+                pattern_type = Some(check_typ);
+            }
         }
 
         let mut vars_defined = Vec::new();
         let (pattern_type, covered) = self.check_match_pattern(
-            pattern, pattern_type, value.is_some(), const_update,
+            pattern, pattern_type, false, value.is_some(), const_update,
             &mut CheckPatternVars::Collect(&mut vars_defined)
         );
 
@@ -740,7 +737,7 @@ impl TypeChecker<'_> {
 
         for (&param_pattern, param_type) in closure.params.iter().zip(param_types) {
             let (_, covered) = self.check_match_pattern(
-                param_pattern, Some(param_type), true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
+                param_pattern, Some(param_type), false, true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
             );
             let remaining = PatternSpace::covered_to_missing_cases(&covered, &self.typed_ast.enum_defs);
             if !remaining.is_empty() {
@@ -808,13 +805,12 @@ impl TypeChecker<'_> {
                 let meta_type_id = self.check_annotation_meta_type_id(*left, false);
 
                 // if its an enum, check if the member is a variant
-                let expr_expects_type = expected_type == Some(TypeId::TYPE);
                 if let Some(
                     (_, variant_index, attached_type, refined_type)
-                ) = self.check_enum_variant(member, Some(meta_type_id), None, expr_expects_type) {
+                ) = self.check_enum_variant(member, Some(meta_type_id), None) {
                     // found a variant!
 
-                    return if expr_expects_type {
+                    return if expected_type == Some(TypeId::TYPE) {
                         // if it expects a type, return a hard specialized type.
                         // e.g. `let x: Option.Some`, this can never be assigned any other enum variants, only .Some{ ... }
                         let constant = RuntimeValue::Type(refined_type);
@@ -837,11 +833,6 @@ impl TypeChecker<'_> {
                 }
 
                 return self.check_member_access(meta_type_id, member_expr, None, true, expected_type);
-            }
-
-            // ignore specs here
-            Type::FlowType(spec_type, _) => {
-                return self.check_member_access(*spec_type, member_expr, came_from_ref, came_from_meta, expected_type)
             }
 
             Type::Error => return TypeId::ERROR,
@@ -886,6 +877,10 @@ impl TypeChecker<'_> {
                 return self.check_member_access(inner, member_expr, Some((mutable, borrows_var)), came_from_meta, expected_type)
             }
 
+            Type::EnumVariant { inner, variant: _ } => {
+                return self.check_member_access(inner, member_expr, came_from_ref, came_from_meta, expected_type)
+            }
+
             _ => {}
         }
 
@@ -920,21 +915,21 @@ impl TypeChecker<'_> {
 
         // member access yielded the inner type
         // e.g. `const TRUE = true` turns into `CustomBool`
-        if self.are_types_equivalent_ignore_flow(custom_inner, resolved_type) {
+        if self.are_types_equivalent(custom_inner, resolved_type) {
             self.type_arena.add_type(Type::CustomType(custom_id, resolved_type))
         }
         
         // member access yielded a function
         // e.g. `fn(bool) -> bool` becomes `fn(CustomBool) -> CustomBool`
         else if let Type::Fn { param_types, return_type } = self.prune_type_once(resolved_type) {
-            let new_return = if self.are_types_equivalent_ignore_flow(custom_inner, return_type) {
+            let new_return = if self.are_types_equivalent(custom_inner, return_type) {
                 self.type_arena.add_type(Type::CustomType(custom_id, return_type))
             } else {
                 return_type
             };
 
             let new_params = param_types.into_iter().map(|p| {
-                if self.are_types_equivalent_ignore_flow(custom_inner, p) {
+                if self.are_types_equivalent(custom_inner, p) {
                     self.type_arena.add_type(Type::CustomType(custom_id, p))
                 } else {
                     p
@@ -952,7 +947,7 @@ impl TypeChecker<'_> {
                 unreachable!("every member_access_expr should get a note here... {}", self.fmt_type(resolved_type))
             };
             if let ResolvedMemberAccess::Member { constant: RuntimeValue::Type(inner_val_type) } = *res
-            && self.are_types_equivalent_ignore_flow(custom_inner, inner_val_type) {
+            && self.are_types_equivalent(custom_inner, inner_val_type) {
 
                 let new_constant = RuntimeValue::Type(self.type_arena.add_type(Type::CustomType(custom_id, inner_val_type)));
                 self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant: new_constant });
@@ -966,7 +961,7 @@ impl TypeChecker<'_> {
 
 
     pub(super) fn check_enum_variant(
-        &mut self, variant_name: &str, expected_type: Option<TypeId>, err_span: Option<Span>, refine_hard: bool
+        &mut self, variant_name: &str, expected_type: Option<TypeId>, err_span: Option<Span>
     ) -> Option<(EnumId, usize, TypeId, TypeId)> {
         // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
         let Some(expected) = expected_type else {
@@ -980,7 +975,7 @@ impl TypeChecker<'_> {
             let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
 
             // try to find the correct .Variant
-            let Some(variant_index) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
+            let Some(variant) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
                 if let Some(span) = err_span {
                     self.error(ErrType::TyperEnumDoesntHaveVariant { 
                         enum_: self.fmt_type(expected), 
@@ -990,18 +985,13 @@ impl TypeChecker<'_> {
                 return None;
             };
             
-            let attached_type = enum_def.variants[variant_index].1;
+            let attached_type = enum_def.variants[variant].1;
 
             // refine/specialize it and wrap it back in the custom types
-            // so this function will turn `CustomType(1, Enum<0>)` -> `Refined<CustomType(1, Enum<0>), Soft<0>>`
-            let refine_type = if refine_hard {
-                self.type_arena.add_type(Type::RefinedEnum(expected, EnumRefinement::ExactVariant(variant_index)))
-            } else {
-                let spec_id = self.add_type_refinement(FlowType::Enum(EnumFlowType::CurrVariant(variant_index)));
-                self.type_arena.add_type(Type::FlowType(expected, spec_id))
-            };
+            // so this function will turn `CustomType(1, Enum<0>)` -> `EnumVariant<CustomType(1, Enum<0>), 0>`
+            let refine_type = self.type_arena.add_type(Type::EnumVariant { inner: expected, variant });
 
-            Some((enum_id, variant_index, attached_type, refine_type))
+            Some((enum_id, variant, attached_type, refine_type))
         }
         else {
             if let Some(span) = err_span {
@@ -1015,7 +1005,7 @@ impl TypeChecker<'_> {
     pub(super) fn get_wrapped_enum_id(&self, mut id: TypeId) -> Option<EnumId> {
         loop {
             match self.prune_type_once(id) {
-                Type::CustomType(_, inner) | Type::FlowType(inner, _) => {
+                Type::CustomType(_, inner) | Type::EnumVariant { inner, .. } => {
                     id = inner;
                 }
                 Type::Enum(enum_id) => return Some(enum_id),

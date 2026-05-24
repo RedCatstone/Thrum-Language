@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::Span,
     parsing::ast::ExprId,
-    typing::{EnumFlowType, EnumRefinement, FlowType, Type, TypeChecker, TypeId, TypeVarId }
+    typing::{Type, TypeChecker, TypeId, TypeVarId }
 };
 
 
@@ -29,26 +29,6 @@ impl TypeChecker<'_> {
         let expected_type = self.prune_type_once(expected_id);
 
         match (expr_type, expected_type) {
-            // FlowType -> RefinedEnum
-            // e.g. passing a `.?Some` to a function expecting `.Some`
-            (Type::FlowType(base_a, flow_id), Type::RefinedEnum(base_b, refinement))
-            if self.are_types_equivalent_ignore_flow(base_a, base_b) => {
-                let flow = self.specialized_types[flow_id.0 as usize];
-                match (flow, refinement) {
-                    (FlowType::Enum(EnumFlowType::CurrVariant(i)), EnumRefinement::ExactVariant(j)) if i == j => {
-                        return expected_id;
-                    }
-                    _ => {}
-                }
-            }
-
-            // RefinedEnum -> Enum
-            // e.g. passing a refined `.Some` to a function expecting plain `Option`
-            (Type::RefinedEnum(base_a, _), _)
-            if self.are_types_equivalent_ignore_flow(base_a, expected_id) => {
-                return expected_id;
-            }
-
             // // Tuple -> MetaType
             // (Type::Tup(_), Type::MetaType) => {
             //     // TODO, tuples should coerce to `Type::MetaType`, not behave like a type.
@@ -179,7 +159,7 @@ impl TypeChecker<'_> {
             | Type::Tup(_)
             | Type::Enum(_) => Some(false),
 
-            Type::CustomType(_, inner) | Type::FlowType(inner, _) | Type::RefinedEnum(inner, _) => {
+            Type::CustomType(_, inner) | Type::EnumVariant { inner, .. } => {
                 self.is_auto_clone(inner)
             }
 

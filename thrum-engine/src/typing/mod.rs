@@ -30,8 +30,7 @@ pub enum Type {
     MetaType,
 
     Enum(EnumId),
-    FlowType(TypeId, FlowTypeId),
-    RefinedEnum(TypeId, EnumRefinement),
+    EnumVariant { inner: TypeId, variant: usize },
 
     CustomType(CustomTypeId, TypeId),
 
@@ -53,33 +52,6 @@ pub struct TypeTuple {
     pub typ: TypeId,
 }
 
-#[derive(Debug, Clone, Copy)]
-/// ## Example of flow types flowing:
-/// ```rs
-/// let mut x: Option = .Some{ 3 }
-/// handle_some(x)  // works, because `x` was specialized to be .Some
-/// x = .None
-/// handle_some(x)  // now it would error, because `handle_some` expects .Some
-/// ```
-pub enum FlowType {
-    Enum(EnumFlowType),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum EnumFlowType {
-    /// currently its this variant. e.g. `let mut x = Option.None`
-    CurrVariant(usize),
-    /// can be multiple variants. e.g. `if ... { Option.None } else { Option.Some{ 3 } }`
-    Multiple,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-/// e.g. `type Percentage = num is 0..=100`
-/// e.g. `fn handle_some(x: Option.Some) { ... }`
-pub enum EnumRefinement {
-    ExactVariant(usize),
-}
-
 #[derive(Debug)]
 pub struct CustomType<'a> {
     name: Box<str>,
@@ -91,8 +63,6 @@ pub struct CustomType<'a> {
 pub struct TypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct EnumId(pub AstIds);
-#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
-pub struct FlowTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, PartialOrd)]
 pub struct CustomTypeId(pub AstIds);
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -130,8 +100,6 @@ pub struct TypeChecker<'a> {
     // if inference_types[0] is Some(TypeId(3))
     // => InferType 0 was resolved to TypeId 3
     inference_types: Vec<Option<TypeId>>,  // indexed with TypeInferId
-
-    specialized_types: Vec<FlowType>,
 
     // implemented stuff on types
     // e.g. `impl Number { ... }`
@@ -255,6 +223,17 @@ pub enum ResolvedTypeInstantiation {
     EnumVariant(usize),
 }
 
+#[derive(Clone, Copy)]
+pub enum UnifyMode {
+    /// Used for Assignments / Function Args. 
+    /// e.g. `Option - Option.Some` works
+    /// e.g. `Option.Some - Option` doesnt work
+    Subtype, 
+    
+    /// e.g. `Option.Some - Option` -> `Option`
+    FindParentType, 
+}
+
 impl TypeChecker<'_> {
     pub fn start(error_data: &mut ProgramErrorData, ast: &AstArena) -> (TypedAst, FunctionRegistry) {
         let mut tc = TypeChecker {
@@ -263,7 +242,6 @@ impl TypeChecker<'_> {
             var_scopes: vec![TypeVarScope::default()],
             type_arena: TypeArena::new(),
             inference_types: Vec::new(),
-            specialized_types: Vec::new(),
             custom_types: Vec::new(),
             curr_function_return_type: None,
             curr_label_infos: Vec::new(),
@@ -307,19 +285,11 @@ impl TypeChecker<'_> {
     
     #[must_use]
     pub fn prune_id_once(&self, mut id: TypeId) -> TypeId {
-        loop {
-            match self.type_arena.types[id.0 as usize] {
-                Type::Infer(infer_id)
-                if let Some(resolved_id) = self.inference_types[infer_id.0 as usize] => {
-                    id = resolved_id;
-                }
-                Type::FlowType(base_id, flow_id)
-                if let FlowType::Enum(EnumFlowType::Multiple) = self.specialized_types[flow_id.0 as usize] => {
-                    id = base_id;
-                }
-                _ => return id
-            }
+        while let Type::Infer(infer_id) = self.type_arena.types[id.0 as usize]
+        && let Some(resolved_id) = self.inference_types[infer_id.0 as usize] {
+            id = resolved_id;
         }
+        id
     }
     #[must_use]
     pub fn prune_type_once(&self, id: TypeId) -> Type {
@@ -338,164 +308,169 @@ impl TypeChecker<'_> {
     }
 
     #[track_caller]
-    pub fn unify_types(&mut self, expected: TypeId, other: TypeId, span: Span) {
+    pub fn unify_types(&mut self, expected: TypeId, other: TypeId, span: Span, mode: UnifyMode) -> TypeId {
+        let mut mismatch = false;
+        let result = self.internal_unify_types(expected, other, span, mode, &mut mismatch);
+        if mismatch {
+            // with this mismatch flag, each unify can only trigger one error
+            self.type_mismatch(expected, other, span);
+        }
+        result
+    }
+    
+    #[track_caller]
+    fn internal_unify_types(&mut self, expected: TypeId, other: TypeId, span: Span, mode: UnifyMode, mismatch: &mut bool) -> TypeId {
         let id_a = self.prune_id_once(expected);
         let id_b = self.prune_id_once(other);
 
         // already equal -> do nothing
-        if id_a == id_b { return }
+        if id_a == id_b { return id_a }
 
         let a = self.type_arena.types[id_a.0 as usize].clone();
         let b = self.type_arena.types[id_b.0 as usize].clone();
-        let mut mismatch = false;
 
-        assert!(a != b, "only equal after?");
+        let mut new_mismatch = || {
+            *mismatch = true;
+            TypeId::ERROR
+        };
 
-        match (a, b) {            
+        let result: TypeId = match (a, b) {            
             // if one is an inference variable, bind it to the other type.
-            (Type::Infer(id), _) => self.inference_types[id.0 as usize] = Some(id_b),
-            (_, Type::Infer(id)) => self.inference_types[id.0 as usize] = Some(id_a),
+            (Type::Infer(id), _) => { self.inference_types[id.0 as usize] = Some(id_b); id_b }
+            (_, Type::Infer(id)) => { self.inference_types[id.0 as usize] = Some(id_a); id_a }
 
-            // if one is Never or Error, do nothing
-            (Type::Never | Type::Error, _)
-            | (_, Type::Never | Type::Error) => { /* Do nothing */ }
+            (Type::Never, _) => id_b,
+            (_, Type::Never) => id_a,
+            (Type::Error, _) | (_, Type::Error) => TypeId::ERROR,
 
             (Type::TupArr(inner_a, length_a), Type::TupArr(inner_b, length_b)) => {
-                self.unify_types(inner_a, inner_b, span);
-                if length_a != length_b {
-                    mismatch = true;
+                if length_a == length_b {
+                    self.unify_types(inner_a, inner_b, span, mode)
+                } else {
+                    new_mismatch()
                 }
             }
 
             (Type::Tup(elems_a), Type::Tup(elems_b)) => {
                 if elems_a.len() == elems_b.len() {
+                    let mut new_elems = Vec::new();
+
                     for (ia, ib) in elems_a.into_iter().zip(elems_b) {
-                        // types have to match
-                        self.unify_types(ia.typ, ib.typ, span);
-                        // labels can't mismatch (if both labels are non number labels)
-                        if ia.label != ib.label && ia.label.as_bytes()[0].is_ascii_digit() && ib.label.as_bytes()[0].is_ascii_digit() {
-                            mismatch = true;
-                            break;
-                        } 
+                        if ia.label != ib.label {
+                            *mismatch = true;
+                        }
+
+                        let id = self.unify_types(ia.typ, ib.typ, span, mode);
+                        new_elems.push(TypeTuple { label: ia.label, typ: id });
                     }
+
+                    self.type_arena.add_type(Type::Tup(new_elems))
                 } else {
-                    mismatch = true;
+                    new_mismatch()
                 }
             }
 
             (Type::CustomType(id_a, inner_a), Type::CustomType(id_b, inner_b)) => {
                 if id_a == id_b {
-                    self.unify_types(inner_a, inner_b, span);
+                    let merged_inner = self.unify_types(inner_a, inner_b, span, mode);
+                    self.type_arena.add_type(Type::CustomType(id_a, merged_inner))
                 } else {
                     // Different custom_id => they can't unify
                     // e.g. `type N1 = num;  type N2 = num;  N1{ 2 } + N2{ 2 }`
-                    mismatch = true;
+                    new_mismatch()
                 }
             }
 
-            (Type::FlowType(a_type, a_refine_id), Type::FlowType(b_type, b_refine_id)) => {
-                self.unify_types(a_type, b_type, span);
-
-                let a_refine = self.specialized_types[a_refine_id.0 as usize];
-                let b_refine = self.specialized_types[b_refine_id.0 as usize];
-
-                let merged_result = match (a_refine, b_refine) {
-                    (FlowType::Enum(a_enum_refine), FlowType::Enum(b_enum_refine)) => {
-                        FlowType::Enum(match (a_enum_refine, b_enum_refine) {
-                            // two soft specializations of the same variant stay specialized!
-                            // otherwise it turns into `Multiple`
-                            // e.g. `if cond { Option.Some } else { Option.None }` -> Becomes Multiple
-                            (EnumFlowType::CurrVariant(x), EnumFlowType::CurrVariant(y)) => {
-                                if x == y { EnumFlowType::CurrVariant(x) } 
-                                else { EnumFlowType::Multiple }
-                            }
-                            
-                            (EnumFlowType::Multiple, _) | (_, EnumFlowType::Multiple) => {
-                                EnumFlowType::Multiple
-                            }
-                        })
-                    }
-                };
-
-                // update the spec on both types!
-                self.specialized_types[a_refine_id.0 as usize] = merged_result;
-                self.specialized_types[b_refine_id.0 as usize] = merged_result;
-            }
-
-            // if one is specialized and the other isn't => just ignore the specs
-            (Type::FlowType(spec_type, _), _) => self.unify_types(spec_type, id_b, span),
-            (_, Type::FlowType(spec_type, _)) => self.unify_types(id_a, spec_type, span),
-
-
-            (Type::Enum(a_id), Type::Enum(b_id)) => {
-                if a_id != b_id {
-                    mismatch = true;
+            (Type::Enum(enum_id_a), Type::Enum(enum_id_b)) => {
+                if enum_id_a == enum_id_b {
+                    id_a
+                } else {
+                    new_mismatch()
                 }
             }
+            (Type::EnumVariant { inner: inner_a, variant: variant_a },
+            Type::EnumVariant { inner: inner_b, variant: variant_b }) => {
+                let merged_inner = self.unify_types(inner_a, inner_b, span, mode);
 
-            (Type::RefinedEnum(base_a, refined_a), Type::RefinedEnum(base_b, refined_b)) => {
-                self.unify_types(base_a, base_b, span);
-                if refined_a != refined_b {
-                    mismatch = true;
+                if variant_a == variant_b {
+                    self.type_arena.add_type(Type::EnumVariant { inner: merged_inner, variant: variant_a })
+                } else {
+                    match mode {
+                        UnifyMode::FindParentType => merged_inner,
+                        UnifyMode::Subtype => new_mismatch()
+                    }   
                 }
             }
+            
+            // this direction is always allowed regardless of mode
+            (_, Type::EnumVariant { inner, .. }) => self.unify_types(id_a, inner, span, mode),
+            (Type::EnumVariant { inner, .. }, _) => {
+                // this direction is only allowed in LUB mode
+                match mode {
+                    UnifyMode::FindParentType => self.unify_types(inner, id_b, span, mode),
+                    UnifyMode::Subtype => new_mismatch()
+                }
+                
+            }
+
 
             // a tuple with only types IS a type itself
+            // TODO remove this garbo logic
             (Type::MetaType, Type::Tup(elems)) => {
                 for elem in elems {
-                    self.unify_types(TypeId::TYPE, elem.typ, span);
+                    self.unify_types(TypeId::TYPE, elem.typ, span, mode);
                 }
+                id_b
             }
 
-            (Type::Borrow { mutable: mut_a, inner: inner_a, borrows_var: _ },
+            (Type::Borrow { mutable: mut_a, inner: inner_a, borrows_var: borrows_a },
             Type::Borrow { mutable: mut_b, inner: inner_b, borrows_var: _ }) => {
-                self.unify_types(inner_a, inner_b, span);
+                let new_inner = self.unify_types(inner_a, inner_b, span, mode);
                 if mut_a != mut_b {
-                    mismatch = true;
+                    *mismatch = true;
                 }
+                self.type_arena.add_type(Type::Borrow { inner: new_inner, mutable: mut_a, borrows_var: borrows_a })
             }
 
             (Type::Fn { param_types: params_a, return_type: return_a },
             Type::Fn { param_types: params_b, return_type: return_b }) => {
-                if params_a.len() == params_b.len() {
-                    for (ia, ib) in params_a.into_iter().zip(params_b) {
-                        self.unify_types(ia, ib, span);
-                    }
-                } else {
-                    mismatch = true;
+                if params_a.len() != params_b.len() {
+                    *mismatch = true;
                 }
-                self.unify_types(return_a, return_b, span);
+                let mut new_params = Vec::new();
+                for (ia, ib) in params_a.into_iter().zip(params_b) {
+                    new_params.push(self.unify_types(ib, ia, span, mode));
+                }
+                let new_return = self.unify_types(return_a, return_b, span, mode);
+
+                self.type_arena.add_type(Type::Fn { param_types: new_params, return_type: new_return })
             }
 
             // any other case is a mismatch
-            _ => mismatch = true
-        }
+            _ => new_mismatch()
+        };
         
-        if mismatch {
-            self.type_mismatch(expected, other, span);
-        }
+        result
     }
 
     fn unify_type_vec(&mut self, types: &[TypeId], span: Span) -> TypeId {
         if let Some((&first, others)) = types.split_first() {
+            let mut merged = first;
             for &other in others {
-                self.unify_types(first, other, span);
+                merged = self.unify_types(first, other, span, UnifyMode::FindParentType);
             }
-            first
+            merged
         } else {
             self.new_infer_type()
         }
     }
 
-    pub(super) fn are_types_equivalent_ignore_flow(&self, left: TypeId, right: TypeId) -> bool {
+    pub(super) fn are_types_equivalent(&self, left: TypeId, right: TypeId) -> bool {
         if left == right { return true }
 
         match (self.prune_type_once(left), self.prune_type_once(right)) {
-            (Type::FlowType(left_type, _), _) => self.are_types_equivalent_ignore_flow(left_type, right),
-            (_, Type::FlowType(right_type, _)) => self.are_types_equivalent_ignore_flow(left, right_type),
-
             (Type::CustomType(left_id, left_inner), Type::CustomType(right_id, right_inner)) => {
-                left_id == right_id && self.are_types_equivalent_ignore_flow(left_inner, right_inner)
+                left_id == right_id && self.are_types_equivalent(left_inner, right_inner)
             }
             _ => false
         }
@@ -527,31 +502,13 @@ impl TypeChecker<'_> {
                 write!(s, "{}", self.custom_types[custom_id.0 as usize].name)
             }
 
-            Type::FlowType(spec_inner, spec_id) => {
-                self.write_type(spec_inner, s)?;
-
-                match self.specialized_types[spec_id.0 as usize] {
-                    FlowType::Enum(enum_spec) => {
-                        let enum_id = self.get_wrapped_enum_id(spec_inner).unwrap();
-                        let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
-
-                        match enum_spec {
-                            EnumFlowType::Multiple => write!(s, ".?")?,
-                            EnumFlowType::CurrVariant(i) => write!(s, ".?{}", variants[i].0)?,
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            Type::RefinedEnum(refined_inner, refinement) => {
-                self.write_type(refined_inner, s)?;
+            Type::EnumVariant { inner, variant: variant_index } => {
+                self.write_type(inner, s)?;
                 
-                let enum_id = self.get_wrapped_enum_id(refined_inner).unwrap();
+                let enum_id = self.get_wrapped_enum_id(inner).unwrap();
                 let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
-                let EnumRefinement::ExactVariant(i) = refinement;
 
-                write!(s, ".{}", variants[i].0)
+                write!(s, ".{}", variants[variant_index].0)
             }
 
             Type::Tup(elems) => {
@@ -599,6 +556,17 @@ impl TypeChecker<'_> {
     }
 
 
+    pub fn decay_soft_types(&mut self, id: TypeId) -> TypeId {
+        let typ = self.prune_type_once(id);
+        match typ {
+            Type::EnumVariant { inner, variant: _ } => {
+                self.decay_soft_types(inner)
+            }
+            _ => self.recursively_transform_type(id, Self::decay_soft_types)
+        }
+    }
+
+
     /// The final smoshing phase, also called zonking
     /// here its getting rid of all `Infer()` types. If it can't, it will throw a `TyperCantInferType` error
     /// (num. Infer(0)) -> (num, num)
@@ -625,8 +593,6 @@ impl TypeChecker<'_> {
     }
 
     fn zonk_type(&mut self, id: TypeId, span: Span, cache: &mut Vec<Option<TypeId>>) -> TypeId {
-        let id = self.prune_id_once(id);
-
         if let Some(zonked) = cache[id.0 as usize] {
             return zonked;
         }
@@ -644,50 +610,51 @@ impl TypeChecker<'_> {
                 }
             }
 
-            // OTHER CASES: recursively zonk the inner types and then re-deduplicate them!
-            Type::TupArr(inner, length) => {
-                let new_inner = self.zonk_type(inner, span, cache);
-                self.type_arena.add_type(Type::TupArr(new_inner, length))
-            }
-            Type::Tup(elems) => {
-                let new_elems = elems.into_iter().map(|e| TypeTuple {
-                    label: e.label,
-                    typ: self.zonk_type(e.typ, span, cache),
-                }).collect();
-                self.type_arena.add_type(Type::Tup(new_elems))
-            }
-            Type::Fn { param_types, return_type } => {
-                let new_params = param_types.into_iter().map(|p| self.zonk_type(p, span, cache)).collect();
-                let new_ret = self.zonk_type(return_type, span, cache);
-                self.type_arena.add_type(Type::Fn { param_types: new_params, return_type: new_ret })
-            }
-            Type::Borrow { inner, mutable, borrows_var } => {
-                let new_inner = self.zonk_type(inner, span, cache);
-                self.type_arena.add_type(Type::Borrow { inner: new_inner, mutable, borrows_var })
-            }
-            Type::CustomType(custom_id, inner) => {
-                let new_inner = self.zonk_type(inner, span, cache);
-                self.type_arena.add_type(Type::CustomType(custom_id, new_inner))
-            }
-            Type::FlowType(typ, spec_id) => {
-                let new_typ = self.zonk_type(typ, span, cache);
-                self.type_arena.add_type(Type::FlowType(new_typ, spec_id))
-            }
-            Type::RefinedEnum(typ, refinement) => {
-                let new_typ = self.zonk_type(typ, span, cache);
-                self.type_arena.add_type(Type::RefinedEnum(new_typ, refinement))
-            }
-
-            // simple types don't need zonking
-            Type::Num | Type::Str | Type::Bool | Type::Void | Type::Never
-            | Type::MetaType | Type::Error | Type::Enum(_) => id
+            _ => self.recursively_transform_type(id, |tc, inner| {
+                tc.zonk_type(inner, span, cache)
+            })
         };
 
-        // resize the cache dynamically, because `self.type_arena.add_type()` might have added stuff
+        // `self.type_arena.add_type()` might have added stuff
         if cache.len() < self.type_arena.types.len() {
             cache.resize(self.type_arena.types.len(), None);
         }
         cache[id.0 as usize] = Some(zonked_id);
         zonked_id
+    }
+
+
+    fn recursively_transform_type(&mut self, typ: TypeId, mut trans: impl FnMut(&mut Self, TypeId) -> TypeId) -> TypeId {
+        match self.prune_type_once(typ) {
+            Type::CustomType(custom_id, inner) => {
+                let inner = trans(self, inner);
+                self.type_arena.add_type(Type::CustomType(custom_id, inner))
+            }
+            Type::Tup(elems) => {
+                let elems = elems.into_iter().map(|e| TypeTuple { label: e.label, typ: trans(self, e.typ) }).collect();
+                self.type_arena.add_type(Type::Tup(elems))
+            }
+            Type::TupArr(typ, len) => {
+                let typ = trans(self, typ);
+                self.type_arena.add_type(Type::TupArr(typ, len))
+            }
+            Type::Borrow { inner, mutable, borrows_var } => {
+                let inner = trans(self, inner);
+                self.type_arena.add_type(Type::Borrow { inner, mutable, borrows_var })
+            }
+            Type::EnumVariant { inner, variant } => {
+                let inner = trans(self, inner);
+                self.type_arena.add_type(Type::EnumVariant { inner, variant })
+            }
+            Type::Fn { param_types, return_type } => {
+                let param_types = param_types.into_iter().map(|p| trans(self, p)).collect();
+                let return_type = trans(self, return_type);
+                self.type_arena.add_type(Type::Fn { param_types, return_type })
+            }
+
+            Type::Num | Type::Str | Type::Bool | Type::Void | Type::Never
+            | Type::MetaType | Type::Error | Type::Enum(_)
+            | Type::Infer(_) => typ,
+        }
     }
 }

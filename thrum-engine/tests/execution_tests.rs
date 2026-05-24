@@ -405,8 +405,15 @@ fn enum_refinement() {
     test!("
         type Option = enum { None, Some{ num } };
         
-        let x: Option.Some = Option.Some{ 15 }
+        let x: Option.Some = .Some{ 15 }
         let .Some{ inner } = x^
+        inner^
+    ", RuntimeValue::Num(15.0));
+
+    test!("
+        type Option = enum { None, Some{ num } };
+
+        let .Some{ inner } = Option.Some{ 15 }
         inner^
     ", RuntimeValue::Num(15.0));
 }
