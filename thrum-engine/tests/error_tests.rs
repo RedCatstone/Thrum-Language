@@ -35,23 +35,33 @@ fn typecheck_var_errors() {
 }
 
 #[test]
-fn type_mismatch_errors() {
+fn type_mismatch_simple() {
     test_err!("if true { 1 } else { (1,) }", ErrType::TyperMismatch { .. });
     test_err!("let x: num = true", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is (1, 2, 3)", ErrType::TyperMismatch { .. });
-
-    // operators
+}
+#[test]
+fn type_mismatch_operators() {
     test_err!("1 + true", ErrType::TyperMismatch { .. });
     test_err!("1 % true", ErrType::TyperMismatch { .. });
     test_err!("!5", ErrType::TyperMismatch { .. });
     test_err!("-true", ErrType::TyperMismatch { .. });
-
-    // patterns
+}
+#[test]
+fn type_mismatch_patterns() {
     test_err!("1 is \"hello\"", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is (1, \"two\")", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is 1 | 2", ErrType::TyperMismatch { .. });
     
     test_err!("let mut x = 5; x += true", ErrType::TyperMismatch { .. });
+}
+#[test]
+fn type_mismatch_enums() {
+    test_err!("
+        type Option = enum { None, Some{ num } }
+        fn handle_some(.Some{ inner }: Option.Some) -> num => inner
+        handle_some(.None)
+    ", ErrType::TyperMismatch { .. });
 }
 
 #[test]

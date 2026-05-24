@@ -403,19 +403,23 @@ fn enums() {
 #[test]
 fn enum_refinement() {
     test!("
-        type Option = enum { None, Some{ num } };
-        
-        let x: Option.Some = .Some{ 15 }
-        let .Some{ inner } = x^
-        inner^
-    ", RuntimeValue::Num(15.0));
+        type Option = enum { None, Some{ num } }
+
+        fn handle_some(some: Option.Some) -> num {
+            let .Some{ inner } = some^
+            inner
+        }
+
+        let x: Option.Some = .Some{ 1 }
+        handle_some(x^) + handle_some(.Some{ 2 })
+    ", RuntimeValue::Num(3.0));
 
     test!("
         type Option = enum { None, Some{ num } };
 
-        let .Some{ inner } = Option.Some{ 15 }
+        let .Some{ inner } = Option.Some{ 3 }
         inner^
-    ", RuntimeValue::Num(15.0));
+    ", RuntimeValue::Num(3.0));
 }
 
 

@@ -1,9 +1,11 @@
 type Option = enum { None, Some{ num } }
 
-let x: Option.Some = .Some{ 15 }
-let .Some{ inner } = x^
+fn handle_some(.Some{ inner }: Option.Some) -> num {
+    inner
+}
 
-inner^
+let x: Option.Some = .Some{ 15 }
+handle_some(x^) + handle_some(.Some{ 7 })
 
 
 

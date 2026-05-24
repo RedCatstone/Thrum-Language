@@ -7,7 +7,7 @@
 - [ ] ref pattern matching `x is 4` instead of `x^ is 4`
 - [ ] "{single hole} string patterns"
 - [x] ! negation pattern
-- [ ] enum variant stand alone types e.g. Dir.West
+- [x] enum variant stand alone types e.g. Dir.West
 - [x] Ranges 0..4
 - [x] for loops
 
