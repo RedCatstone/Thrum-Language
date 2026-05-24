@@ -222,15 +222,15 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn recover(&mut self, recover_after_tokens: &[TokenKind], recover_on_tokens: &[TokenKind]) {
-        while self.peek().token != TokenKind::EndOfFile {
-            if recover_after_tokens.contains(&self.peek().token) {
-                self.next();
-                return;
-            } else if recover_on_tokens.contains(&self.peek().token) {
-                return;
-            }
-            self.next();
-        }
-    }
+    // fn recover(&mut self, recover_after_tokens: &[TokenKind], recover_on_tokens: &[TokenKind]) {
+    //     while self.peek().token != TokenKind::EndOfFile {
+    //         if recover_after_tokens.contains(&self.peek().token) {
+    //             self.next();
+    //             return;
+    //         } else if recover_on_tokens.contains(&self.peek().token) {
+    //             return;
+    //         }
+    //         self.next();
+    //     }
+    // }
 }

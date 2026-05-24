@@ -4,7 +4,8 @@ use derive_more::Display;
 
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
-    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, EnumSpecialization, EnumSpecializationId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx}, vm_compiling::{RuntimeValue, VmCompiler}
+    typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx},
+    vm_compiling::{RuntimeValue, VmCompiler}
 };
 
 
@@ -80,13 +81,17 @@ impl<'ast> TypeChecker<'ast> {
         self.var_scopes.pop().unwrap();
     }
 
-    pub(super) fn define_variable(&mut self, name: &'ast str, typ: TypeId, mutable: bool, is_init: bool, span: Span, const_val: TypeVarConstVal) -> TypeVarId {
+    pub(super) fn define_variable(&mut self, name: &'ast str, typ: TypeId, is_explicit: bool, mutable: bool, is_init: bool, span: Span, const_val: TypeVarConstVal) -> TypeVarId {
         // a var cant be shadowed if its a const
         let cant_shadow = const_val != TypeVarConstVal::No;
+        
+        // strip soft type info away
+        // e.g. `let x = Option.Some{ 3 }`  so x has type Option and not Option.?Some
+        // otherwise we would need a whole ControlFlowGraph for these soft specs because they can change across branches
+        let final_type = if is_explicit { typ } else { self.decay_soft_types(typ) };
 
-        // make the new var
         let new_var = TypeVar {
-            typ,
+            typ: final_type,
             const_val,
             name: name.to_string(),
             declared_at: span,
@@ -102,11 +107,9 @@ impl<'ast> TypeChecker<'ast> {
         let previous = self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
 
         if cant_shadow && previous.is_some() {
-            // if there was already something named the same in scope
             self.error(ErrType::TyperConstNameAlreadyExists { name: name.to_string() }, span);
         }
 
-        
         var_id
     }
 
@@ -135,13 +138,6 @@ impl<'ast> TypeChecker<'ast> {
             }
         }
         None
-    }
-
-
-    pub(super) fn add_enum_specialization(&mut self, spec: EnumSpecialization) -> EnumSpecializationId {
-        let id = EnumSpecializationId(self.enum_specialization.len().try_into().unwrap());
-        self.enum_specialization.push(spec);
-        id
     }
     
     fn add_enum_def(&mut self, def: EnumDefinition) -> EnumId {
@@ -263,7 +259,7 @@ impl<'ast> TypeChecker<'ast> {
                     }).collect();
 
                 let enum_id = self.add_enum_def(EnumDefinition { variants });
-                let enum_type = self.type_arena.add_type(Type::Enum(enum_id, None));
+                let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
                 
                 Some(RuntimeValue::Type(enum_type))
             }
@@ -469,7 +465,7 @@ impl<'ast> TypeChecker<'ast> {
         for (name, value) in &module.values {
             if value.is_prelude {
                 let id = self.type_arena.add_type(value.typ.clone());
-                self.define_variable(name, id, false, true, Span::invalid(), TypeVarConstVal::Evaluated(value.val.clone()));
+                self.define_variable(name, id, true, false, true, Span::invalid(), TypeVarConstVal::Evaluated(value.val.clone()));
             }
         }
         // Recursion

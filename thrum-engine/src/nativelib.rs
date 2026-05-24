@@ -16,7 +16,7 @@ pub struct ThrumModule {
 
 
 
-pub fn get_native_lib(type_arena: &mut TypeArena) -> ThrumModule {
+pub fn get_native_lib(_type_arena: &mut TypeArena) -> ThrumModule {
     let mut std_module = ThrumModule::default();
 
     let mut io_module = ThrumModule::default();

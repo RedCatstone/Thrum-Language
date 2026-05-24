@@ -400,6 +400,24 @@ fn enums() {
     ", RuntimeValue::Bool(true));
 }
 
+#[test]
+fn enum_refinement() {
+    test!("
+        type Option = enum { None, Some{ num } };
+        
+        let x: Option.Some = .Some{ 15 }
+        let .Some{ inner } = x^
+        inner^
+    ", RuntimeValue::Num(15.0));
+
+    test!("
+        type Option = enum { None, Some{ num } };
+
+        let .Some{ inner } = Option.Some{ 15 }
+        inner^
+    ", RuntimeValue::Num(15.0));
+}
+
 
 #[test]
 fn point_impl_test() {

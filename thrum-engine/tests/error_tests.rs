@@ -27,7 +27,7 @@ fn typecheck_var_errors() {
     test_err!("let x = 10; x = 20", ErrType::TyperVarIsntDeclaredMut { .. });
     test_err!("let tup = (1, 2); tup[0] = 99", ErrType::TyperVarIsntDeclaredMut { .. });
 
-    test_err!("let x; x + 5", ErrType::TyperCantUseUninitializedVar { .. });
+    test_err!("let x: num; x + 5", ErrType::TyperCantUseUninitializedVar { .. });
     test_err!("let x; if true { x = 2 }; x^", ErrType::TyperCantUseMaybeInitializedVar { .. });
 
     test_err!("let s = \"hello\"; s^; s^", ErrType::TyperCantUseMovedVar { .. });
@@ -80,14 +80,27 @@ fn invalid_op_types() {
 fn exhaustive_pattern_matching() {
     test_err!("match 5 is 1 => 2", ErrType::TyperPatternDoesntCoverAllCases { .. });
     test_err!("
+        match (true, false)
+        is (true, true) => 0
+        is (false, _) => 1
+    ", ErrType::TyperPatternDoesntCoverAllCases { .. });
+    test_err!("
         const Opt = enum { None, Some{ bool } }
         let val: Opt = .Some{ true }
         match val^ is .None | .Some{ true } => 0
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
+    test_err!("
+        const Opt = enum { None, Some{ bool } }
+        let val: Opt.Some = .Some{ true }
+        match val^ is .Some{ true } => 0
+    ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
+}
 
-    test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingCaseExpr);
-    test_err!("if (5 is let x) is true {}", ErrType::TyperInvalidBindingCaseExpr);
+#[test]
+fn pattern_binding() {
+    test_err!("let a = (5 is let x)", ErrType::TyperInvalidBindingIsExpr);
+    test_err!("if (5 is let x) is true {}", ErrType::TyperInvalidBindingIsExpr);
 
     test_err!("5 is !(let x)", ErrType::TyperNotPatternCantBindVars);
 
@@ -152,4 +165,15 @@ fn typecheck_functions() {
 #[test]
 fn deref_non_local_pointer() {
     test_err!("type T = (); impl T { fn f(self: &Self) { self^^; } }", ErrType::TyperCantDerefUnknownPointerType);
+}
+
+#[test]
+fn decay_soft_info_on_variable_bind() {
+    test_err!("
+        type Option = enum { None, Some{ num } };
+
+        let x = Option.Some{ 15 }
+        let .Some{ inner } = x^
+        inner^
+    ", ErrType::TyperFailableAssignPattern { .. });
 }
