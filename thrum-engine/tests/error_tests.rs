@@ -174,7 +174,7 @@ fn typecheck_functions() {
 
 #[test]
 fn deref_non_local_pointer() {
-    test_err!("type T = (); impl T { fn f(self: &Self) { self^^; } }", ErrType::TyperCantDerefUnknownPointerType);
+    test_err!("type T = (str); impl T { fn f(self: &Self) { self^^; } }", ErrType::TyperCantDerefUnknownPointerType);
 }
 
 #[test]

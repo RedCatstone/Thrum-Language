@@ -77,10 +77,16 @@ impl TypeChecker<'_> {
             }
 
             Expr::Tuple { elems } => {
+                let tup_ctx = if let Some(TypeId::TYPE) = old_ctx.expected_type {
+                    ctx.expect(TypeId::TYPE)
+                } else {
+                    ctx
+                };
+
                 let tuple_types = elems.iter()
                     .map(|AstTupleElement { label, expr }| TypeTuple {
                         label: label.clone(),
-                        typ: self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Once))
+                        typ: self.check_expression(*expr, is_never, &tup_ctx.auto_deref(AutoDerefMode::Once))
                     })
                     .collect();
                     
@@ -539,7 +545,7 @@ impl TypeChecker<'_> {
                 // the actual enum-type is defined in the hoisting_pass
                 for variant in variants {
                     if let Some(tup) = variant.attached_tuple {
-                        self.check_expression(tup, is_never, &ctx);
+                        self.check_expression(tup, is_never, &ctx.expect(TypeId::TYPE).is_const());
                     }
                 }
                 TypeId::TYPE
@@ -971,45 +977,47 @@ impl TypeChecker<'_> {
             return None
         };
 
-        if let Some(enum_id) = self.get_wrapped_enum_id(expected) {
-            let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
+        match self.get_wrapped_enum_id(expected) {
+            Ok(enum_id) => {
+                let enum_def = &self.typed_ast.enum_defs[enum_id.0 as usize];
 
-            // try to find the correct .Variant
-            let Some(variant) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
-                if let Some(span) = err_span {
-                    self.error(ErrType::TyperEnumDoesntHaveVariant { 
-                        enum_: self.fmt_type(expected), 
-                        variant: variant_name.into()
-                    }, span);
-                }
-                return None;
-            };
-            
-            let attached_type = enum_def.variants[variant].1;
+                // try to find the correct .Variant
+                let Some(variant) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
+                    if let Some(span) = err_span {
+                        self.error(ErrType::TyperEnumDoesntHaveVariant { 
+                            enum_: self.fmt_type(expected), 
+                            variant: variant_name.into()
+                        }, span);
+                    }
+                    return None;
+                };
+    
+                let attached_type = enum_def.variants[variant].1;
 
-            // refine/specialize it and wrap it back in the custom types
-            // so this function will turn `CustomType(1, Enum<0>)` -> `EnumVariant<CustomType(1, Enum<0>), 0>`
-            let refine_type = self.type_arena.add_type(Type::EnumVariant { inner: expected, variant });
+                // refine/specialize it and wrap it back in the custom types
+                // so this function will turn `CustomType(1, Enum<0>)` -> `EnumVariant<CustomType(1, Enum<0>), 0>`
+                let refine_type = self.type_arena.add_type(Type::EnumVariant { inner: expected, variant });
 
-            Some((enum_id, variant, attached_type, refine_type))
-        }
-        else {
-            if let Some(span) = err_span {
-                self.error(ErrType::TyperExpectedTypeIsntAnEnum { typ: self.fmt_type(expected) }, span);
+                Some((enum_id, variant, attached_type, refine_type))
             }
-            None
+
+            Err(typ) => {
+                if typ != Type::Error && let Some(span) = err_span {
+                    self.error(ErrType::TyperExpectedTypeIsntAnEnum { typ: self.fmt_type(expected) }, span);
+                }
+                None
+            }
         }
     }
 
-    #[must_use]
-    pub(super) fn get_wrapped_enum_id(&self, mut id: TypeId) -> Option<EnumId> {
+    pub(super) fn get_wrapped_enum_id(&self, mut id: TypeId) -> Result<EnumId, Type> {
         loop {
             match self.prune_type_once(id) {
                 Type::CustomType(_, inner) | Type::EnumVariant { inner, .. } => {
                     id = inner;
                 }
-                Type::Enum(enum_id) => return Some(enum_id),
-                _ => return None
+                Type::Enum(enum_id) => return Ok(enum_id),
+                typ => return Err(typ)
             }
         }
     }

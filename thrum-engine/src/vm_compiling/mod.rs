@@ -98,6 +98,7 @@ pub enum OpCode {
 
     // meta type stuff
     MakeTypeRef { mutable: bool },
+    TypeTupToTupType { labels: Vec<String> },
 
     // no-op
     NoOp
@@ -124,7 +125,8 @@ impl OpCode {
             | Self::TupPointerGet { .. } | Self::TupGet { .. } | Self::TupArrCreate { length: _ }
             | Self::NumNegate | Self::BoolNegate
             | Self::MakeTypeRef { .. }
-            | Self::Return | Self::Panic => OpCodeRuntimeTempDiff { requires: 1, diff: 0 },
+            | Self::Return | Self::Panic
+            | Self::TypeTupToTupType { labels: _ } => OpCodeRuntimeTempDiff { requires: 1, diff: 0 },
 
             Self::CmpEqual | Self::CmpLess | Self::CmpGreater
             | Self::TupPointerIndex
@@ -135,7 +137,6 @@ impl OpCode {
             | Self::TupCreate { length } => OpCodeRuntimeTempDiff { requires: *length, diff: 1 - isize::try_from(*length).unwrap() },
 
             Self::TupUnpack { length } => OpCodeRuntimeTempDiff { requires: 1, diff: isize::try_from(*length).unwrap() - 1 },
-
             Self::Jump { .. } | Self::NoOp => OpCodeRuntimeTempDiff { requires: 0, diff: 0 },
             Self::CallFn { arg_count } => OpCodeRuntimeTempDiff { requires: *arg_count, diff: -isize::try_from(*arg_count).unwrap() },
         }
@@ -680,6 +681,10 @@ impl VmCompiler<'_> {
                 // println!("derefed {:?}", self.ast.get_expr(compile_expr));
                 self.push_op(OpCode::PointerGetClone);
             }
+        }
+
+        if let Some(labels) = self.typed_ast.resolved_tuple_type_coerce.get(&compile_expr) {
+            self.push_op(OpCode::TypeTupToTupType { labels: labels.clone() });
         }
 
         assert!(start_temps + 1 == self.cur_temp_amount,

@@ -136,6 +136,7 @@ pub struct TypedAst {
     pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
     
     pub resolved_tuple_arr_length: HashMap<ExprId, usize>,
+    pub resolved_tuple_type_coerce: HashMap<ExprId, Vec<String>>,
     pub resolved_enum_variant: HashMap<ExprId, (EnumId, usize)>,
     pub resolved_enum_variant_pattern: HashMap<PatternId, (EnumId, usize)>,
     pub resolved_closure_fn_id: HashMap<ExprId, usize>,
@@ -413,15 +414,6 @@ impl TypeChecker<'_> {
                 
             }
 
-
-            // a tuple with only types IS a type itself
-            // TODO remove this garbo logic
-            (Type::MetaType, Type::Tup(elems)) => {
-                for elem in elems {
-                    self.unify_types(TypeId::TYPE, elem.typ, span, mode);
-                }
-                id_b
-            }
 
             (Type::Borrow { mutable: mut_a, inner: inner_a, borrows_var: borrows_a },
             Type::Borrow { mutable: mut_b, inner: inner_b, borrows_var: _ }) => {

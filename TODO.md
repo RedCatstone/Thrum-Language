@@ -1,5 +1,5 @@
 # Could do right now
-- [ ] make tuples coerce to Type::Tuple, instead of treating tuples as types
+- [x] make tuples coerce to Type::Tuple, instead of treating tuples as types
 - [x] enums with data
 - [ ] support for runtime & and &mut
 - [ ] drop logic

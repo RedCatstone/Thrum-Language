@@ -354,41 +354,16 @@ impl<'ast> TypeChecker<'ast> {
 
 
     pub(super) fn check_annotation_meta_type_id(&mut self, expr: ExprId, needs_typechecking: bool) -> TypeId {
-        // typecheck first
         if needs_typechecking {
             self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE).is_const());
         }
 
-        // then evaluate
-        self.evaluate_expr(expr).map_or(
-            TypeId::ERROR,
-            |val| self.extract_meta_type_from_runtime_val(val, self.typed_ast.expr_types[expr.0 as usize])
-        )
-    }
-
-    /// TODO: get rid of this stoopid function
-    pub(super) fn extract_meta_type_from_runtime_val(&mut self, val: RuntimeValue, expected_type: TypeId) -> TypeId {
-        match val {
-            RuntimeValue::Type(id) => id,
-            RuntimeValue::Tup(elems) => {
-                let typ = self.prune_type_once(expected_type);
-                let Type::Tup(expected_tup) = typ else {
-                    unreachable!("type mismatch at runtime!? {}", self.fmt_type(expected_type))
-                };
-
-                let meta_elems = elems.into_iter()
-                    .zip(expected_tup)
-                    .map(|(val_elem, type_elem)| {
-                        TypeTuple {
-                            label: type_elem.label,
-                            typ: self.extract_meta_type_from_runtime_val(val_elem, type_elem.typ)
-                        }
-                    }).collect();
-
-                self.type_arena.add_type(Type::Tup(meta_elems))
-            }
-            _ => unreachable!("not a meta type?! {val} \nexpected: {}", self.fmt_type(expected_type))
-        }
+        self.evaluate_expr(expr).map_or(TypeId::ERROR, |val| {
+            let RuntimeValue::Type(meta_id) = val else {
+                unreachable!("not a meta type?! {val}, expr: {}", self.ast.display_expr(expr))
+            };
+            meta_id
+        })
     }
 
 

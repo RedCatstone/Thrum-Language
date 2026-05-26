@@ -371,6 +371,11 @@ fn single_tuple_type_destruction() {
 }
 
 #[test]
+fn tuple_type_coercion() {
+    test!("const typ = (bool, bool);  let x: typ = (true, false);  x^", RuntimeValue::Tup(vec![RuntimeValue::Bool(true), RuntimeValue::Bool(false)]));
+}
+
+#[test]
 fn consts() {
     test!("const (x, _) = (5, 3); x^", RuntimeValue::Num(5.0));
     test!("const X = 2 * Y; const Z = 20; const Y = 3 * Z; X^", RuntimeValue::Num(120.0));

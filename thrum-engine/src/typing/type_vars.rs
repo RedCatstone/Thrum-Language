@@ -207,16 +207,16 @@ impl<'ast> TypeChecker<'ast> {
                     self.mark_vars_in_pattern_as_const(pattern, TypeVarConstVal::Evaluated(val));
                 }
                 PatternOrVarId::CustomTypeVarId(var_id) => {
-                    // TODO: make tuple types better
-                    let expected_type = self.typed_ast.get_expr_type(value);
-                    let runtime_type_id = self.extract_meta_type_from_runtime_val(val, expected_type);
+                    let RuntimeValue::Type(meta_type_id) = val else {
+                        unreachable!("not a meta type?! {val}")
+                    };
 
                     // add the new CustomType!!
                     let new_type_id = CustomTypeId(self.custom_types.len().try_into().unwrap());
                     let var_name = self.typed_ast.get_var(var_id).name.clone().into_boxed_str();
                     self.custom_types.push(CustomType { name: var_name, impls: TypeVarScope::default() });
 
-                    let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, runtime_type_id));
+                    let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, meta_type_id));
                     let type_const = RuntimeValue::Type(new_type);
 
                     self.typed_ast.get_var_mut(var_id).const_val = TypeVarConstVal::Evaluated(type_const);

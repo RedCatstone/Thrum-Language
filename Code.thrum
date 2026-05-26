@@ -1,12 +1,6 @@
-type Option = enum { None, Some{ num } }
-
-fn handle_some(.Some{ inner }: Option.Some) -> num {
-    inner
-}
-
-let x: Option.Some = .Some{ 15 }
-handle_some(x^) + handle_some(.Some{ 7 })
-
+const typ = (bool, bool, bool)
+let x: typ = (true, false, false)
+x^
 
 
 // type Option = enum { None, Some{ num } }

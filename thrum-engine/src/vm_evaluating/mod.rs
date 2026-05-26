@@ -1,4 +1,4 @@
-use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, RuntimeValue}};
+use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena, TypeTuple}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, RuntimeValue}};
 
 
 
@@ -304,11 +304,29 @@ impl<'a> VM<'a> {
                     let RuntimeValue::Type(a) = self.value_stack.pop().unwrap() else {
                         unreachable!("last value was not a meta type")
                     };
-                    let Some(type_arena) = &mut self.type_arena else {
-                        unreachable!("tried to access the type_arena, but there was none...")
-                    };
-                    let pointer_type = type_arena.add_type(Type::Borrow { inner: a, mutable: *mutable, borrows_var: None });
+                    let pointer_type = self.type_arena.as_mut().expect("tried to access the type_arena, but there was none...")
+                        .add_type(Type::Borrow { inner: a, mutable: *mutable, borrows_var: None });
                     self.stack_push_val(RuntimeValue::Type(pointer_type));
+                }
+
+                OpCode::TypeTupToTupType { labels } => {
+                    let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else {
+                        unreachable!("last value was not a tup")
+                    };
+
+                    assert_eq!(tup.len(), labels.len());
+                    let tup_type = tup.iter().zip(labels)
+                        .map(|(val, label)| {
+                            let RuntimeValue::Type(id) = val else {
+                                unreachable!("should be a type...")
+                            };
+                            TypeTuple { label: label.clone(), typ: *id }
+                        })
+                        .collect();
+
+                    let tup_type = self.type_arena.as_mut().expect("tried to access the type_arena, but there was none...")
+                        .add_type(Type::Tup(tup_type));
+                    self.stack_push_val(RuntimeValue::Type(tup_type));
                 }
 
                 // End of function / program

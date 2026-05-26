@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::Span,
     parsing::ast::ExprId,
-    typing::{Type, TypeChecker, TypeId, TypeVarId }
+    typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode }
 };
 
 
@@ -14,30 +14,37 @@ pub enum AutoDerefMode {
 impl TypeChecker<'_> {
     pub(super) fn coerce_to_expected_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
         // 1. deref pointers so the amounts there match.
-        let expr_type = self.auto_deref_to_expected_type(expr, expected_id);
+        self.auto_deref_to_expected_type(expr, expected_id);
         
         // 2. coercion.
-        let coerced = self.coerce_type(expr_type, expected_id);
+        let coerced = self.coerce_type(expr, expected_id);
         self.typed_ast.expr_types[expr.0 as usize] = coerced;
         coerced
     }
 
 
 
-    fn coerce_type(&self, expr_type_id: TypeId, expected_id: TypeId) -> TypeId {
+    fn coerce_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
+        let expr_type_id = self.typed_ast.get_expr_type(expr);
         let expr_type = self.prune_type_once(expr_type_id);
+        let expr_span = self.ast.get_expr_span(expr);
         let expected_type = self.prune_type_once(expected_id);
 
+        #[allow(clippy::single_match)]
         match (expr_type, expected_type) {
-            // // Tuple -> MetaType
-            // (Type::Tup(_), Type::MetaType) => {
-            //     // TODO, tuples should coerce to `Type::MetaType`, not behave like a type.
-            // }
+            // Tuple -> MetaType
+            (Type::Tup(elems), Type::MetaType) => {
+                let labels = elems.into_iter().map(|TypeTuple { label, typ }| {
+                    self.unify_types(TypeId::TYPE, typ, expr_span, UnifyMode::Subtype);
+                    label
+                }).collect();
+                self.typed_ast.resolved_tuple_type_coerce.insert(expr, labels);
 
-            _ => {}
+                TypeId::TYPE
+            }
+
+            _ => expr_type_id
         }
-        
-        expr_type_id
     }
 
 
@@ -155,11 +162,23 @@ impl TypeChecker<'_> {
             | Type::Error => Some(true),
 
             Type::Str
-            | Type::TupArr(_, _)
-            | Type::Tup(_)
             | Type::Enum(_) => Some(false),
 
-            Type::CustomType(_, inner) | Type::EnumVariant { inner, .. } => {
+            Type::Tup(inners) => {
+                let mut all_clone = true;
+                for tt in inners {
+                    match self.is_auto_clone(tt.typ) {
+                        Some(true) => {},
+                        Some(false) => all_clone = false,
+                        None => return None,
+                    }
+                }
+                Some(all_clone)
+            }
+
+            Type::CustomType(_, inner)
+            | Type::EnumVariant { inner, .. }
+            | Type::TupArr(inner, _) => {
                 self.is_auto_clone(inner)
             }
 
