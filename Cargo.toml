@@ -1,0 +1,3 @@
+[workspace]
+members = ["thrum-engine"]
+resolver = "3"
