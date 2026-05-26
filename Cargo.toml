@@ -1,3 +1,12 @@
 [workspace]
 members = ["thrum-engine"]
 resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95.0"
+license = "MIT"
+license-file = "LICENSE"
+version = "0.1.0"
+repository = "https://github.com/RedCatstone/thrum-lang"
+categories = ["compilers"]
