@@ -4,7 +4,7 @@ use derive_more::Display;
 use crate::{
     ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
     parsing::ast::{AstArena, AstIds, ExprId, PatternId},
-    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, RuntimeValue}
+    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, VmValue}
 };
 
 pub mod type_vars;
@@ -212,8 +212,8 @@ pub struct LabelInfo<'ast> {
 pub enum ResolvedMemberAccess {
     TupleRefIndex { index: usize },  // tup.0
     TupleIndex { index: usize },  // tup^.0
-    Member { constant: RuntimeValue },  // Point.distance(p)
-    MemberWithSelfSugar { constant: RuntimeValue, self_sugar_expr: ExprId },  // p.distance()
+    Member { constant: VmValue },  // Point.distance(p)
+    MemberWithSelfSugar { constant: VmValue, self_sugar_expr: ExprId },  // p.distance()
     EnumWithNoData { i: usize }  // Option.None
 }
 

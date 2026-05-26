@@ -2,7 +2,7 @@ use std::{fmt::Display, time::Instant};
 
 use derive_more::Display;
 
-use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::type_vars::TypeVar, vm_compiling::RuntimeValue, vm_evaluating::VM};
+use crate::{lexing::tokens::{Span, TokenKind}, parsing::ast::ExprId, pretty_printing::{format_program_error, slice_to_or_string, slice_to_string}, typing::type_vars::TypeVar, vm_compiling::VmValue, vm_evaluating::VM};
 
 pub mod lexing;
 pub mod typing;
@@ -181,7 +181,7 @@ pub enum WarnType {
 
 
 
-pub fn run_code(source_code: &str) -> Result<RuntimeValue, Vec<ErrType>> {
+pub fn run_code(source_code: &str) -> Result<VmValue, Vec<ErrType>> {
     let mut err_data = ProgramErrorData::new();
 
     let (lexer_tokens, line_lookup) = lexing::Lexer::start(&mut err_data, source_code);

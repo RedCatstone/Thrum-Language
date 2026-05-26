@@ -1,4 +1,4 @@
-use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena, TypeTuple}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, RuntimeValue}};
+use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena, TypeTuple}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, VmValue}};
 
 
 
@@ -56,11 +56,11 @@ pub struct VM<'a> {
     type_arena: Option<&'a mut TypeArena>,
 
     frames: Vec<CallFrame>,
-    value_stack: Vec<RuntimeValue>,
+    value_stack: Vec<VmValue>,
 }
 
 impl<'a> VM<'a> {
-    pub unsafe fn start(compiled_functions: &'a mut FunctionRegistry, type_arena: Option<&'a mut TypeArena>) -> Result<RuntimeValue, ErrType> {
+    pub unsafe fn start(compiled_functions: &'a mut FunctionRegistry, type_arena: Option<&'a mut TypeArena>) -> Result<VmValue, ErrType> {
         let mut vm = Self {
             compiled_functions,
             type_arena,
@@ -86,7 +86,7 @@ impl<'a> VM<'a> {
         let length_needed = frame.base_pointer + chunk.local_slots_needed;
         // self.value_stack.resize_with(length_needed, || Value::Empty);
         while self.value_stack.len() < length_needed {
-            self.stack_push_val(RuntimeValue::Empty);
+            self.stack_push_val(VmValue::Empty);
         }
         self.frames.push(frame);
     }
@@ -94,7 +94,7 @@ impl<'a> VM<'a> {
     /// # Safety
     /// The typechecker should make sure that `ValuePointers` are used correctly!
     /// If it fails, this will cause UB. :(
-    pub unsafe fn run(&mut self, print_debug_execution: bool) -> Result<RuntimeValue, ErrType> {
+    pub unsafe fn run(&mut self, print_debug_execution: bool) -> Result<VmValue, ErrType> {
         loop {
             let Some(frame) = self.frames.last_mut() else {
                 // else the program finished!
@@ -121,10 +121,10 @@ impl<'a> VM<'a> {
                 }
                 OpCode::ConstGetRef { const_index } => {
                     let pointer = &raw mut chunk.constants[*const_index];
-                    self.stack_push_val(RuntimeValue::ValuePointer(pointer));
+                    self.stack_push_val(VmValue::ValuePointer(pointer));
                 }
                 OpCode::PushVoid => {
-                    self.stack_push_val(RuntimeValue::Void);
+                    self.stack_push_val(VmValue::Void);
                 }
 
 
@@ -146,13 +146,13 @@ impl<'a> VM<'a> {
                 }
                 OpCode::LocalPointer { local_index } => {
                     let pointer = &raw mut self.value_stack[frame.base_pointer + local_index];
-                    self.stack_push_val(RuntimeValue::ValuePointer(pointer));
+                    self.stack_push_val(VmValue::ValuePointer(pointer));
                 }
 
 
                 // Pointers
                 OpCode::PointerGetClone => {
-                    let RuntimeValue::ValuePointer(raw_p) = self.value_stack.pop().unwrap()
+                    let VmValue::ValuePointer(raw_p) = self.value_stack.pop().unwrap()
                     else { unreachable!() };
 
                     // unsafe, spooky
@@ -161,16 +161,16 @@ impl<'a> VM<'a> {
                     );
                 }
                 OpCode::PointerGetMove => {
-                    let RuntimeValue::ValuePointer(raw_p) = self.value_stack.pop().unwrap()
+                    let VmValue::ValuePointer(raw_p) = self.value_stack.pop().unwrap()
                     else { unreachable!() };
 
                     // unsafe, spooky
                     self.stack_push_val(
-                        std::mem::replace(unsafe { &mut *raw_p }, RuntimeValue::Empty)
+                        std::mem::replace(unsafe { &mut *raw_p }, VmValue::Empty)
                     );
                 }
                 OpCode::PointerSet => {
-                    let RuntimeValue::ValuePointer(p) = self.value_stack.pop().unwrap()
+                    let VmValue::ValuePointer(p) = self.value_stack.pop().unwrap()
                     else { unreachable!("Value was not a pointer") };
                     let value = self.value_stack.pop().unwrap();
                     
@@ -182,36 +182,36 @@ impl<'a> VM<'a> {
                 OpCode::CmpEqual => {
                     let right = self.value_stack.pop().unwrap();
                     let left = self.value_stack.pop().unwrap();
-                    self.stack_push_val(RuntimeValue::Bool(left == right));
+                    self.stack_push_val(VmValue::Bool(left == right));
                 }
                 OpCode::CmpLess => {
                     let right = self.value_stack.pop().unwrap();
                     let left = self.value_stack.pop().unwrap();
-                    self.stack_push_val(RuntimeValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Less)));
+                    self.stack_push_val(VmValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Less)));
                 }
                 OpCode::CmpGreater => {
                     let right = self.value_stack.pop().unwrap();
                     let left = self.value_stack.pop().unwrap();
-                    self.stack_push_val(RuntimeValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Greater)));
+                    self.stack_push_val(VmValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Greater)));
                 }
                 
-                OpCode::NumAdd => run_op!(self, RuntimeValue::Num(l), RuntimeValue::Num(r) => RuntimeValue::Num(l + r)),
-                OpCode::NumSubtract => run_op!(self, RuntimeValue::Num(l), RuntimeValue::Num(r) => RuntimeValue::Num(l - r)),
-                OpCode::NumMultiply => run_op!(self, RuntimeValue::Num(l), RuntimeValue::Num(r) => RuntimeValue::Num(l * r)),
-                OpCode::NumDivide => run_op!(self, RuntimeValue::Num(l), RuntimeValue::Num(r) => RuntimeValue::Num(l / r)),
-                OpCode::NumModulo => run_op!(self, RuntimeValue::Num(l), RuntimeValue::Num(r) => RuntimeValue::Num(l % r)),
-                OpCode::NumNegate => run_op!(self, RuntimeValue::Num(n) => RuntimeValue::Num(-n)),
+                OpCode::NumAdd => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l + r)),
+                OpCode::NumSubtract => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l - r)),
+                OpCode::NumMultiply => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l * r)),
+                OpCode::NumDivide => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l / r)),
+                OpCode::NumModulo => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l % r)),
+                OpCode::NumNegate => run_op!(self, VmValue::Num(n) => VmValue::Num(-n)),
 
-                OpCode::BoolNegate => run_op!(self, RuntimeValue::Bool(b) => RuntimeValue::Bool(!b)),
+                OpCode::BoolNegate => run_op!(self, VmValue::Bool(b) => VmValue::Bool(!b)),
 
-                OpCode::StrAdd => run_op!(self, RuntimeValue::Str(l), RuntimeValue::Str(r) => RuntimeValue::Str(l + &r)),
+                OpCode::StrAdd => run_op!(self, VmValue::Str(l), VmValue::Str(r) => VmValue::Str(l + &r)),
                 OpCode::StrTemplate { length } => {
                     let cut_off_index = self.value_stack.len() - length;
                     let mut string = String::new();
                     for val in self.value_stack.drain(cut_off_index..) {
                         string += &Self::val_to_string(&val);
                     }
-                    self.stack_push_val(RuntimeValue::Str(string));
+                    self.stack_push_val(VmValue::Str(string));
                 }
 
 
@@ -219,31 +219,31 @@ impl<'a> VM<'a> {
                 OpCode::TupCreate { length } => {
                     let cut_off_index = self.value_stack.len() - length;
                     let elems = self.value_stack.drain(cut_off_index..).collect();
-                    self.stack_push_val(RuntimeValue::Tup(elems));
+                    self.stack_push_val(VmValue::Tup(elems));
                 }
                 OpCode::TupArrCreate { length } => {
                     let tup_elem = self.value_stack.pop().unwrap();
                     let elems = (0..*length).map(|_| tup_elem.clone()).collect();
-                    self.stack_push_val(RuntimeValue::Tup(elems));
+                    self.stack_push_val(VmValue::Tup(elems));
                 }
 
                 OpCode::TupPointerGet { index } => {                    
-                    let RuntimeValue::ValuePointer(tup_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
-                    let RuntimeValue::Tup(tup) = (unsafe { &mut *tup_pointer }) else { unreachable!() };
+                    let VmValue::ValuePointer(tup_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let VmValue::Tup(tup) = (unsafe { &mut *tup_pointer }) else { unreachable!() };
                     
                     let pointer = &raw mut tup[*index];
-                    self.stack_push_val(RuntimeValue::ValuePointer(pointer));
+                    self.stack_push_val(VmValue::ValuePointer(pointer));
                 }
                 OpCode::TupGet { index } => {
-                    let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let VmValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!() };
                     let val = tup[*index].clone();
                     self.stack_push_val(val);
                 }
                 OpCode::TupPointerIndex => {
-                    let RuntimeValue::Num(i) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let VmValue::Num(i) = self.value_stack.pop().unwrap() else { unreachable!() };
                     
-                    let RuntimeValue::ValuePointer(arr_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
-                    let RuntimeValue::Tup(tup) = (unsafe { &mut *arr_pointer }) else { unreachable!() };
+                    let VmValue::ValuePointer(arr_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let VmValue::Tup(tup) = (unsafe { &mut *arr_pointer }) else { unreachable!() };
 
                     if i.fract() > 0.0 {
                         return Err(ErrType::RuntimeError { msg: format!("Cannot index arr with a non-integer number: {i}") })
@@ -253,13 +253,13 @@ impl<'a> VM<'a> {
                         return Err(ErrType::RuntimeError { msg: format!("Index {i_usize} is out of bounds for arr of length {}.", tup.len()) });
                     }
 
-                    self.stack_push_val(RuntimeValue::ValuePointer(
+                    self.stack_push_val(VmValue::ValuePointer(
                         &raw mut tup[i_usize]
                     ));
                 }
 
                 OpCode::TupUnpack { length } => {
-                    let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!("last value was not a tuple") };
+                    let VmValue::Tup(tup) = self.value_stack.pop().unwrap() else { unreachable!("last value was not a tuple") };
                     assert_eq!(*length, tup.len());
 
                     self.stack_extend_from_slice(&tup);
@@ -271,7 +271,7 @@ impl<'a> VM<'a> {
                     frame.ip = frame.ip.checked_add_signed(*offset).expect("Instruction pointer jumped out of bounds...");
                 }
                 OpCode::JumpIfFalse { offset } => {
-                    let RuntimeValue::Bool(bool) = self.value_stack.pop().unwrap() else { unreachable!("Expected a boolean value...") };
+                    let VmValue::Bool(bool) = self.value_stack.pop().unwrap() else { unreachable!("Expected a boolean value...") };
                     if !bool {
                         frame.ip = frame.ip.checked_add_signed(*offset).expect("Instruction pointer jumped out of bounds...");
                     }
@@ -284,13 +284,13 @@ impl<'a> VM<'a> {
                     let args = self.value_stack.drain(first_arg_index..).collect::<Vec<_>>();
 
                     match callee {
-                        RuntimeValue::NativeFn(native_fn) => {
+                        VmValue::NativeFn(native_fn) => {
                             self.stack_push_val(
                                 native_fn(&args)?
                             );
                         }
 
-                        RuntimeValue::Fn { slot } => {
+                        VmValue::Fn { slot } => {
                             self.load_frame_from_index(slot);
                             self.value_stack.extend(args);
                         }
@@ -301,23 +301,23 @@ impl<'a> VM<'a> {
 
                 // meta type stuff
                 OpCode::MakeTypeRef { mutable } => {
-                    let RuntimeValue::Type(a) = self.value_stack.pop().unwrap() else {
+                    let VmValue::Type(a) = self.value_stack.pop().unwrap() else {
                         unreachable!("last value was not a meta type")
                     };
                     let pointer_type = self.type_arena.as_mut().expect("tried to access the type_arena, but there was none...")
                         .add_type(Type::Borrow { inner: a, mutable: *mutable, borrows_var: None });
-                    self.stack_push_val(RuntimeValue::Type(pointer_type));
+                    self.stack_push_val(VmValue::Type(pointer_type));
                 }
 
                 OpCode::TypeTupToTupType { labels } => {
-                    let RuntimeValue::Tup(tup) = self.value_stack.pop().unwrap() else {
+                    let VmValue::Tup(tup) = self.value_stack.pop().unwrap() else {
                         unreachable!("last value was not a tup")
                     };
 
                     assert_eq!(tup.len(), labels.len());
                     let tup_type = tup.iter().zip(labels)
                         .map(|(val, label)| {
-                            let RuntimeValue::Type(id) = val else {
+                            let VmValue::Type(id) = val else {
                                 unreachable!("should be a type...")
                             };
                             TypeTuple { label: label.clone(), typ: *id }
@@ -326,7 +326,7 @@ impl<'a> VM<'a> {
 
                     let tup_type = self.type_arena.as_mut().expect("tried to access the type_arena, but there was none...")
                         .add_type(Type::Tup(tup_type));
-                    self.stack_push_val(RuntimeValue::Type(tup_type));
+                    self.stack_push_val(VmValue::Type(tup_type));
                 }
 
                 // End of function / program
@@ -338,7 +338,7 @@ impl<'a> VM<'a> {
                     self.frames.pop();
                 }
                 OpCode::Panic => {
-                    let RuntimeValue::Str(msg) = self.value_stack.pop().unwrap()
+                    let VmValue::Str(msg) = self.value_stack.pop().unwrap()
                     else { unreachable!("last value was not a str") };
                     return Err(ErrType::RuntimeError { msg })
                 }
@@ -355,12 +355,12 @@ impl<'a> VM<'a> {
 
 
 
-    fn stack_push_val(&mut self, val: RuntimeValue) {
+    fn stack_push_val(&mut self, val: VmValue) {
         let cap_before_push = self.value_stack.capacity();
         self.value_stack.push(val);
         assert!(cap_before_push <= self.value_stack.capacity(), "Stack Overflow limit of {cap_before_push} reached!");
     }
-    fn stack_extend_from_slice(&mut self, slice: &[RuntimeValue]) {
+    fn stack_extend_from_slice(&mut self, slice: &[VmValue]) {
         let cap_before_push = self.value_stack.capacity();
         self.value_stack.extend_from_slice(slice);
         assert!(cap_before_push <= self.value_stack.capacity(), "Stack Overflow limit of {cap_before_push} reached!");
@@ -368,18 +368,18 @@ impl<'a> VM<'a> {
 
 
 
-    fn val_to_string(val: &RuntimeValue) -> String {
+    fn val_to_string(val: &VmValue) -> String {
         match val {
-            RuntimeValue::Num(num) => num.to_string(),
-            RuntimeValue::Str(str) => str.clone(),
-            RuntimeValue::Bool(bool) => bool.to_string(),
+            VmValue::Num(num) => num.to_string(),
+            VmValue::Str(str) => str.clone(),
+            VmValue::Bool(bool) => bool.to_string(),
 
-            RuntimeValue::Tup(tup) => {
+            VmValue::Tup(tup) => {
                 let str_results: Vec<String> = tup.iter().map(Self::val_to_string).collect();
                 String::from("(") + &str_results.join(", ") + ")"
             }
 
-            RuntimeValue::Void => "void".to_string(),
+            VmValue::Void => "void".to_string(),
             _ => panic!("Literal {val:?} cannot be converted into a string.")
         }
     }

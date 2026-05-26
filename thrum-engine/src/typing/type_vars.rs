@@ -5,7 +5,7 @@ use derive_more::Display;
 use crate::{
     ErrType, lexing::tokens::Span, nativelib::ThrumModule, parsing::ast::{AstEnumExpression, Expr, ExprId, PatternId},
     typing::{CustomType, CustomTypeId, EnumDefinition, EnumId, LabelInfo, Type, TypeChecker, TypeId, TypeVarId, check_expressions::CheckExprCtx},
-    vm_compiling::{RuntimeValue, VmCompiler}
+    vm_compiling::{VmValue, VmCompiler}
 };
 
 
@@ -45,7 +45,7 @@ pub enum TypeVarConstVal {
     NotYetTypechecked { value: ExprId, bind_to: PatternOrVarId },
     CurrTypechecking,
     NotYetEvaluated { value: ExprId, bind_to: PatternOrVarId },
-    Evaluated(RuntimeValue),
+    Evaluated(VmValue),
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatternOrVarId {
@@ -193,7 +193,7 @@ impl<'ast> TypeChecker<'ast> {
             Expr::Closure { .. } => {
                 // closures can have cyclic dependencies (recursion), so it
                 // needs to first bind to the pattern, and AFTER typecheck
-                Some(RuntimeValue::Fn {
+                Some(VmValue::Fn {
                     slot: self.typed_ast.resolved_closure_fn_id[&value]
                 })
             }
@@ -207,7 +207,7 @@ impl<'ast> TypeChecker<'ast> {
                     self.mark_vars_in_pattern_as_const(pattern, TypeVarConstVal::Evaluated(val));
                 }
                 PatternOrVarId::CustomTypeVarId(var_id) => {
-                    let RuntimeValue::Type(meta_type_id) = val else {
+                    let VmValue::Type(meta_type_id) = val else {
                         unreachable!("not a meta type?! {val}")
                     };
 
@@ -217,7 +217,7 @@ impl<'ast> TypeChecker<'ast> {
                     self.custom_types.push(CustomType { name: var_name, impls: TypeVarScope::default() });
 
                     let new_type = self.type_arena.add_type(Type::CustomType(new_type_id, meta_type_id));
-                    let type_const = RuntimeValue::Type(new_type);
+                    let type_const = VmValue::Type(new_type);
 
                     self.typed_ast.get_var_mut(var_id).const_val = TypeVarConstVal::Evaluated(type_const);
                 }
@@ -238,7 +238,7 @@ impl<'ast> TypeChecker<'ast> {
     /// `const x = ...`
     /// `let x: ... = 5`
     /// `(0; ...)`
-    pub(super) fn evaluate_expr(&mut self, expr: ExprId) -> Option<RuntimeValue> {
+    pub(super) fn evaluate_expr(&mut self, expr: ExprId) -> Option<VmValue> {
         // if there were any errors, don't evaluate consts anymore.
         // this fixes compiler crashes, but its definitely not the best
         if !self.error_data.errors.is_empty() {
@@ -261,7 +261,7 @@ impl<'ast> TypeChecker<'ast> {
                 let enum_id = self.add_enum_def(EnumDefinition { variants });
                 let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
                 
-                Some(RuntimeValue::Type(enum_type))
+                Some(VmValue::Type(enum_type))
             }
 
             _ => {

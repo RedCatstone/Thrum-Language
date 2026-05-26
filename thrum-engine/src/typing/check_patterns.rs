@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::{
     ErrType, parsing::ast::{AstTuplePattern, AstValue, Expr, ExprId, Pattern, PatternId},
     typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode, check_expressions::CheckExprCtx, exhaustiveness::PatternSpace, type_vars::TypeVarConstVal},
-    vm_compiling::RuntimeValue
+    vm_compiling::VmValue
 };
 
 
@@ -294,7 +294,7 @@ impl<'ast> TypeChecker<'ast> {
                             if let TypeVarConstVal::Evaluated(val) = &var.const_val {
                                 #[allow(clippy::collapsible_match, clippy::single_match)]
                                 match val {
-                                    RuntimeValue::Bool(b) => covered_cases.push(PatternSpace::Bool(*b)),
+                                    VmValue::Bool(b) => covered_cases.push(PatternSpace::Bool(*b)),
                                     _ => {}
                                 }
                             }
@@ -359,7 +359,7 @@ impl<'ast> TypeChecker<'ast> {
         }
 
         self.evaluate_expr(expr).map_or(TypeId::ERROR, |val| {
-            let RuntimeValue::Type(meta_id) = val else {
+            let VmValue::Type(meta_id) = val else {
                 unreachable!("not a meta type?! {val}, expr: {}", self.ast.display_expr(expr))
             };
             meta_id
@@ -411,7 +411,7 @@ impl<'ast> TypeChecker<'ast> {
             }
             Pattern::Tuple(ast_tuple_patterns) => {
                 // if we have a const_val, then we need to destructure the const tuple to each pattern.
-                if let TypeVarConstVal::Evaluated(RuntimeValue::Tup(elems)) = const_val {
+                if let TypeVarConstVal::Evaluated(VmValue::Tup(elems)) = const_val {
                     assert_eq!(elems.len(), ast_tuple_patterns.len());
 
                     for (p, elem) in ast_tuple_patterns.iter().zip(elems) {

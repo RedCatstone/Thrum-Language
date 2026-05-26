@@ -2,7 +2,7 @@ use crate::{
     ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
     parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
     typing::{CustomTypeId, EnumId, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode, check_patterns::CheckPatternVars, coercion::AutoDerefMode, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}},
-    vm_compiling::RuntimeValue
+    vm_compiling::VmValue
 };
 
 
@@ -98,7 +98,7 @@ impl TypeChecker<'_> {
                 self.check_expression(*length, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM).is_const());
 
                 match self.evaluate_expr(*length) {
-                    Some(RuntimeValue::Num(num)) => {
+                    Some(VmValue::Num(num)) => {
                         let const_length = num as usize;
                         self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
                         self.type_arena.add_type(Type::TupArr(elem_type, const_length))
@@ -819,7 +819,7 @@ impl TypeChecker<'_> {
                     return if expected_type == Some(TypeId::TYPE) {
                         // if it expects a type, return a hard specialized type.
                         // e.g. `let x: Option.Some`, this can never be assigned any other enum variants, only .Some{ ... }
-                        let constant = RuntimeValue::Type(refined_type);
+                        let constant = VmValue::Type(refined_type);
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant });
 
                         self.type_arena.add_type(Type::Borrow { inner: TypeId::TYPE, mutable: false, borrows_var: None })
@@ -895,7 +895,7 @@ impl TypeChecker<'_> {
     }
 
 
-    fn check_type_impl_const(&mut self, typ: &Type, member: &str) -> Option<(RuntimeValue, TypeId)> {
+    fn check_type_impl_const(&mut self, typ: &Type, member: &str) -> Option<(VmValue, TypeId)> {
         println!("checking impl for {typ:?}");
 
         if let Type::CustomType(custom_id, _) = typ
@@ -952,10 +952,10 @@ impl TypeChecker<'_> {
             let Some(res) = self.typed_ast.resolved_member_access.get_mut(&member_expr) else {
                 unreachable!("every member_access_expr should get a note here... {}", self.fmt_type(resolved_type))
             };
-            if let ResolvedMemberAccess::Member { constant: RuntimeValue::Type(inner_val_type) } = *res
+            if let ResolvedMemberAccess::Member { constant: VmValue::Type(inner_val_type) } = *res
             && self.are_types_equivalent(custom_inner, inner_val_type) {
 
-                let new_constant = RuntimeValue::Type(self.type_arena.add_type(Type::CustomType(custom_id, inner_val_type)));
+                let new_constant = VmValue::Type(self.type_arena.add_type(Type::CustomType(custom_id, inner_val_type)));
                 self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::Member { constant: new_constant });
             }
 

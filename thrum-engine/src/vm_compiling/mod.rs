@@ -7,7 +7,7 @@ use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstAr
 
 
 #[derive(Debug, Display, Clone, PartialEq, PartialOrd)]
-pub enum RuntimeValue {
+pub enum VmValue {
     #[display("{_0}")]
     Num(f64),
     #[display("\"{_0}\"")]
@@ -41,7 +41,7 @@ pub enum RuntimeValue {
     Empty,
 }
 
-impl From<AstValue> for RuntimeValue {
+impl From<AstValue> for VmValue {
     fn from(value: AstValue) -> Self {
         match value {
             AstValue::Num(v) => Self::Num(v),
@@ -150,7 +150,7 @@ pub struct LabelId(pub usize);
 #[derive(Default, Debug)]
 pub struct BytecodeChunk {
     pub ops: Vec<OpCode>,
-    pub constants: Vec<RuntimeValue>,
+    pub constants: Vec<VmValue>,
     pub label_positions: Vec<LabelId>,
     pub local_slots_needed: usize,
 }
@@ -158,7 +158,7 @@ pub struct BytecodeChunk {
 
 enum CompilerVar {
     AtSlot(usize),
-    ConstValue(RuntimeValue)
+    ConstValue(VmValue)
 }
 
 struct FailureJump {
@@ -241,7 +241,7 @@ impl VmCompiler<'_> {
         type_arena: &mut TypeArena,
         compiled_functions: &mut FunctionRegistry,
         expr_id: ExprId
-    ) -> Result<RuntimeValue, ErrType> {
+    ) -> Result<VmValue, ErrType> {
         let const_chunk = VmCompiler::new(ast, typed_ast, compiled_functions)
             .compile_function(expr_id, &[]);
 
@@ -308,7 +308,7 @@ impl VmCompiler<'_> {
                 self.push_op(OpCode::PushVoid);
             }
             Expr::Literal { val } => {
-                self.push_get_constant_op(RuntimeValue::from(val.clone()));
+                self.push_get_constant_op(VmValue::from(val.clone()));
             }
             Expr::TemplateString { elems } => {
                 for &elem in elems {
@@ -425,7 +425,7 @@ impl VmCompiler<'_> {
 
                 // it matched! -> push true
                 let temps_before_pushing_true = self.cur_temp_amount;
-                self.push_get_constant_op(RuntimeValue::Bool(true));
+                self.push_get_constant_op(VmValue::Bool(true));
 
                 // handle failure path
                 if !failure_jumps.is_empty() {
@@ -437,7 +437,7 @@ impl VmCompiler<'_> {
 
                     // all failure jumps land here
                     self.compile_binding_pattern_failure_jumps(failure_jumps);
-                    self.push_get_constant_op(RuntimeValue::Bool(false));
+                    self.push_get_constant_op(VmValue::Bool(false));
                     
                     self.patch_jump_op_to_here(jump_over_false_path);
                 }
@@ -660,7 +660,7 @@ impl VmCompiler<'_> {
 
             Expr::ImplSelf => {
                 let meta_type = self.typed_ast.resolved_impl_self_type[&compile_expr];
-                self.push_get_constant_op(RuntimeValue::Type(meta_type));
+                self.push_get_constant_op(VmValue::Type(meta_type));
             }
 
             Expr::Borrow { expr, mutable } => {
@@ -736,7 +736,7 @@ impl VmCompiler<'_> {
     }
 
 
-    fn add_constant(&mut self, val: RuntimeValue) -> usize {
+    fn add_constant(&mut self, val: VmValue) -> usize {
         // let index = match self.bytecode.constants.iter().position(|constant| val == constant.clone()) {
         //     Some(i) => i,
         //     None => {
@@ -748,13 +748,13 @@ impl VmCompiler<'_> {
         self.curr_function_chunk.constants.len() - 1
     }
 
-    fn push_get_constant_op(&mut self, val: RuntimeValue) {
+    fn push_get_constant_op(&mut self, val: VmValue) {
         let const_index = self.add_constant(val);
         self.push_op(OpCode::ConstGet { const_index });
     }
-    fn push_get_constant_ref_op(&mut self, val: RuntimeValue) {
+    fn push_get_constant_ref_op(&mut self, val: VmValue) {
         // if the const value is a fn that is not compiled yet, compile it!
-        if let RuntimeValue::Fn { slot } = val
+        if let VmValue::Fn { slot } = val
         && self.compiled_functions.compiled_functions[slot].not_compiled() {
             
             let closure_expr = self.compiled_functions.closure_expr_id[slot];
@@ -768,7 +768,7 @@ impl VmCompiler<'_> {
         self.push_op(OpCode::ConstGetRef { const_index });
     }
 
-    fn define_local(&mut self, var_id: TypeVarId, const_value: Option<RuntimeValue>) -> usize {
+    fn define_local(&mut self, var_id: TypeVarId, const_value: Option<VmValue>) -> usize {
         // doesn't exist yet, define it!
         let slot = self.cur_function_var_amount;
         self.cur_function_var_amount += 1;
@@ -916,7 +916,7 @@ impl VmCompiler<'_> {
                 self.push_op(OpCode::TupUnpack { length: 2 });
 
                 // compare the enum tags
-                self.push_get_constant_op(RuntimeValue::Num(i as f64));
+                self.push_get_constant_op(VmValue::Num(i as f64));
                 self.push_op(OpCode::CmpEqual);
                 failure_jumps.push(FailureJump {
                     jump_loc: self.push_jump_if_false_op_for_patching(),
@@ -1011,7 +1011,7 @@ impl VmCompiler<'_> {
                 self.compile_expression(right);
                 let jump_to_end = self.push_jump_op_for_patching();
                 self.patch_jump_op_to_here(jump_over_right_expression);
-                self.push_get_constant_op(RuntimeValue::Bool(false));
+                self.push_get_constant_op(VmValue::Bool(false));
                 self.cur_temp_amount = temps_after_left;
                 self.patch_jump_op_to_here(jump_to_end);
                 return
@@ -1026,7 +1026,7 @@ impl VmCompiler<'_> {
                 self.compile_expression(right);
                 let jump_to_end = self.push_jump_op_for_patching();
                 self.patch_jump_op_to_here(jump_over_right_expression);
-                self.push_get_constant_op(RuntimeValue::Bool(true));
+                self.push_get_constant_op(VmValue::Bool(true));
                 self.cur_temp_amount = temps_after_left;
                 self.patch_jump_op_to_here(jump_to_end);
                 return
@@ -1064,7 +1064,7 @@ impl VmCompiler<'_> {
         } else {
             self.push_op(OpCode::PushVoid);
         }
-        self.push_get_constant_op(RuntimeValue::Num(i as f64));
+        self.push_get_constant_op(VmValue::Num(i as f64));
         self.push_op(OpCode::TupCreate { length: 2 });
     }
 }
