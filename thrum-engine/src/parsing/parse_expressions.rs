@@ -218,39 +218,13 @@ impl Parser<'_> {
             TokenKind::Op(AssignOp::Star) => {
                 let expr = self.parse_expression(Precedence::Prefix);
                 self.add_expr(start, Expr::Move { expr })
-            },
+            }
 
             TokenKind::LeftBrace => self.parse_block_expression(TokenKind::RightBrace, start),
 
             TokenKind::LeftParen => {
-                // empty tuple case '()'
-                if self.optional_token(TokenKind::RightParen) {
-                    self.add_expr(start, Expr::Tuple { elems: Vec::new() })
-                }
-                else {
-                    let first_elem = self.parse_one_tuple_expression("0".to_string());
-                    if self.optional_token(TokenKind::Comma) {
-                        // , means its a tuple!
-                        // e.g. (1, 2) (1,) (x: 1,)
-                        self.parse_tuple_expression(start, Some(first_elem), TokenKind::RightParen)
-                    }
-                    else if self.optional_token(TokenKind::Semicolon) {
-                        // ; means its a tuple array
-                        // (0; 4)
-                        let length = self.parse_expression_default();
-                        self.expect_token(TokenKind::RightParen, "to close the array expression");
-
-                        self.add_expr(start, Expr::TupleArr { elem: first_elem.expr, length })
-                    } else {
-                        // normal grouped expression
-                        self.expect_token(TokenKind::RightParen, "to close the grouped expression");
-                        // if first_elem.label == "0" {
-                        //     self.error(ErrType::DefaultString("If this is supposed to be a tuple, use a trailing comma.".to_string()));
-                        // }
-                        first_elem.expr
-                    }
-                }
-            },
+                self.parse_tuple_or_arr_expression(start, TokenKind::RightParen, true)
+            }
 
             TokenKind::StringStart => {
                 let mut elems = Vec::new();
@@ -514,7 +488,7 @@ impl Parser<'_> {
         let variant_name = self.expect_identifier("to name an enum variant").into_boxed_str();
 
         let attached_tuple = self.optional_token(TokenKind::LeftBrace).then(|| {
-            self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace)
+            self.parse_tuple_or_arr_expression(self.prev_token_span, TokenKind::RightBrace, false)
         });
 
         AstEnumExpression { variant_name, attached_tuple }
@@ -523,7 +497,7 @@ impl Parser<'_> {
     fn wrap_in_optional_type_instantiation(&mut self, wrap: ExprId) -> ExprId {
         // Number{ 3 } is only allowed if there is no space after 'Number'
         if self.peek_spaces_before() == 0 && self.optional_token(TokenKind::LeftBrace) {
-            let data = self.parse_tuple_expression(self.prev_token_span, None, TokenKind::RightBrace);
+            let data = self.parse_tuple_or_arr_expression(self.prev_token_span, TokenKind::RightBrace, false);
             
             let wrap_span = self.ast.get_expr_span(wrap);
             self.add_expr(wrap_span, Expr::TypeInstantiation { typ: wrap, data })
@@ -578,22 +552,38 @@ impl Parser<'_> {
         AstTupleElement { label, expr }
     }
 
-    fn parse_tuple_expression(&mut self, start: Span, first_elem: Option<AstTupleElement>, end_token: TokenKind) -> ExprId {
-        let mut tuple_body = vec![];
-        let has_first_elem = first_elem.is_some();
-        if let Some(x) = first_elem {
-            tuple_body.push(x);
+    fn parse_tuple_or_arr_expression(&mut self, start: Span, end_token: TokenKind, maybe_just_grouped_expr: bool) -> ExprId {
+        if self.optional_token(end_token) {
+            // tuple is empty
+            return self.add_expr(start, Expr::Tuple { elems: Vec::new() });
         }
-        
-        let other_tuple_elems = self.parse_comma_separated(
-            end_token,
-            |p, i| {
-                p.parse_one_tuple_expression((if has_first_elem { i + 1 } else { i }).to_string())
-            },
-            "to close the tuple"
-        );
-        tuple_body.extend(other_tuple_elems);
-        self.add_expr(start, Expr::Tuple { elems: tuple_body })
+
+        let first_elem = self.parse_one_tuple_expression("0".to_string());
+
+        if self.optional_token(TokenKind::Semicolon) {
+            // `(true; 3)`
+            let length = self.parse_expression_default();
+            self.expect_token(end_token, "to close the tuple array expression");
+            self.add_expr(start, Expr::TupleArr { elem: first_elem.expr, length })
+        }
+        else if self.optional_token(TokenKind::Comma) {
+            // comma => definitely a tuple
+            let mut tuple_body = vec![first_elem];
+            tuple_body.extend(self.parse_comma_separated(
+                end_token,
+                |p, i| p.parse_one_tuple_expression((i + 1).to_string()),
+                "to close the tuple"
+            ));
+            self.add_expr(start, Expr::Tuple { elems: tuple_body })
+        }
+        else if maybe_just_grouped_expr {
+            self.expect_token(end_token, "to close the grouped expression");
+            first_elem.expr
+        } else {
+            // 1-element tuple
+            self.expect_token(end_token, "to close the tuple");
+            self.add_expr(start, Expr::Tuple { elems: vec![first_elem] })
+        }
     }
 
 

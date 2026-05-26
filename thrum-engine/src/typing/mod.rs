@@ -1,5 +1,4 @@
 use std::{collections::{HashMap, HashSet}, fmt::{self, Write}};
-use derive_more::Display;
 
 use crate::{
     ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
@@ -45,8 +44,8 @@ pub enum Type {
     Error,
 }
 
-#[derive(Debug, Display, Clone, Eq, Hash, PartialEq)]
-#[display("{label}: {typ:?}")]
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct TypeTuple {
     pub label: String,
     pub typ: TypeId,
@@ -344,51 +343,61 @@ impl TypeChecker<'_> {
             (_, Type::Never) => id_a,
             (Type::Error, _) | (_, Type::Error) => TypeId::ERROR,
 
-            (Type::TupArr(inner_a, length_a), Type::TupArr(inner_b, length_b)) => {
-                if length_a == length_b {
-                    self.unify_types(inner_a, inner_b, span, mode)
-                } else {
-                    new_mismatch()
-                }
+            (Type::TupArr(inner_a, len_a), Type::TupArr(inner_b, len_b)) if len_a == len_b => {
+                let merged = self.unify_types(inner_a, inner_b, span, mode);
+                self.type_arena.add_type(Type::TupArr(merged, len_a))
             }
 
-            (Type::Tup(elems_a), Type::Tup(elems_b)) => {
-                if elems_a.len() == elems_b.len() {
-                    let mut new_elems = Vec::new();
+            (Type::Tup(elems_a), Type::Tup(elems_b)) if elems_a.len() == elems_b.len() => {
+                let mut new_elems = Vec::new();
 
-                    for (ia, ib) in elems_a.into_iter().zip(elems_b) {
-                        if ia.label != ib.label {
-                            *mismatch = true;
-                        }
-
-                        let id = self.unify_types(ia.typ, ib.typ, span, mode);
-                        new_elems.push(TypeTuple { label: ia.label, typ: id });
+                for (ia, ib) in elems_a.into_iter().zip(elems_b) {
+                    if ia.label != ib.label {
+                        *mismatch = true;
                     }
 
-                    self.type_arena.add_type(Type::Tup(new_elems))
-                } else {
-                    new_mismatch()
+                    let id = self.unify_types(ia.typ, ib.typ, span, mode);
+                    new_elems.push(TypeTuple { label: ia.label, typ: id });
                 }
+
+                self.type_arena.add_type(Type::Tup(new_elems))
             }
 
-            (Type::CustomType(id_a, inner_a), Type::CustomType(id_b, inner_b)) => {
-                if id_a == id_b {
-                    let merged_inner = self.unify_types(inner_a, inner_b, span, mode);
-                    self.type_arena.add_type(Type::CustomType(id_a, merged_inner))
-                } else {
-                    // Different custom_id => they can't unify
-                    // e.g. `type N1 = num;  type N2 = num;  N1{ 2 } + N2{ 2 }`
-                    new_mismatch()
-                }
+            (Type::TupArr(inner_a, len_a), Type::Tup(elems_b)) if len_a == elems_b.len() => {
+                let new_elems = elems_b.into_iter()
+                    .map(|elem_a| TypeTuple {
+                        label: elem_a.label,
+                        typ: self.unify_types(elem_a.typ, inner_a, span, mode)
+                    })
+                    .collect();
+                
+                self.type_arena.add_type(Type::Tup(new_elems))
+            }
+            (Type::Tup(elems_a), Type::TupArr(inner_b, len_b)) if elems_a.len() == len_b => {
+                let new_elems = elems_a.into_iter()
+                    .map(|elem_a| TypeTuple {
+                        label: elem_a.label,
+                        typ: self.unify_types(elem_a.typ, inner_b, span, mode)
+                    })
+                    .collect();
+
+                self.type_arena.add_type(Type::Tup(new_elems))
             }
 
-            (Type::Enum(enum_id_a), Type::Enum(enum_id_b)) => {
-                if enum_id_a == enum_id_b {
-                    id_a
-                } else {
-                    new_mismatch()
-                }
+
+            (Type::CustomType(id_a, inner_a), Type::CustomType(id_b, inner_b))
+            if id_a == id_b => {
+                let merged_inner = self.unify_types(inner_a, inner_b, span, mode);
+                self.type_arena.add_type(Type::CustomType(id_a, merged_inner))
+
+                // Different custom_id => they can't unify
+                // e.g. `type N1 = num;  type N2 = num;  N1{ 2 } + N2{ 2 }`
             }
+
+            (Type::Enum(enum_id_a), Type::Enum(enum_id_b)) if enum_id_a == enum_id_b => {
+                id_a
+            }
+            
             (Type::EnumVariant { inner: inner_a, variant: variant_a },
             Type::EnumVariant { inner: inner_b, variant: variant_b }) => {
                 let merged_inner = self.unify_types(inner_a, inner_b, span, mode);

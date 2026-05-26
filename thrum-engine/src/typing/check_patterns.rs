@@ -196,7 +196,7 @@ impl<'ast> TypeChecker<'ast> {
 
                         match self.prune_type_once_infer_err(inner_new_type, span) {
                             Type::Error => TypeId::ERROR,
-                            Type::Tup(_) => {
+                            Type::Tup(_) | Type::TupArr(_, _) => {
                                 // if it expects a tuple, e.g. `type Point = { num, num }`
                                 // then just typecheck normally. (`data` is already a tuple expr)
                                 let (typ, covered) = self.check_match_pattern(

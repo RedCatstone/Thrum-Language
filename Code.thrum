@@ -1,6 +1,7 @@
-const typ = (bool, bool, bool)
-let x: typ = (true, false, false)
-x^
+// run me by doing `cargo run Code.thrum`
+
+type BoolVec = (bool; 5);
+BoolVec{ true; 5 }.3
 
 
 // type Option = enum { None, Some{ num } }

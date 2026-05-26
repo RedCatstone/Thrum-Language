@@ -164,14 +164,15 @@ fn tup_destructuring() {
 fn tup_arrays() {
     test!("
         let x = (1, 2, 3)
-        x[0] + x[1] * x[2]
+        x.0 + x.1 * x[2]
     ", VmValue::Num(7.0));
 
     test!("
-        let mut x = (7; 30)
-        x[2] %= 4
+        let mut x = (9; 30)
+        x.2 %= 5
+        x[2] %= 3
         x[2]^
-    ", VmValue::Num(3.0));
+    ", VmValue::Num(1.0));
 
     test!("const LENGTH = 10; (0; LENGTH)", VmValue::Tup(vec![VmValue::Num(0.0); 10]));
 
@@ -376,6 +377,8 @@ fn tuple_type_coercion() {
     test!("const typ = (bool; 2);     let x: typ = (true, false);  x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(false)]));
     test!("const typ = (bool, bool);  let x: typ = (true; 2);      x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(true)]));
     test!("const typ = (bool; 2);     let x: typ = (true; 2);      x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(true)]));
+
+    test!("type X = (bool; 5);  X{ true; 5 }.3", VmValue::Bool(true));
 }
 
 #[test]

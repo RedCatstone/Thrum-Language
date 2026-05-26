@@ -783,19 +783,32 @@ impl TypeChecker<'_> {
 
         // check the member for special types first:
         match &left_type {
-            Type::Tup(elems) if !came_from_meta => {
+            Type::Tup(_) | Type::TupArr(_, _) if !came_from_meta => {
                 // for tuples check if `member` matches a label
                 // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
-                let member_index = elems.iter().position(|elem| elem.label == *member);
+                let found_data = match &left_type {
+                    Type::Tup(elems) => {
+                        elems.iter().enumerate()
+                            .find(|(_, elem)| elem.label == *member)
+                            .map(|(x, t)| (x, t.typ))
+                    }
+                    Type::TupArr(elem, len) => {
+                        member.parse().map_or(
+                            None,
+                            |i| (i < *len).then_some((i, *elem))
+                        )
+                    }
+                    _ => unreachable!("trivially unreachable")
+                };
 
-                if let Some(index) = member_index {
+                if let Some((index, elem_type)) = found_data {
                     // if we came from a ref keep that ref
                     return if let Some((mutable, borrows_var)) = came_from_ref {
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::TupleRefIndex { index });
-                        self.type_arena.add_type(Type::Borrow { inner: elems[index].typ, mutable, borrows_var })
+                        self.type_arena.add_type(Type::Borrow { inner: elem_type, mutable, borrows_var })
                     } else {
                         self.typed_ast.resolved_member_access.insert(member_expr, ResolvedMemberAccess::TupleIndex { index });
-                        elems[index].typ
+                        elem_type
                     }
                 }
             }
@@ -1029,7 +1042,7 @@ impl TypeChecker<'_> {
 
         match self.prune_type_once_infer_err(instance_type, span) {
             Type::Error => TypeId::ERROR,
-            Type::Tup(_) => {
+            Type::Tup(_) | Type::TupArr(_, _) => {
                 // if it expects a tuple, e.g. `type Point = { num, num }; Point{ 1, 2 }`
                 // then just typecheck normally. (`data` is already a tuple expr)
                 self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::Tuple);

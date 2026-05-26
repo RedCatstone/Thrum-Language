@@ -1,7 +1,7 @@
 use crate::{
     ErrType, lexing::tokens::Span,
     parsing::ast::ExprId,
-    typing::{Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode }
+    typing::{Type, TypeChecker, TypeId, TypeVarId }
 };
 
 
@@ -27,19 +27,19 @@ impl TypeChecker<'_> {
     fn coerce_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
         let expr_type_id = self.typed_ast.get_expr_type(expr);
         let expr_type = self.prune_type_once(expr_type_id);
-        let expr_span = self.ast.get_expr_span(expr);
         let expected_type = self.prune_type_once(expected_id);
 
-        #[allow(clippy::single_match)]
         match (expr_type, expected_type) {
             // Tuple -> MetaType
             (Type::Tup(elems), Type::MetaType) => {
-                let labels = elems.into_iter().map(|TypeTuple { label, typ }| {
-                    self.unify_types(TypeId::TYPE, typ, expr_span, UnifyMode::Subtype);
-                    label
-                }).collect();
+                let labels = elems.into_iter().map(|elem| elem.label).collect();
                 self.typed_ast.resolved_tuple_type_coerce.insert(expr, labels);
-
+                TypeId::TYPE
+            }
+            // TupArr -> MetaType
+            (Type::TupArr(_, len), Type::MetaType) => {
+                let labels = (0..len).map(|x| x.to_string()).collect();
+                self.typed_ast.resolved_tuple_type_coerce.insert(expr, labels);
                 TypeId::TYPE
             }
 
@@ -176,9 +176,9 @@ impl TypeChecker<'_> {
                 Some(all_clone)
             }
 
-            Type::CustomType(_, inner)
-            | Type::EnumVariant { inner, .. }
-            | Type::TupArr(inner, _) => {
+            Type::TupArr(inner, _)
+            | Type::CustomType(_, inner)
+            | Type::EnumVariant { inner, .. } => {
                 self.is_auto_clone(inner)
             }
 
