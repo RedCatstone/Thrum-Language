@@ -290,6 +290,11 @@ fn enum_match_expr() {
     ", VmValue::Num(42.0));
 }
 
+// #[test]
+// fn ensure_expr() {
+//     test!("ensure true else { panic(\"OoH No!!\") }", VmValue::Void);
+// }
+
 
 
 

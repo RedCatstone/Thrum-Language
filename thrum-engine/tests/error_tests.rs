@@ -7,6 +7,7 @@ mod common;
 fn lexer_errors() {
     test_err!("1 + ~", ErrType::LexerUnexpectedCharacter { c: '~' });
     test_err!("unterminated \"string", ErrType::LexerUnterminatedString);
+    test_err!("'{'", ErrType::LexerMissingClosingStringBrace);
 }
 #[test]
 fn parser_errors() {
@@ -124,6 +125,8 @@ fn pattern_binding() {
 fn custom_type() {
     test_err!("num{ 5 }", ErrType::TyperMustBeCustomtypeType { .. });
     test_err!("type X = num; X{ 1, 2 }", ErrType::TyperNewTypesExpectOneUnlabeledExpr);
+    test_err!("type X = num; X{ 1; 1 }", ErrType::TyperNewTypesExpectOneUnlabeledExpr);
+    test_err!("type X = num; X{}", ErrType::TyperNewTypesExpectOneUnlabeledExpr);
     test_err!("type X = 5", ErrType::TyperMismatch { .. });
 
     test_err!("let x: num = .Foo", ErrType::TyperExpectedTypeIsntAnEnum { .. });

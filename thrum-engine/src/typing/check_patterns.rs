@@ -80,25 +80,16 @@ impl<'ast> TypeChecker<'ast> {
             Pattern::Tuple(elems) => {
                 let mut tuple_types = Vec::new();
                 let mut tuple_covered_cases = Vec::new();
-                let mut mismatch = false;
-
-                // we need to split the expected type up, and pass that
-                let expected_elems = expected_type.and_then(|exp| {
-                    match self.prune_type_once(exp) {
-                        Type::Tup(fields) => Some(fields),
-                        _ => None
-                    }
-                });
+                
+                let pruned_expected = expected_type.map(|t| self.prune_type_once(t));
 
                 for AstTuplePattern { label, pattern: p } in elems {
-                    let elem_expected_type = expected_elems.as_ref()
-                        .map(|elems| elems.iter()
-                            .find(|x| &x.label == label)
-                            .map_or_else(
-                                || { mismatch = true; TypeId::ERROR },
-                                |x| x.typ
-                            )
-                        );
+                    let elem_expected_type = match &pruned_expected {
+                        Some(tup_type @ (Type::Tup(_) | Type::TupArr(_, _))) => {
+                            Self::extract_tup_label_type(tup_type, label).map(|(_, typ)| typ)
+                        }
+                        _ => None
+                    };
 
                     let (typ, covered) = self.check_match_pattern(
                         *p, elem_expected_type, is_explicit, has_value, const_update.clone(), vars_defined
@@ -108,13 +99,8 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 covered_cases = PatternSpace::tuple_cartesian_product(&tuple_covered_cases);
-                let typ = self.type_arena.add_type(Type::Tup(tuple_types));
-
-                if mismatch {
-                    self.type_mismatch(expected_type.unwrap(), typ, span)
-                } else {
-                    typ
-                }
+                
+                self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
             Pattern::Wildcard => {
@@ -368,10 +354,9 @@ impl<'ast> TypeChecker<'ast> {
 
 
     pub(super) fn get_pattern_type(&mut self, pattern: PatternId) -> Option<TypeId> {
-        if let Pattern::Typed { pattern: _, typ } = self.ast.get_pattern(pattern) {
-            Some(self.check_annotation_meta_type_id(*typ, true))
-        } else {
-            None
+        match self.ast.get_pattern(pattern) {
+            Pattern::Typed { typ, .. } => Some(self.check_annotation_meta_type_id(*typ, true)),
+            _ => None,
         }
         // match &pattern.pattern {
         //     Pattern::Binding { .. }

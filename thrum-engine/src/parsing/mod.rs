@@ -218,7 +218,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Let | TokenKind::If | TokenKind::Ensure | TokenKind::While
             | TokenKind::Loop | TokenKind::Match | TokenKind::Enum | TokenKind::Fn | TokenKind::Pipe
             | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Mut
-            | TokenKind::Impl | TokenKind::For
+            | TokenKind::Impl | TokenKind::For | TokenKind::Dot
         )
     }
 

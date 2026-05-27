@@ -424,8 +424,7 @@ impl<'ast> TypeChecker<'ast> {
 
 
 
-    pub(super) fn before_check_label_logic(&mut self, expr: ExprId, label: &'ast str) -> SnapshotVarsState {
-        let typ = self.new_infer_type();
+    pub(super) fn before_check_label_logic(&mut self, expr: ExprId, label: &'ast str, typ: TypeId) -> SnapshotVarsState {
         self.curr_label_infos.push(LabelInfo { label, expr, typ, break_snapshots: Vec::new() });
         self.snapshot_vars_state()
     }

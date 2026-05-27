@@ -77,16 +77,25 @@ impl TypeChecker<'_> {
             }
 
             Expr::Tuple { elems } => {
-                let tup_ctx = if let Some(TypeId::TYPE) = old_ctx.expected_type {
-                    ctx.expect(TypeId::TYPE)
-                } else {
-                    ctx
-                };
+                let pruned_expected = old_ctx.expected_type.map(|t| self.prune_type_once(t));
 
                 let tuple_types = elems.iter()
-                    .map(|AstTupleElement { label, expr }| TypeTuple {
-                        label: label.clone(),
-                        typ: self.check_expression(*expr, is_never, &tup_ctx.auto_deref(AutoDerefMode::Once))
+                    .map(|AstTupleElement { label, expr }| {
+                        let elem_expected_type = match &pruned_expected {
+                            Some(tup_type @ (Type::Tup(_) | Type::TupArr(_, _))) => {
+                                Self::extract_tup_label_type(tup_type, label).map(|(_, typ)| typ)
+                            }
+                            
+                            // if the whole tuple is expected to be a metatype thats valid.
+                            // all members need to be metatype aswell then and it will coerce later. 
+                            Some(Type::MetaType) => Some(TypeId::TYPE),
+                            _ => None
+                        };
+
+                        let elem_ctx = ctx.maybe_expect(elem_expected_type).auto_deref(AutoDerefMode::Once);
+                        let typ = self.check_expression(*expr, is_never, &elem_ctx);
+
+                        TypeTuple { label: label.clone(), typ }
                     })
                     .collect();
                     
@@ -153,32 +162,42 @@ impl TypeChecker<'_> {
                 // normal pass
                 let last_type = if let Some((&last_expr, other_exprs)) = exprs.split_last() {
                     // label logic
-                    let snap_before_block = label.as_ref().map(|l| self.before_check_label_logic(check_expr, l));
+                    let snap_before_block = label.as_ref().map(|label| {
+                        let block_break_type = old_ctx.expected_type.unwrap_or_else(|| self.new_infer_type());
+                        self.before_check_label_logic(check_expr, label, block_break_type)
+                    });
 
                     // actual expression compiling
                     for &expr in other_exprs {
                         self.check_expression(expr, is_never, &ctx);
                     }
 
-                    let mut last_type = self.check_expression(last_expr, is_never, &ctx.allow_conditional_bindings());
+                    let last_type_ctx = ctx.maybe_expect(old_ctx.expected_type).allow_conditional_bindings();
+                    let last_type = self.check_expression(last_expr, is_never, &last_type_ctx);
 
                     // label logic again
                     if let Some(label) = label {
                         let mut label_info = self.curr_label_infos.pop().unwrap();
                         assert_eq!(label_info.label, *label);
-                        last_type = self.unify_types(last_type, label_info.typ, self.ast.get_expr_span(last_expr), UnifyMode::FindParentType);
 
                         // 1 more snapshot after the full block executed
                         label_info.break_snapshots.push(self.snapshot_branch_vars_state(*is_never));
                         self.merge_vars_states(snap_before_block.unwrap(), &label_info.break_snapshots);
-                    }
 
-                    last_type
+                        // TODO: FIX
+                        *is_never = false;
+                        
+                        self.unify_types(label_info.typ, last_type, self.ast.get_expr_span(last_expr), UnifyMode::FindParentType)
+                    }
+                    else {
+                        last_type
+                    }
                 } else {
                     // Empty block drops Void
                     TypeId::VOID
                 };
                 self.exit_scope();
+                println!("last_type - {} - {}", self.ast.display_expr(check_expr), self.fmt_type(last_type));
                 last_type
             },
 
@@ -208,15 +227,15 @@ impl TypeChecker<'_> {
                 self.check_expression(*condition, is_never, &ctx.expect(TypeId::BOOL).allow_conditional_bindings());
 
                 let snap = self.snapshot_vars_state();
+                let branch_ctx = ctx.maybe_expect(old_ctx.expected_type);
 
                 let mut then_is_never = false;
-                let then_typ = self.check_expression(*then, &mut then_is_never, &ctx);
+                let then_typ = self.check_expression(*then, &mut then_is_never, &branch_ctx);
                 let then_snap = self.snapshot_branch_vars_state(then_is_never);
                 self.restore_vars_state(&snap);
                 
                 let mut alt_is_never = false;
-                let alt_ctx = if then_is_never { ctx.clone() } else { ctx.expect(then_typ) };
-                let alt_typ = self.check_expression(*alt, &mut alt_is_never, &alt_ctx);
+                let alt_typ = self.check_expression(*alt, &mut alt_is_never, &branch_ctx);
                 let alt_snap = self.snapshot_branch_vars_state(alt_is_never);
                 self.merge_vars_states(snap, &[then_snap, alt_snap]);
 
@@ -260,7 +279,7 @@ impl TypeChecker<'_> {
                     covered_cases.extend(arm_covered);
                     
                     let mut arm_never = false;
-                    arm_expr_types.push(self.check_expression(arm.body, &mut arm_never, &ctx));
+                    arm_expr_types.push(self.check_expression(arm.body, &mut arm_never, &ctx.maybe_expect(old_ctx.expected_type)));
                     if !arm_never { all_arms_never = false }
                     self.exit_scope();
                     
@@ -283,9 +302,8 @@ impl TypeChecker<'_> {
             },
 
             Expr::Loop { body, label } => {
-                let loop_break_type = self.new_infer_type();
-
-                let snap_before_loop = self.before_check_label_logic(check_expr, label);
+                let loop_break_type = old_ctx.expected_type.unwrap_or_else(|| self.new_infer_type());
+                let snap_before_loop = self.before_check_label_logic(check_expr, label, loop_break_type);
 
                 // check expression
                 self.check_expression(*body, &mut false, &ctx.expect(TypeId::VOID));
@@ -293,13 +311,15 @@ impl TypeChecker<'_> {
                 // label logic again
                 let label_info = self.curr_label_infos.pop().unwrap();
                 assert_eq!(label_info.label, *label);
-                if loop_break_type == self.prune_id_once(loop_break_type) {
-                    // loop doesn't have any breaks -> infinite loop -> resolve it to Type::Never
-                    self.unify_types(loop_break_type, TypeId::NEVER, span, UnifyMode::Subtype);
-                }
+                
                 self.merge_vars_states(snap_before_loop, &label_info.break_snapshots);
 
-                loop_break_type
+                if label_info.break_snapshots.is_empty() {
+                    // loop doesn't have any breaks -> infinite loop -> resolve it to Type::Never
+                    TypeId::NEVER
+                } else {
+                    loop_break_type
+                }
             },
 
             Expr::Assign { pattern, value, extra_op, op_span } => {
@@ -769,6 +789,24 @@ impl TypeChecker<'_> {
 
 
 
+    pub(super) fn extract_tup_label_type(left_type: &Type, label: &str) -> Option<(usize, TypeId)> {
+        match left_type {
+            Type::Tup(elems) => {
+                elems.iter().enumerate()
+                    .find(|(_, elem)| elem.label == *label)
+                    .map(|(index, t)| (index, t.typ))
+            }
+            Type::TupArr(elem, len) => {
+                label.parse().map_or(
+                    None,
+                    |i| (i < *len).then_some((i, *elem))
+                )
+            }
+            _ => unreachable!("function should only be called with tuple types")
+        }
+    }
+
+
     /// this might be the most complicated function in this compiler...
     fn check_member_access(
         &mut self, left_type_id: TypeId, member_expr: ExprId,
@@ -786,20 +824,7 @@ impl TypeChecker<'_> {
             Type::Tup(_) | Type::TupArr(_, _) if !came_from_meta => {
                 // for tuples check if `member` matches a label
                 // e.g. `(1, 2).0` or `(x: 1, y: 2).y`
-                let found_data = match &left_type {
-                    Type::Tup(elems) => {
-                        elems.iter().enumerate()
-                            .find(|(_, elem)| elem.label == *member)
-                            .map(|(index, t)| (index, t.typ))
-                    }
-                    Type::TupArr(elem, len) => {
-                        member.parse().map_or(
-                            None,
-                            |i| (i < *len).then_some((i, *elem))
-                        )
-                    }
-                    _ => unreachable!("trivially unreachable")
-                };
+                let found_data = Self::extract_tup_label_type(&left_type, member);
 
                 if let Some((index, elem_type)) = found_data {
                     // if we came from a ref keep that ref
@@ -1051,14 +1076,12 @@ impl TypeChecker<'_> {
             _ => {
                 // if it doesn't expect a tuple, it needs to extract the first element.
                 // e.g. `type N = num; N{ 3 }`
-                let Expr::Tuple { elems } = self.ast.get_expr(data) else {
-                    unreachable!("this is always a tuple.")
-                };
-                if let [first] = elems.as_slice() && first.label == "0" {
+                if let Expr::Tuple { elems } = self.ast.get_expr(data)
+                && let [first] = elems.as_slice()
+                && first.label == "0" {
                     self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::NewType);
                     self.check_expression(first.expr, is_never, &ctx.expect(instance_type))
-                }
-                else {
+                } else {
                     self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
                 }
             }

@@ -334,13 +334,14 @@ impl TypeChecker<'_> {
             TypeId::ERROR
         };
 
-        let result: TypeId = match (a, b) {            
+        let result: TypeId = match (a, b) {
+            (Type::Never, _) => id_b,
+            (_, Type::Never) => id_a,
+            
             // if one is an inference variable, bind it to the other type.
             (Type::Infer(id), _) => { self.inference_types[id.0 as usize] = Some(id_b); id_b }
             (_, Type::Infer(id)) => { self.inference_types[id.0 as usize] = Some(id_a); id_a }
 
-            (Type::Never, _) => id_b,
-            (_, Type::Never) => id_a,
             (Type::Error, _) | (_, Type::Error) => TypeId::ERROR,
 
             (Type::TupArr(inner_a, len_a), Type::TupArr(inner_b, len_b)) if len_a == len_b => {

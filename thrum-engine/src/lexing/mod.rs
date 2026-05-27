@@ -200,15 +200,19 @@ impl Lexer<'_> {
                     // start template string stuff
                     self.byte_pos += 1;  // eats '{'
                     self.tokenize(Some(0)); // recursion for template strings
-                    self.byte_pos += 1;  // eats '}'
-                    self.curr_token_start = self.byte_pos;  // set the token_start right after '}'
+                    if let Some(b'}') = self.source.as_bytes().get(self.byte_pos) {
+                        self.byte_pos += 1;  // eats '}'
+                        self.curr_token_start = self.byte_pos;  // set the token_start right after '}'
+                    } else {
+                        self.error(ErrType::LexerMissingClosingStringBrace);
+                        return
+                    }
                 }
                 b'\\' => {
                     is_backslashed = true;
                     self.byte_pos += 1;
                 }
 
-                // normal char, just add it!
                 _ => self.byte_pos += 1,
             }
         }
@@ -259,7 +263,6 @@ pub fn lex_string_from(source_frag: &str) -> String {
                     s.push('\n');
                     skip_spaces = true;
                 }
-                // any other char just push it
                 _ => s.push(c),
             }
             is_backslashed = false;

@@ -45,6 +45,8 @@ pub enum ErrType {
     LexerUnexpectedCharacter { c: char },
     #[display("Unterminated string.")]
     LexerUnterminatedString,
+    #[display("Missing closing brace in template string.")]
+    LexerMissingClosingStringBrace,
 
     #[display("Expected {} {err_msg}. Found '{found}' instead.",
         slice_to_or_string(&expected.iter().map(|x| format!("'{x}'")).collect::<Vec<String>>(), "or")
