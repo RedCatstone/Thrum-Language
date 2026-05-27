@@ -182,13 +182,18 @@ pub enum WarnType {
 
 
 pub fn run_code(source_code: &str) -> Result<VmValue, Vec<ErrType>> {
+    // line numbers are gonna be messed up by just slapping the prelude before the code
+    // but i don't care for now
+    const PRELUDE: &str = include_str!("prelude.thrum");
+    let preluded_source_code = &format!("{PRELUDE}\n{source_code}");
+
     let mut err_data = ProgramErrorData::new();
 
-    let (lexer_tokens, line_lookup) = lexing::Lexer::start(&mut err_data, source_code);
-    let source_data = ProgramSourceData { source_code, line_lookup: &line_lookup };
+    let (lexer_tokens, line_lookup) = lexing::Lexer::start(&mut err_data, preluded_source_code);
+    let source_data = ProgramSourceData { source_code: preluded_source_code, line_lookup: &line_lookup };
     stage_complete("Lexer", &slice_to_string(&lexer_tokens, ", "), &err_data, &source_data)?;
 
-    let mut ast = parsing::Parser::start(&mut err_data, source_code, &lexer_tokens);
+    let mut ast = parsing::Parser::start(&mut err_data, preluded_source_code, &lexer_tokens);
     drop(lexer_tokens);
     stage_complete("Parser", &ast.display_expr(ExprId(0)), &err_data, &source_data)?;
 

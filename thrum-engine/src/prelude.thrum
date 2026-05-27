@@ -1,0 +1,22 @@
+type Option = enum { None, Some{ num } }
+
+type Range = (start: num, end: num);
+type RangeIter = (curr: num, end: num);
+
+impl Range {
+    fn iter(self: Self) -> RangeIter {
+        RangeIter{ curr: self.start, end: self.end }
+    }
+}
+
+impl RangeIter {
+    fn next(self: &mut Self) -> Option {
+        if self.curr < self.end {
+            let x = Option.Some{ self.curr }
+            self.curr += 1
+            x^
+        } else {
+            Option.None
+        }
+    }
+}

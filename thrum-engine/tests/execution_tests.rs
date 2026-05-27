@@ -135,6 +135,17 @@ fn diabolical_loops() {
     ", VmValue::Num(2.0));
 }
 
+#[test]
+fn for_loop() {
+    test!("
+        let mut sum = 0;
+        for x in 0..10 {
+            sum += x
+        }
+        sum^
+    ", VmValue::Num(45.0));
+}
+
 
 #[test]
 fn tup_destructuring() {
@@ -414,8 +425,6 @@ fn enums() {
 #[test]
 fn enum_refinement() {
     test!("
-        type Option = enum { None, Some{ num } }
-
         fn handle_some(some: Option.Some) -> num {
             let .Some{ inner } = some^
             inner
@@ -426,8 +435,6 @@ fn enum_refinement() {
     ", VmValue::Num(3.0));
 
     test!("
-        type Option = enum { None, Some{ num } };
-
         let .Some{ inner } = Option.Some{ 3 }
         inner^
     ", VmValue::Num(3.0));
@@ -453,7 +460,6 @@ fn point_impl_test() {
 #[test]
 fn enum_impl_test() {
     test!("
-        type Option = enum { None, Some{ num } }
         impl Option {
             fn is_some(self: Self) -> bool {
                 self^ is .Some{ _ }

@@ -790,7 +790,7 @@ impl TypeChecker<'_> {
                     Type::Tup(elems) => {
                         elems.iter().enumerate()
                             .find(|(_, elem)| elem.label == *member)
-                            .map(|(x, t)| (x, t.typ))
+                            .map(|(index, t)| (index, t.typ))
                     }
                     Type::TupArr(elem, len) => {
                         member.parse().map_or(

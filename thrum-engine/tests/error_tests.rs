@@ -58,7 +58,6 @@ fn type_mismatch_patterns() {
 #[test]
 fn type_mismatch_enums() {
     test_err!("
-        type Option = enum { None, Some{ num } }
         fn handle_some(.Some{ inner }: Option.Some) -> num => inner
         handle_some(.None)
     ", ErrType::TyperMismatch { .. });
