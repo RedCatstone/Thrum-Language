@@ -1,4 +1,5 @@
 // run me by doing `cargo run Code.thrum`
 
-let tup: (Option, Option) = (.None, .Some{ 4 })
-tup^ is (.None, !.None)
+let mut x: Option = .None
+x = .Some{ 4 }
+x^ is !.None

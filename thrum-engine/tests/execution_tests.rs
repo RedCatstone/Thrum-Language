@@ -30,6 +30,12 @@ fn assignments() {
         (a, b) = (b, a)
         a * 10 + b
     ", VmValue::Num(21.0));
+
+    test!("
+        let mut a = 1
+        (_, a) = (a, 5*a)
+        a^
+    ", VmValue::Num(5.0));
 }
 
 

@@ -292,24 +292,20 @@ impl<'ast> TypeChecker<'ast> {
                 expr_type
             }
 
-            Pattern::PlacePointer(expr) => {                
-                let expr_type = self.check_expression(*expr, &mut false, &CheckExprCtx::default().auto_borrow_mut());
-
+            Pattern::PlacePointer(expr) => {
                 // PlacePointer can never fail, so any case is covered here now.
                 covered_cases.push(PatternSpace::All);
 
-                match self.prune_type_once_infer_err(expr_type, span) {
+                // expr was already typechecked in `get_pattern_type`
+                let expr_type = self.typed_ast.get_expr_type(*expr);
+                match self.prune_type_once(expr_type) {
                     Type::Borrow { inner, mutable: true, borrows_var } => {
                         if let Some(x) = borrows_var {
                             self.update_variable(x, span);
                         }
                         inner
                     }
-                    Type::Error => TypeId::ERROR,
-                    _ => {
-                        let err_borrow = self.type_arena.add_type(Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: None });
-                        self.type_mismatch(err_borrow, expr_type, span)
-                    }
+                    _ => TypeId::ERROR
                 }
             }
 
@@ -355,21 +351,36 @@ impl<'ast> TypeChecker<'ast> {
 
     pub(super) fn get_pattern_type(&mut self, pattern: PatternId) -> Option<TypeId> {
         match self.ast.get_pattern(pattern) {
-            Pattern::Typed { typ, .. } => Some(self.check_annotation_meta_type_id(*typ, true)),
+            Pattern::Typed { typ, .. } => Some(
+                self.check_annotation_meta_type_id(*typ, true)
+            ),
+            Pattern::PlacePointer(expr) => {
+                let expr_type = self.check_expression(*expr, &mut false, &CheckExprCtx::default().auto_borrow_mut());
+                let span = self.ast.get_expr_span(*expr);
+
+                Some(match self.prune_type_once_infer_err(expr_type, span) {
+                    Type::Borrow { inner, mutable: true, borrows_var: _ } => {
+                        inner
+                    }
+                    Type::Error => TypeId::ERROR,
+                    _ => {
+                        let err_borrow = self.type_arena.add_type(Type::Borrow { inner: TypeId::ERROR, mutable: true, borrows_var: None });
+                        self.type_mismatch(err_borrow, expr_type, span)
+                    }
+                })
+            }
+            Pattern::Tuple(elems) => {
+                let type_elems = elems.iter()
+                    .map(|elem| {
+                        let elem_type = self.get_pattern_type(elem.pattern).unwrap_or_else(|| self.new_infer_type());
+                        TypeTuple { label: elem.label.clone(), typ: elem_type }
+                    })
+                    .collect();
+
+                Some(self.type_arena.add_type(Type::Tup(type_elems)))
+            }
             _ => None,
         }
-        // match &pattern.pattern {
-        //     Pattern::Binding { .. }
-        //     | Pattern::Wildcard
-        //     | Pattern::Or(_)
-        //     | Pattern::Array(_) => self.error(ErrType::TyperRequiresTypeAnnotation, pattern.span),
-
-        //     Pattern::EnumVariant { inner_patterns: patterns, .. } => 
-        //     Pattern::Tuple(tup_patterns) => todo!(),
-        //     Pattern::Conditional { pattern, .. } => todo!(),
-        //     Pattern::Literal(value) => todo!(),
-        //     Pattern::PlacePointer { expr } => todo!(),
-        // }
     }
 
 

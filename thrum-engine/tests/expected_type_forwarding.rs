@@ -6,8 +6,8 @@ mod common;
 fn expected_type_variables() {
     test!("
         let mut x: Option = .None
-        //TODO x = .Some{ 3 }
-        x^ is .None
+        x = .Some{ 3 }
+        x^ is !.None
     ", VmValue::Bool(true));
 }
 
