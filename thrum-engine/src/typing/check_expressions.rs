@@ -184,10 +184,13 @@ impl TypeChecker<'_> {
                         label_info.break_snapshots.push(self.snapshot_branch_vars_state(*is_never));
                         self.merge_vars_states(snap_before_block.unwrap(), &label_info.break_snapshots);
 
-                        // TODO: FIX
-                        *is_never = false;
                         
-                        self.unify_types(label_info.typ, last_type, self.ast.get_expr_span(last_expr), UnifyMode::FindParentType)
+                        if label_info.break_snapshots.is_empty() {
+                            last_type
+                        } else {
+                            *is_never = false;
+                            self.unify_types(label_info.typ, last_type, self.ast.get_expr_span(last_expr), UnifyMode::FindParentType)
+                        }
                     }
                     else {
                         last_type
@@ -197,7 +200,6 @@ impl TypeChecker<'_> {
                     TypeId::VOID
                 };
                 self.exit_scope();
-                println!("last_type - {} - {}", self.ast.display_expr(check_expr), self.fmt_type(last_type));
                 last_type
             },
 
@@ -674,6 +676,7 @@ impl TypeChecker<'_> {
     }
 
 
+    #[allow(clippy::too_many_arguments, reason = "yes the function is bad, but it works for now")]
     pub(super) fn check_assign_pattern_and_value(
         &mut self, pattern: PatternId, value: Option<ExprId>,
         is_never: &mut bool, can_bind_vars: bool, can_fail: bool, fully_deref_value: bool,
@@ -927,8 +930,6 @@ impl TypeChecker<'_> {
 
 
     fn check_type_impl_const(&mut self, typ: &Type, member: &str) -> Option<(VmValue, TypeId)> {
-        println!("checking impl for {typ:?}");
-
         if let Type::CustomType(custom_id, _) = typ
         && let Some(&member) = self.custom_types[custom_id.0 as usize].impls.scope.get(member) {
             // found a member!
