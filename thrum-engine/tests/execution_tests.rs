@@ -280,6 +280,8 @@ fn match_exprs() {
         is (69, let x) => x^
         is _ => "nope"
     "#, VmValue::Str("yay!".to_string()));
+
+    test!("match false is true => 0, is _ => -3", VmValue::Num(-3.0));
 }
 #[test]
 fn enum_match_expr() {
@@ -504,4 +506,24 @@ fn random_examples() {
         }
         sum_to(100)
     ", VmValue::Num(5050.0));
+}
+
+
+#[test]
+fn new_line_iss() {
+    test!("3 \n is 3", VmValue::Bool(true));
+    test!("if 3 \n is 3 => true else false", VmValue::Bool(true));
+
+    test!("
+        match 16
+        is 5 {
+            1
+            is 2
+        }
+        is 4 => (
+            1
+            is 2
+        )
+        is _ => true
+    ", VmValue::Bool(true));
 }

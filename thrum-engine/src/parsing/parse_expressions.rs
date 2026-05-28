@@ -41,19 +41,26 @@ impl Precedence {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ParserExprContext {
+    /// toggled off in match arms
+    /// toggled back on in {}, (), []
+    pub allow_new_line_is: bool,
+}
+
 
 impl Parser<'_> {
-    pub(super) fn parse_expression_default(&mut self) -> ExprId {
-        self.parse_expression(Precedence::Lowest)
+    pub(super) fn parse_expression_default(&mut self, ctx: ParserExprContext) -> ExprId {
+        self.parse_expression(Precedence::Lowest, ctx)
     }
 
-    pub(super) fn parse_expression(&mut self, precedence: Precedence) -> ExprId {
+    pub(super) fn parse_expression(&mut self, precedence: Precedence, ctx: ParserExprContext) -> ExprId {
         // examples of prefixes:
         // 1
         // !(1 + 2)
         // Vec::new(data = [1, 2, 3])
         // if x { 1 } else { 2 }
-        let mut left_expr = self.parse_prefix();
+        let mut left_expr = self.parse_prefix(ctx);
 
         // Pratt parser loop
         loop {
@@ -77,8 +84,10 @@ impl Parser<'_> {
             // for example here the parser would normally want to keep consuming the ( as a function call
             // let mut a = 1
             // (a, b) = (b, a + b)
-            if let TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::Is = peek_op.token
-            && !self.peek_is_on_same_line() {
+            if !self.peek_is_on_same_line() && (
+                matches!(peek_op.token, TokenKind::LeftParen | TokenKind::LeftBracket)
+                || (matches!(peek_op.token, TokenKind::Is) && !ctx.allow_new_line_is)
+            ) {
                 break;
             }
 
@@ -106,19 +115,19 @@ impl Parser<'_> {
             self.next(); // consume the operator
 
             // update the left expression with the new infix result.
-            left_expr = self.parse_infix(left_expr, &peek_op, op_precedence);
+            left_expr = self.parse_infix(left_expr, &peek_op, op_precedence, ctx);
         }
         left_expr
     }
 
 
 
-    fn parse_infix(&mut self, left_expr: ExprId, op: &TokenSpan, op_precedence: Precedence) -> ExprId {
+    fn parse_infix(&mut self, left_expr: ExprId, op: &TokenSpan, op_precedence: Precedence, ctx: ParserExprContext) -> ExprId {
         let start = self.ast.get_expr_span(left_expr);
 
         if let Precedence::And | Precedence::Or | Precedence::Comparison
             | Precedence::LessGreater | Precedence::Sum | Precedence::Product = op_precedence {
-            let right = self.parse_expression(op_precedence);
+            let right = self.parse_expression(op_precedence, ctx);
             return self.add_expr(start, Expr::Infix { op: op.token, op_span: op.span, left: left_expr, right })
         }
 
@@ -137,7 +146,7 @@ impl Parser<'_> {
             
             TokenKind::Assign { extra_op } => {
                 let pattern = self.convert_expr_into_assign_pattern(left_expr);
-                let value = self.parse_expression_default();
+                let value = self.parse_expression_default(ctx);
 
                 self.add_expr(start, Expr::Assign { pattern, value, extra_op, op_span: op.span })
             },
@@ -148,7 +157,7 @@ impl Parser<'_> {
             },
             
             TokenKind::Is => {
-                let pattern = self.parse_pattern(false);
+                let pattern = self.parse_pattern(false, ctx);
 
                 self.add_expr(start, Expr::Is { value: left_expr, pattern })
             }
@@ -162,13 +171,13 @@ impl Parser<'_> {
             },
 
             TokenKind::LeftBracket => {
-                let index = self.parse_expression_default();
+                let index = self.parse_expression_default(ctx);
                 self.expect_token(TokenKind::RightBracket, "to close the index expression");
                 self.add_expr(start, Expr::Index { left: left_expr, index })
             },
 
             TokenKind::DotDot => {
-                let right = self.parse_expression_default();
+                let right = self.parse_expression_default(ctx);
 
                 let range_type = self.add_expr(start, Expr::IdentifierRef { name: "Range".to_string(), mutable: false });
                 let data = self.add_expr(start, Expr::Tuple { elems: vec![
@@ -190,7 +199,7 @@ impl Parser<'_> {
 
 
 
-    pub(super) fn parse_prefix(&mut self) -> ExprId {
+    pub(super) fn parse_prefix(&mut self, ctx: ParserExprContext) -> ExprId {
         // just for making 100% sure that this function is always in sync, even if i edit stuff.
         // (it being out of sync already lead to some weird bugs before...)
         let claims_to_be_start = self.peek_is_expression_start();
@@ -200,12 +209,12 @@ impl Parser<'_> {
 
         let expr = match op.token {
             TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus) => {
-                let right = self.parse_expression(Precedence::Prefix);
+                let right = self.parse_expression(Precedence::Prefix, ctx);
                 self.add_expr(start, Expr::Prefix { op: op.token, right })
             }
             
             TokenKind::Op(AssignOp::Star) => {
-                let expr = self.parse_expression(Precedence::Prefix);
+                let expr = self.parse_expression(Precedence::Prefix, ctx);
                 self.add_expr(start, Expr::Move { expr })
             }
 
@@ -243,7 +252,7 @@ impl Parser<'_> {
 
                         elems.push(self.add_expr(self.prev_token_span, Expr::Literal { val: AstValue::Str(s) }));
                     } else {
-                        elems.push(self.parse_expression_default());
+                        elems.push(self.parse_expression_default(ctx));
                         had_expr = true;
                     }
                 }
@@ -258,35 +267,42 @@ impl Parser<'_> {
             TokenKind::Let => {
                 // this only adds an EmptyLet expr, because let has multiple use cases
                 // e.g.: `(a, let b) = 2`  `x is let .Some(a)`
-                let pattern = self.parse_pattern(true);
+                let pattern = self.parse_pattern(true, ctx);
                 self.add_expr(start, Expr::EmptyLet { pattern })
             },
 
             TokenKind::Const => {
-                let pattern = self.parse_pattern(true);
+                let pattern = self.parse_pattern(true, ctx);
                 self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the const.");
-                let value = self.parse_expression_default();
+                let value = self.parse_expression_default(ctx);
 
                 self.add_expr(start, Expr::Const { pattern, value })
             }
             TokenKind::Type => {
                 let name = self.expect_identifier("to name the type").into_boxed_str();
                 self.expect_token(TokenKind::Assign { extra_op: None }, "to assign a value to the type.");
-                let value = self.parse_expression_default();
+                let value = self.parse_expression_default(ctx);
 
                 self.add_expr(start, Expr::CustomType { name, value })
             }
 
             TokenKind::If => {
-                let condition = self.parse_expression(Precedence::Lowest);
-                let (then, alt) = self.parse_if_and_else();
+                let condition = self.parse_expression(Precedence::Lowest, ctx);
+
+                let then = self.parse_arrow_or_block_expression("if", ctx);
+                let alt = if self.optional_token(TokenKind::Else) {
+                        self.parse_expression_default(ctx)
+                    } else {
+                        let then_span = self.ast.get_expr_span(then);
+                        self.add_expr(then_span.to_0_width_right(), Expr::Void)
+                    };
                 self.add_expr(start, Expr::If { condition, then, alt })
             },
 
             TokenKind::Ensure => {
-                let condition = self.parse_expression(Precedence::Lowest);
+                let condition = self.parse_expression(Precedence::Lowest, ctx);
                 self.expect_token(TokenKind::Else, "after the ensure condition");
-                let alt = self.parse_expression_default();
+                let alt = self.parse_expression_default(ctx);
                 let then = self.add_expr(start.to_0_width_right(), Expr::Void);
 
                 self.add_expr(start, Expr::Ensure { condition, alt, then })
@@ -294,36 +310,37 @@ impl Parser<'_> {
 
             TokenKind::While => {
                 let label = self.optional_label().unwrap_or_else(|| "while".to_string());
-                let condition = self.parse_expression_default();
-                let body = self.parse_arrow_or_block_expression("while");
+                let condition = self.parse_expression_default(ctx);
+                let body = self.parse_arrow_or_block_expression("while", ctx);
 
                 self.add_expr(start, Expr::While { condition, body, label })
             },
 
             TokenKind::For => {
                 let label = self.optional_label().unwrap_or_else(|| "for".to_string());
-                let pattern = self.parse_pattern(true);
+                let pattern = self.parse_pattern(true, ctx);
                 self.expect_token(TokenKind::In, "after for-loop pattern");
-                let iter_expr = self.parse_expression_default();
-                let body = self.parse_arrow_or_block_expression("for");
+                let iter_expr = self.parse_expression_default(ctx);
+                let body = self.parse_arrow_or_block_expression("for", ctx);
 
                 self.add_expr(start, Expr::For { pattern, iter_expr, body, label })
             },
 
             TokenKind::Loop => {
                 let label = self.optional_label().unwrap_or_else(|| "loop".to_string());
-                let body = self.parse_arrow_or_block_expression("loop");
+                let body = self.parse_arrow_or_block_expression("loop", ctx);
 
                 self.add_expr(start, Expr::Loop { body, label })
             },
 
             TokenKind::Match => {
-                let match_value = self.parse_expression(Precedence::Is);
+                let match_value = self.parse_expression(Precedence::Is, ctx);
                 let mut arms = Vec::new();
 
                 while self.optional_token(TokenKind::Is) {
-                    let pattern = self.parse_pattern(false);
-                    let body = self.parse_arrow_or_block_expression("match arm");
+                    let pattern = self.parse_pattern(false, ctx);
+                    let body = self.parse_arrow_or_block_expression("match arm", ParserExprContext { allow_new_line_is: false });
+                    self.optional_token(TokenKind::Comma);
                     arms.push(AstMatchArm { pattern, body });
                 }
 
@@ -342,12 +359,12 @@ impl Parser<'_> {
             },
 
             TokenKind::Impl => {
-                let typ = self.parse_expression_default();
+                let typ = self.parse_expression_default(ctx);
                 self.expect_token(TokenKind::LeftBrace, "to open the impl definition block");
                 
                 let const_exprs = self.parse_line_seperated(
                     TokenKind::RightBrace,
-                    Self::parse_expression_default,
+                    |p| p.parse_expression_default(ctx),
                     |_| None
                 );
 
@@ -370,15 +387,15 @@ impl Parser<'_> {
 
                 let params = self.parse_comma_separated(
                     TokenKind::RightParen,
-                    |p, _| p.parse_pattern(true),
+                    |p, _| p.parse_pattern(true, ctx),
                     "to close the fn definition parameter list"
                 )
                 .into_boxed_slice();
 
                 let return_type = self.optional_token(TokenKind::MinusArrow)
-                    .then(|| self.parse_expression(Precedence::Lowest));
+                    .then(|| self.parse_expression(Precedence::Lowest, ctx));
 
-                let body = self.parse_arrow_or_block_expression("function body");
+                let body = self.parse_arrow_or_block_expression("function body", ctx);
     
                 self.add_expr(start, Expr::FnDefinition { name, closure: AstClosure { params, return_type, body } })
             },
@@ -387,24 +404,24 @@ impl Parser<'_> {
                 // Closure!
                 let params = self.parse_comma_separated(
                     TokenKind::EqualArrow,
-                    |p, _| p.parse_pattern(true),
+                    |p, _| p.parse_pattern(true, ctx),
                     "to close the fn definition parameter list"
                 )
                 .into_boxed_slice();
 
-                let body = self.parse_expression_default();
+                let body = self.parse_expression_default(ctx);
 
                 self.add_expr(start, Expr::Closure { closure: AstClosure { params, return_type: None, body }, requires_type_annotation: false })
             }
 
             TokenKind::Return => {
-                let expr = self.parse_optional_expression().unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
+                let expr = self.parse_optional_expression(ctx).unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
                 self.add_expr(start, Expr::Return { expr })
             },
 
             TokenKind::Break => {
                 let label = self.optional_label();
-                let expr = self.parse_optional_expression().unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
+                let expr = self.parse_optional_expression(ctx).unwrap_or_else(|| self.add_expr(self.prev_token_span.to_0_width_right(), Expr::Void));
                 self.add_expr(start, Expr::Break { expr, label })
             },
 
@@ -415,7 +432,7 @@ impl Parser<'_> {
 
             TokenKind::Ampersand => {
                 let mutable = self.optional_token(TokenKind::Mut);
-                let expr = self.parse_expression(Precedence::Prefix);
+                let expr = self.parse_expression(Precedence::Prefix, ctx);
                 self.add_expr(start, Expr::Borrow { expr, mutable })
             }
 
@@ -442,20 +459,20 @@ impl Parser<'_> {
 
         let exprs = self.parse_line_seperated(
             end_token,
-            Self::parse_expression_default,
+            |p| p.parse_expression_default(ParserExprContext { allow_new_line_is: true }),
             |p| Some(p.add_expr(p.prev_token_span, Expr::Void))
         );
 
         self.add_expr(start, Expr::Block { exprs, label })
     }
 
-    pub(super) fn parse_arrow_or_block_expression(&mut self, block_name: &str) -> ExprId {
+    pub(super) fn parse_arrow_or_block_expression(&mut self, block_name: &str, ctx: ParserExprContext) -> ExprId {
         if self.optional_token(TokenKind::EqualArrow) {
             // => ...
             if !self.peek_is_on_same_line() {
                 self.error(ErrType::ParserArrowExprsHaveToBeOnSameLine);
             }
-            let expr = self.parse_expression_default();
+            let expr = self.parse_expression_default(ctx);
             self.add_expr(self.prev_token_span, Expr::Block { exprs: vec![expr], label: None })
         }
         else if self.optional_token(TokenKind::LeftBrace) {
@@ -464,7 +481,7 @@ impl Parser<'_> {
     
             let exprs = self.parse_line_seperated(
                 TokenKind::RightBrace,
-                Self::parse_expression_default,
+                |p| p.parse_expression_default(ParserExprContext { allow_new_line_is: true }),
                 |p| Some(p.add_expr(p.prev_token_span, Expr::Void))
             );
     
@@ -480,18 +497,6 @@ impl Parser<'_> {
         }
     }
 
-
-    fn parse_if_and_else(&mut self) -> (ExprId, ExprId) {
-        let then = self.parse_arrow_or_block_expression("if");
-        let alt = if self.optional_token(TokenKind::Else) {
-            self.parse_expression_default()
-        } else {
-            let then_span = self.ast.get_expr_span(then);
-            self.add_expr(then_span.to_0_width_right(), Expr::Void)
-        };
-
-        (then, alt)
-    }
 
     fn parse_enum_variant(&mut self) -> AstEnumExpression {
         // Some(T)
@@ -524,7 +529,7 @@ impl Parser<'_> {
         // '[1, 2, 3]',   '(1, 2)',   dict { 1, 2 }
         self.parse_comma_separated(
             end_token,
-            |p, _| p.parse_expression_default(),
+            |p, _| p.parse_expression_default(ParserExprContext { allow_new_line_is: true }),
             err_msg
         )
     }
@@ -556,7 +561,7 @@ impl Parser<'_> {
     fn parse_one_tuple_expression(&mut self, default_label: String) -> AstTupleElement {        
         let (label, expr) = self.parse_tuple_item(
             default_label,
-            Self::parse_expression_default,
+            |p|p.parse_expression_default(ParserExprContext { allow_new_line_is: true }),
             |p, name| p.add_expr(p.prev_token_span, Expr::IdentifierRef { name, mutable: false }),
         );
         AstTupleElement { label, expr }
@@ -572,7 +577,7 @@ impl Parser<'_> {
 
         if self.optional_token(TokenKind::Semicolon) {
             // `(true; 3)`
-            let length = self.parse_expression_default();
+            let length = self.parse_expression_default(ParserExprContext { allow_new_line_is: true });
             self.expect_token(end_token, "to close the tuple array expression");
             self.add_expr(start, Expr::TupleArr { elem: first_elem.expr, length })
         }
@@ -611,8 +616,8 @@ impl Parser<'_> {
     }
 
 
-    fn parse_optional_expression(&mut self) -> Option<ExprId> {
+    fn parse_optional_expression(&mut self, ctx: ParserExprContext) -> Option<ExprId> {
         (self.peek_is_on_same_line() && self.peek_is_expression_start())
-            .then(|| self.parse_expression_default())
+            .then(|| self.parse_expression_default(ctx))
     }
 }

@@ -1,11 +1,11 @@
-use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::Precedence}};
+use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::{ParserExprContext, Precedence}}};
 
 
 impl Parser<'_> {
     /// it enters binding mode when it sees a `let`
     /// `x is let y` => Binding y
     /// `x is y` => CompareExpr(IdentifierRef y)
-    fn parse_one_pattern(&mut self, binding_mode: bool) -> PatternId {
+    fn parse_one_pattern(&mut self, binding_mode: bool, ctx: ParserExprContext) -> PatternId {
         let token = self.peek();
         let start = token.span;
 
@@ -13,7 +13,7 @@ impl Parser<'_> {
             TokenKind::Let => {
                 // enter binding mode!
                 self.next();
-                self.parse_pattern(true)
+                self.parse_pattern(true, ctx)
             }
 
             TokenKind::Identifier => {
@@ -40,7 +40,7 @@ impl Parser<'_> {
                     self.add_pattern(start, Pattern::Binding { name, mutable: false })
                 } else {
                     // x is y
-                    let expr = self.parse_expression_default();
+                    let expr = self.parse_expression_default(ctx);
                     self.add_pattern(start, Pattern::CompareExpr(expr))
                 }
             }
@@ -64,7 +64,7 @@ impl Parser<'_> {
 
             TokenKind::Exclamation => {
                 self.next(); // consume '!'
-                let pat = self.parse_pattern(binding_mode);
+                let pat = self.parse_pattern(binding_mode, ctx);
                 self.add_pattern(start, Pattern::Not(pat))
             }
 
@@ -73,7 +73,7 @@ impl Parser<'_> {
             // `x is 5 + 2` would parse as `x is (5 + 2)`
             // `x is let 5 + 2` would parse as `(x is 5) + 2`
             TokenKind::Number | TokenKind::Bool(_) if binding_mode => {
-                let expr = self.parse_prefix();
+                let expr = self.parse_prefix(ctx);
                 self.add_pattern(start, Pattern::CompareExpr(expr))
             }
             
@@ -87,7 +87,7 @@ impl Parser<'_> {
             _ if !binding_mode => {
                 // in non-binding mode any expressions are allowed
                 // `x is 5`
-                let expr = self.parse_expression_default();
+                let expr = self.parse_expression_default(ctx);
                 self.add_pattern(start, Pattern::CompareExpr(expr))
             }
 
@@ -100,15 +100,15 @@ impl Parser<'_> {
     }
 
 
-    pub(super) fn parse_pattern(&mut self, binding_mode: bool) -> PatternId {
-        let mut pattern = self.parse_one_pattern(binding_mode);
+    pub(super) fn parse_pattern(&mut self, binding_mode: bool, ctx: ParserExprContext) -> PatternId {
+        let mut pattern = self.parse_one_pattern(binding_mode, ctx);
         let start = self.ast.get_pattern_span(pattern);
 
         // or pattern!
         if self.optional_token(TokenKind::Pipe) {
             let mut patterns = vec![pattern];
             loop {
-                patterns.push(self.parse_one_pattern(binding_mode));
+                patterns.push(self.parse_one_pattern(binding_mode, ctx));
                 if !self.optional_token(TokenKind::Pipe) {
                     break;
                 }
@@ -118,13 +118,13 @@ impl Parser<'_> {
 
         // optional type annotation after pattern
         if self.optional_token(TokenKind::Colon) {
-            let typ = self.parse_expression(Precedence::Assign);
+            let typ = self.parse_expression(Precedence::Assign, ctx);
             pattern = self.add_pattern(start, Pattern::Typed { pattern, typ });
         }
 
         // extra condition after pattern
         if self.optional_token(TokenKind::And) {
-            let cond = self.parse_expression_default();
+            let cond = self.parse_expression_default(ctx);
             pattern = self.add_pattern(start, Pattern::Conditional { pattern, cond });
         }
 
@@ -137,7 +137,7 @@ impl Parser<'_> {
     fn parse_one_tuple_pattern(&mut self, binding_mode: bool, default_label: String) -> AstTuplePattern {
         let (label, pattern) = self.parse_tuple_item(
             default_label,
-            |p| p.parse_pattern(binding_mode),
+            |p| p.parse_pattern(binding_mode, ParserExprContext { allow_new_line_is: true }),
             |p, name| p.add_pattern(p.prev_token_span, Pattern::Binding { name: name.into_boxed_str(), mutable: false })
         );
         AstTuplePattern { label, pattern }

@@ -1,5 +1,12 @@
 // run me by doing `cargo run Code.thrum`
 
-let mut x: Option = :None
-x = :Some{ 4 }
-x^ is !:None
+match 16
+is 5 {
+    1
+    is 2
+}
+is 4 => (
+    1
+    is 2
+)
+is _ => true
