@@ -40,7 +40,7 @@ impl Parser<'_> {
                     self.add_pattern(start, Pattern::Binding { name, mutable: false })
                 } else {
                     // x is y
-                    let expr = self.parse_expression_default(ctx);
+                    let expr = self.parse_expression(Precedence::And, ctx);
                     self.add_pattern(start, Pattern::CompareExpr(expr))
                 }
             }
@@ -64,7 +64,7 @@ impl Parser<'_> {
 
             TokenKind::Exclamation => {
                 self.next(); // consume '!'
-                let pat = self.parse_pattern(binding_mode, ctx);
+                let pat = self.parse_one_pattern(binding_mode, ctx);
                 self.add_pattern(start, Pattern::Not(pat))
             }
 
@@ -87,7 +87,7 @@ impl Parser<'_> {
             _ if !binding_mode => {
                 // in non-binding mode any expressions are allowed
                 // `x is 5`
-                let expr = self.parse_expression_default(ctx);
+                let expr = self.parse_expression(Precedence::And, ctx);
                 self.add_pattern(start, Pattern::CompareExpr(expr))
             }
 
@@ -118,7 +118,7 @@ impl Parser<'_> {
 
         // optional type annotation after pattern
         if self.optional_token(TokenKind::Colon) {
-            let typ = self.parse_expression(Precedence::Assign, ctx);
+            let typ = self.parse_expression(Precedence::And, ctx);
             pattern = self.add_pattern(start, Pattern::Typed { pattern, typ });
         }
 

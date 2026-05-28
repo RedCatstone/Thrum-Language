@@ -262,12 +262,11 @@ fn pattern_matching() {
     test!("5 is 5 | 6 | 7", VmValue::Bool(true));
     test!("0 is 5 | 6 | 7", VmValue::Bool(false));
     test!("0 is !_", VmValue::Bool(false));
-    test!("2 + 2 is 2 * 2", VmValue::Bool(true));
-    test!("3 + 3 is !3 * 3", VmValue::Bool(true));
+    test!("1 + 1 is 1 * 1 or 2 + 2 is 2 * 2 and 3 + 3 is !3 * 3", VmValue::Bool(true));
     test!("(1, 2) is (1, 1) | (1, 2)", VmValue::Bool(true));
 
-    test!(r#"5 is (!(4 | 5)) and panic("pattern should've failed...")"#, VmValue::Bool(false));
-    test!(r#"5 is (!(4 | 6)) or panic("pattern should've failed...")"#, VmValue::Bool(true));
+    test!(r#"5 is !(4 | 5) and panic("pattern should've failed...")"#, VmValue::Bool(false));
+    test!(r#"5 is !(4 | 6) or panic("pattern should've failed...")"#, VmValue::Bool(true));
 }
 
 #[test]

@@ -624,20 +624,13 @@ impl TypeChecker<'_> {
         }
 
         match op {            
-            TokenKind::EqualEqual | TokenKind::Greater | TokenKind::Less /*| TokenType::GreaterEqual | TokenType::LessEqual */ => {
+            TokenKind::EqualEqual | TokenKind::Greater | TokenKind::Less /*| TokenType::GreaterEqual | TokenType::LessEqual */
+            | TokenKind::And | TokenKind::Or => {
                 TypeId::BOOL
             }
 
-            // num operators
             TokenKind::Op(AssignOp::Plus | AssignOp::Minus | AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => {
-                self.unify_types(TypeId::NUM, left, op_span, UnifyMode::Subtype);
                 TypeId::NUM
-            }
-
-            // boolean operators
-            TokenKind::And | TokenKind::Or => {
-                self.unify_types(TypeId::BOOL, left, op_span, UnifyMode::Subtype);
-                TypeId::BOOL
             }
             _ => unreachable!("Unsupported infix operator: {:?}", op)
         }
