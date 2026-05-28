@@ -212,13 +212,12 @@ impl<'a> Parser<'a> {
     fn peek_is_expression_start(&self) -> bool {
         // should match self.parse_prefix()
         matches!(self.peek().token,
-            TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus | AssignOp::Star)
-            | TokenKind::Identifier | TokenKind::Number | TokenKind::Bool(_) | TokenKind::StringStart
-            | TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::LeftBracket
-            | TokenKind::Let | TokenKind::If | TokenKind::Ensure | TokenKind::While
-            | TokenKind::Loop | TokenKind::Match | TokenKind::Enum | TokenKind::Fn | TokenKind::Pipe
-            | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Mut
-            | TokenKind::Impl | TokenKind::For | TokenKind::Dot
+            TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus | AssignOp::Star) | TokenKind::Identifier
+            | TokenKind::Mut | TokenKind::Number | TokenKind::Bool(_)
+            | TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::StringStart | TokenKind::Let | TokenKind::Const | TokenKind::Type
+            | TokenKind::If | TokenKind::Ensure | TokenKind::While | TokenKind::For | TokenKind::Loop | TokenKind::Match | TokenKind::Enum
+            | TokenKind::Impl | TokenKind::ImplSelf | TokenKind::Colon | TokenKind::Fn | TokenKind::Pipe
+            | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Ampersand 
         )
     }
 

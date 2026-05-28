@@ -30,7 +30,7 @@ impl Parser<'_> {
                     self.next(); // consume <ident>
                     self.next(); // consume '{'
                     let typ = self.add_expr(start, Expr::IdentifierRef { name: name.to_string(), mutable: false });
-                    let data = self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightBrace);
+                    let data = self.parse_tuple_pattern(self.prev_token_span, binding_mode, TokenKind::RightBrace, false);
                     
                     self.add_pattern(start, Pattern::TypeDestructor { typ, data })
                 }
@@ -46,36 +46,17 @@ impl Parser<'_> {
             }
 
             TokenKind::LeftParen => {
-                // can be a grouped expression: `x is (1 | 2)`
-                // or a tuple: `x is (1, 2)`
-                self.next();
-                if self.optional_token(TokenKind::RightParen) {
-                    self.add_pattern(start, Pattern::Tuple(Vec::new()))
-                }
-                else {
-                    let first_pattern = self.parse_one_tuple_pattern(binding_mode, "0".to_string());
-                    if self.optional_token(TokenKind::Comma) {
-                        // Tuple!
-                        self.parse_tuple_pattern(start, Some(first_pattern), binding_mode, TokenKind::RightParen)
-                    }
-                    else {
-                        // normal grouped pattern
-                        self.expect_token(TokenKind::RightParen, "to close the grouped pattern");
-                        // if first_pattern.label == "0" {
-                        //     self.error(ErrType::DefaultString("If this is supposed to be a tuple, use a trailing comma.".to_string()));
-                        // }
-                        first_pattern.pattern
-                    }
-                }
+                self.next(); // consume '('
+                self.parse_tuple_pattern(start, binding_mode, TokenKind::RightParen, true)
             }
 
-            TokenKind::Dot => {
+            TokenKind::Colon => {
                 self.next();
                 // .Some(T)
                 let variant_name = self.expect_identifier("to name an enum variant");
 
                 let attached_tuple = self.optional_token(TokenKind::LeftBrace).then(|| {
-                    self.parse_tuple_pattern(self.prev_token_span, None, binding_mode, TokenKind::RightBrace)
+                    self.parse_tuple_pattern(self.prev_token_span, binding_mode, TokenKind::RightBrace, false)
                 });
 
                 self.add_pattern(start, Pattern::EnumVariant { name: variant_name, attached_tuple })
@@ -162,22 +143,32 @@ impl Parser<'_> {
         AstTuplePattern { label, pattern }
     }
 
-    fn parse_tuple_pattern(&mut self, start: Span, first_elem: Option<AstTuplePattern>, binding_mode: bool, end_token: TokenKind) -> PatternId {
-        let mut tuple_body = vec![];
-        let has_first_elem = first_elem.is_some();
-        if let Some(x) = first_elem {
-            tuple_body.push(x);
+    fn parse_tuple_pattern(&mut self, start: Span, binding_mode: bool, end_token: TokenKind, maybe_just_grouped_expr: bool) -> PatternId {
+        if self.optional_token(end_token) {
+            // tuple is empty
+            return self.add_pattern(start, Pattern::Tuple(Vec::new()))
         }
 
-        let other_tuple_elems = self.parse_comma_separated(
-            end_token,
-            |p, i| {
-                p.parse_one_tuple_pattern(binding_mode, (if has_first_elem { i + 1 } else { i }).to_string())
-            },
-            "to close the tuple"
-        );
-        tuple_body.extend(other_tuple_elems);
-        self.add_pattern(start, Pattern::Tuple(tuple_body))
+        let first_elem = self.parse_one_tuple_pattern(binding_mode, "0".to_string());
+
+        if self.optional_token(TokenKind::Comma) {
+            // comma => definitely a tuple
+            let mut tuple_body = vec![first_elem];
+            tuple_body.extend(self.parse_comma_separated(
+                end_token,
+                |p, i| p.parse_one_tuple_pattern(binding_mode, (i + 1).to_string()),
+                "to close the tuple"
+            ));
+            self.add_pattern(start, Pattern::Tuple(tuple_body))
+        }
+        else if maybe_just_grouped_expr {
+            self.expect_token(end_token, "to close the grouped pattern");
+            first_elem.pattern
+        } else {
+            // 1-element tuple
+            self.expect_token(end_token, "to close the tuple");
+            self.add_pattern(start, Pattern::Tuple(vec![first_elem]))
+        }
     }
 
 

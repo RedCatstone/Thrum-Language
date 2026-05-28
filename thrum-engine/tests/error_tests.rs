@@ -59,8 +59,8 @@ fn type_mismatch_patterns() {
 #[test]
 fn type_mismatch_enums() {
     test_err!("
-        fn handle_some(.Some{ inner }: Option.Some) -> num => inner
-        handle_some(.None)
+        fn handle_some(:Some{ inner }: Option.Some) -> num => inner
+        handle_some(:None)
     ", ErrType::TyperMismatch { .. });
 }
 
@@ -96,13 +96,13 @@ fn exhaustive_pattern_matching() {
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     test_err!("
         const Opt = enum { None, Some{ bool } }
-        let val: Opt = .Some{ true }
-        match val^ is .None | .Some{ true } => 0
+        let val: Opt = :Some{ true }
+        match val^ is :None | :Some{ true } => 0
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     test_err!("
         const Opt = enum { None, Some{ bool } }
-        let val: Opt.Some = .Some{ true }
-        match val^ is .Some{ true } => 0
+        let val: Opt.Some = :Some{ true }
+        match val^ is :Some{ true } => 0
     ", ErrType::TyperPatternDoesntCoverAllCases { .. });
     // TODO: test_err!("match 5 is _ => 1 \n is 5 => 2", ErrType::TyperPatternCantBeReached);
 }
@@ -129,8 +129,8 @@ fn custom_type() {
     test_err!("type X = num; X{}", ErrType::TyperNewTypesExpectOneUnlabeledExpr);
     test_err!("type X = 5", ErrType::TyperMismatch { .. });
 
-    test_err!("let x: num = .Foo", ErrType::TyperExpectedTypeIsntAnEnum { .. });
-    test_err!("const E = enum { A }; let x: E = .B", ErrType::TyperEnumDoesntHaveVariant { .. });
+    test_err!("let x: num = :Foo", ErrType::TyperExpectedTypeIsntAnEnum { .. });
+    test_err!("const E = enum { A }; let x: E = :B", ErrType::TyperEnumDoesntHaveVariant { .. });
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn decay_soft_info_on_variable_bind() {
         type Option = enum { None, Some{ num } };
 
         let x = Option.Some{ 15 }
-        let .Some{ inner } = x^
+        let :Some{ inner } = x^
         inner^
     ", ErrType::TyperFailableAssignPattern { .. });
 }

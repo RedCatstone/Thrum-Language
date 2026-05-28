@@ -73,11 +73,11 @@ impl Parser<'_> {
             // if op_token.token == TokenKind::StarStar { op_precedence = Precedence::Product }
 
             // operators that are not allowed to be line-split.
-            // this is so semicolons are actually not needed in the language,
+            // this is so semicolons are never actually needed
             // for example here the parser would normally want to keep consuming the ( as a function call
-            // let a = 1
+            // let mut a = 1
             // (a, b) = (b, a + b)
-            if let TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::ColonColon | TokenKind::Is = peek_op.token
+            if let TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::Is = peek_op.token
             && !self.peek_is_on_same_line() {
                 break;
             }
@@ -191,13 +191,22 @@ impl Parser<'_> {
 
 
     pub(super) fn parse_prefix(&mut self) -> ExprId {
+        // just for making 100% sure that this function is always in sync, even if i edit stuff.
+        // (it being out of sync already lead to some weird bugs before...)
+        let claims_to_be_start = self.peek_is_expression_start();
+
         let op = self.next();
         let start = op.span;
 
-        match op.token {
+        let expr = match op.token {
             TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus) => {
                 let right = self.parse_expression(Precedence::Prefix);
                 self.add_expr(start, Expr::Prefix { op: op.token, right })
+            }
+            
+            TokenKind::Op(AssignOp::Star) => {
+                let expr = self.parse_expression(Precedence::Prefix);
+                self.add_expr(start, Expr::Move { expr })
             }
 
             TokenKind::Identifier => {
@@ -214,11 +223,6 @@ impl Parser<'_> {
             TokenKind::Number => self.extract_number_expr_from_source(start),
 
             TokenKind::Bool(val) => self.add_expr(start, Expr::Literal { val: AstValue::Bool(val) }),
-
-            TokenKind::Op(AssignOp::Star) => {
-                let expr = self.parse_expression(Precedence::Prefix);
-                self.add_expr(start, Expr::Move { expr })
-            }
 
             TokenKind::LeftBrace => self.parse_block_expression(TokenKind::RightBrace, start),
 
@@ -354,7 +358,7 @@ impl Parser<'_> {
                 self.add_expr(start, Expr::ImplSelf)
             }
 
-            TokenKind::Dot => {
+            TokenKind::Colon => {
                 // enum variant!
                 let data = self.parse_enum_variant();
                 self.add_expr(start, Expr::EnumVariant { data })
@@ -416,10 +420,16 @@ impl Parser<'_> {
             }
 
             _ => {
+                debug_assert!(!claims_to_be_start, "SYNC BUG: {:?} is not in `parse_prefix()`", op.token);
+
                 self.error_with_span(ErrType::ParserExpectedAnExpression { found: op.token }, op.span);
-                self.add_expr(start, Expr::ParserError)
+                return self.add_expr(start, Expr::ParserError)
             }
-        }
+        };
+
+        debug_assert!(claims_to_be_start, "SYNC BUG: {:?} is not in `peek_is_expression_start()`", op.token);
+
+        expr
     }
 
 

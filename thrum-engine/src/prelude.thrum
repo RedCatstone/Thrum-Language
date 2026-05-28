@@ -12,11 +12,11 @@ impl Range {
 impl RangeIter {
     fn next(self: &mut Self) -> Option {
         if self.curr < self.end {
-            let x = Option.Some{ self.curr }
+            let x = self.curr^
             self.curr += 1
-            x^
+            :Some{ x }
         } else {
-            Option.None
+            :None
         }
     }
 }
