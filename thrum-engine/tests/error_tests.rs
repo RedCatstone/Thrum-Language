@@ -122,6 +122,12 @@ fn pattern_binding() {
 }
 
 #[test]
+fn string_pattern_errors() {
+    test_err!(r#" "abc" is "a{_}{_}c" "#, ErrType::TyperPatternStringHolesInARow);
+    test_err!(r#" "abc" is "{}" "#, ErrType::ParserExpectedAPattern { .. });
+}
+
+#[test]
 fn custom_type() {
     test_err!("num{ 5 }", ErrType::TyperMustBeCustomtypeType { .. });
     test_err!("type X = num; X{ 1, 2 }", ErrType::TyperNewTypesExpectOneUnlabeledExpr);

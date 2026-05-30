@@ -76,7 +76,6 @@ pub enum OpCode {
     CmpEqual, CmpLess, CmpGreater,
     NumAdd, NumSubtract, NumMultiply, NumDivide, NumModulo, NumNegate,
     BoolNegate,
-    StrAdd, StrTemplate { length: usize },
 
     // Tuples
     TupCreate { length: usize },
@@ -85,6 +84,18 @@ pub enum OpCode {
     TupGet { index: usize },
     TupPointerIndex,
     TupUnpack { length: usize },
+
+    // Strings
+    StrAdd,
+    StrTemplate { length: usize },
+
+    /// these pop: [TargetStr]
+    /// and push back: [RemainingStr, true] or [TargetStr, false]
+    StrTrimPrefix { const_str: usize },
+    StrTrimSuffix { const_str: usize },
+
+    /// and push back: [RemainingStr, ExtractedHoleStr, true] or [TargetStr, TargetStr, false]
+    StrTrimUntil { const_str: usize },
 
     // Control Flow
     Jump { offset: isize },
@@ -98,7 +109,7 @@ pub enum OpCode {
 
     // meta type stuff
     MakeTypeRef { mutable: bool },
-    TypeTupToTupType { labels: Vec<String> },
+    TypeTupToTupType { labels: Box<[String]> },
 
     // no-op
     NoOp
@@ -117,7 +128,10 @@ impl OpCode {
             | Self::PushVoid | Self::LocalPointer { .. } => OpCodeRuntimeTempDiff { requires: 0, diff: 1 },
             
             Self::ValuePop | Self::LocalSet { .. } | Self::JumpIfFalse { .. } => OpCodeRuntimeTempDiff { requires: 1, diff: -1 },
-            Self::ValueDup => OpCodeRuntimeTempDiff { requires: 1, diff: 1 },
+
+            Self::ValueDup | Self::StrTrimPrefix { const_str: _ }
+            | Self::StrTrimSuffix { const_str: _ } => OpCodeRuntimeTempDiff { requires: 1, diff: 1 },
+            Self::StrTrimUntil { const_str: _ } => OpCodeRuntimeTempDiff { requires: 1, diff: 2 },
 
             Self::PointerSet => OpCodeRuntimeTempDiff { requires: 2, diff: -2 },
             
@@ -688,7 +702,7 @@ impl VmCompiler<'_> {
         }
 
         assert!(start_temps + 1 == self.cur_temp_amount,
-            "wrong temp number ({} -> {}) after processing {:?}", start_temps, self.cur_temp_amount, expr);
+            "wrong temp number ({}, should be {}) after processing {:?}", self.cur_temp_amount, start_temps + 1, expr);
     }
 
 
@@ -817,7 +831,10 @@ impl VmCompiler<'_> {
 
 
     fn compile_binding_pattern(&mut self, compile_pattern: PatternId, failure_jumps: &mut Vec<FailureJump>) {
-        match self.ast.get_pattern(compile_pattern) {
+        let start_temps = self.cur_temp_amount;
+        let pattern = self.ast.get_pattern(compile_pattern);
+
+        match pattern {
             Pattern::Wildcard => self.push_op(OpCode::ValuePop),
             
             Pattern::Binding { .. } => {
@@ -931,6 +948,42 @@ impl VmCompiler<'_> {
                 }
             }
 
+            Pattern::String { before, hole_parts } => {
+                if hole_parts.is_empty() {
+                    self.push_get_constant_op(VmValue::Str(before.clone()));
+                    self.push_op(OpCode::CmpEqual);
+                    failure_jumps.push(FailureJump {
+                        jump_loc: self.push_jump_if_false_op_for_patching(),
+                        temps: self.cur_temp_amount
+                    });
+                }
+                else {
+                    let before_id = self.add_constant(VmValue::Str(before.clone()));
+                    self.push_op(OpCode::StrTrimPrefix { const_str: before_id });
+                    failure_jumps.push(FailureJump {
+                        jump_loc: self.push_jump_if_false_op_for_patching(),
+                        temps: self.cur_temp_amount
+                    });
+
+                    for (i, (hole_pat, hole_after)) in hole_parts.iter().enumerate() {
+                        let is_last_hole = i == hole_parts.len() - 1;
+
+                        let after_id = self.add_constant(VmValue::Str(hole_after.clone()));
+                        if is_last_hole {
+                            self.push_op(OpCode::StrTrimSuffix { const_str: after_id });
+                        } else {
+                            self.push_op(OpCode::StrTrimUntil { const_str: after_id });
+                        }
+                        failure_jumps.push(FailureJump {
+                            jump_loc: self.push_jump_if_false_op_for_patching(),
+                            temps: self.cur_temp_amount
+                        });
+
+                        self.compile_binding_pattern(*hole_pat, failure_jumps);
+                    }
+                }
+            }
+
             Pattern::Not(pat) => {
                 let mut good_failure_jumps = Vec::new();
                 self.compile_binding_pattern(*pat, &mut good_failure_jumps);
@@ -950,6 +1003,9 @@ impl VmCompiler<'_> {
                 self.compile_binding_pattern(*pattern, failure_jumps);
             }
         }
+        
+        assert!(start_temps - 1 == self.cur_temp_amount,
+            "wrong temp number ({}, should be {}) after processing {:?}", self.cur_temp_amount, start_temps - 1, pattern);
     }
 
 

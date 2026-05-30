@@ -5,7 +5,11 @@
 - [ ] drop logic
 - [ ] match / if else correct moving logic
 - [ ] ref pattern matching `x is 4` instead of `x^ is 4`
-- [ ] "{single hole} string patterns"
+- [x] "{hole} string patterns"
+- [ ] single hole tuple patterns (1, .., 3)
+- [ ] add `as` type hints/safe casts
+- [ ] string slice type
+- [ ] iterator adapters `map` `filter` `collect`
 - [x] ! negation pattern
 - [x] enum variant stand alone types e.g. Dir.West
 - [x] Ranges 0..4
@@ -21,8 +25,17 @@
 # Far Future
 - [ ] runtime closures
 - [ ] inference params <>
+- [ ] generics
+- [ ] import system for multiple files
+- [ ] Result type
+- [ ] actual stdlib
 - [ ] indirection pointer rule:
     - mut-borrows to the left side of an indirection can't be alias
     - e.g. can't have `&alias mut vec` if `&alias vec[1]` is also borrowed
     - e.g. can't have `&alias mut enum` if some inner part of the enum is borrowed
 - [ ] swap num to u{n} / i{n} / f{16n}
+
+# Far Far Future
+- [ ] codegen (but i don't want to worry about this for now, i just want to get the syntax stuff correct ;p)
+- [ ] REPL
+- [ ] LSP

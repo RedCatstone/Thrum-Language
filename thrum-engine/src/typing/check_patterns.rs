@@ -103,6 +103,20 @@ impl<'ast> TypeChecker<'ast> {
                 self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
+            Pattern::String { before: _, hole_parts } => {
+                // INVALID: "...{_}{_}..."
+                // VALID: "...{_} {_}..."
+                // VALID: "...{_}..."
+                for (i, (hole_pat, after)) in hole_parts.iter().enumerate() {
+                    self.check_match_pattern(*hole_pat, Some(TypeId::STR), is_explicit, has_value, const_update.clone(), vars_defined);
+
+                    if i != hole_parts.len() - 1 && after.is_empty() {
+                        self.error(ErrType::TyperPatternStringHolesInARow, span);
+                    }
+                }
+                TypeId::STR
+            }
+
             Pattern::Wildcard => {
                 covered_cases.push(PatternSpace::All);
                 self.new_infer_type()
@@ -423,6 +437,11 @@ impl<'ast> TypeChecker<'ast> {
             Pattern::EnumVariant { name: _, attached_tuple } => {
                 if let Some(tup) = attached_tuple {
                     self.mark_vars_in_pattern_as_const(*tup, const_val);
+                }
+            }
+            Pattern::String { before: _, hole_parts } => {
+                for hole_part in hole_parts {
+                    self.mark_vars_in_pattern_as_const(hole_part.0, const_val.clone());
                 }
             }
             Pattern::Conditional { pattern, cond: _ }

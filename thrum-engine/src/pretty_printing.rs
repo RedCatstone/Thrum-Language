@@ -328,6 +328,14 @@ impl AstArena {
                 }
                 Ok(())
             }
+            Pattern::String { before, hole_parts } => {
+                writeln!(s, " - \"{before}\"")?;
+                for (i, hole_part) in hole_parts.iter().enumerate() {
+                    self.format_pattern_recursive(hole_part.0, s, ind + 1, "hole", i == hole_parts.len() - 1)?;
+                    write!(s, "\"{}\"", hole_part.1)?;
+                }
+                Ok(())
+            }
             Pattern::TypeDestructor { typ, data } => {
                 self.format_expr_recursive(*typ, s, ind + 1, "typ", false)?;
                 self.format_pattern_recursive(*data, s, ind + 1, "data", true)

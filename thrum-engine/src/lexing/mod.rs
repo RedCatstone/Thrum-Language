@@ -199,13 +199,15 @@ impl Lexer<'_> {
 
                     // start template string stuff
                     self.byte_pos += 1;  // eats '{'
+                    self.add_token(TokenKind::LeftBrace);
                     self.tokenize(Some(0)); // recursion for template strings
-                    if let Some(b'}') = self.source.as_bytes().get(self.byte_pos) {
-                        self.byte_pos += 1;  // eats '}'
-                        self.curr_token_start = self.byte_pos;  // set the token_start right after '}'
-                    } else {
-                        self.error(ErrType::LexerMissingClosingStringBrace);
-                        return
+                    match self.source.as_bytes().get(self.byte_pos) {
+                        Some(b'}') => {
+                            self.byte_pos += 1;  // eats '}'
+                            self.add_token(TokenKind::RightBrace);
+                            self.curr_token_start = self.byte_pos;  // set the token_start right after '}'
+                        }
+                        _ => return self.error(ErrType::LexerMissingClosingStringBrace)
                     }
                 }
                 b'\\' => {

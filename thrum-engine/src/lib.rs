@@ -56,6 +56,8 @@ pub enum ErrType {
     ParserUnexpectedExpression,
     #[display("Expected an expression. Found {found}")]
     ParserExpectedAnExpression { found: TokenKind },
+    #[display("Expected a pattern. Found {found}")]
+    ParserExpectedAPattern { found: TokenKind },
     #[display("Expected a binding pattern. Found {found}")]
     ParserExpectedABindingPattern { found: TokenKind },
     #[display("Labels have to be on the same line with the labeled thing.")]
@@ -101,6 +103,8 @@ pub enum ErrType {
     TyperOrPatternDoesntBindVars { vars: Vec<String> },
     #[display("Not-patterns can't define variables.")]
     TyperNotPatternCantBindVars,
+    #[display("String patterns can't have multiple holes right after each other.")]
+    TyperPatternStringHolesInARow,
     #[display("Variable {var} cannot be re-assigned, because it isn't declared mutable.")]
     TyperVarIsntDeclaredMut { var: TypeVar },
     #[display("Can't use {var} because it isn't initialized yet.")]

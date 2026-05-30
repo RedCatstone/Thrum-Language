@@ -270,14 +270,31 @@ fn pattern_matching() {
 }
 
 #[test]
+fn string_patterns() {
+    test!(r#"
+        if "hello cat from Earth!" is let "hello {name} from {location}!" => (name, location)
+        else panic("")
+    "#, VmValue::Tup(vec![VmValue::Str("cat".to_string()), VmValue::Str("Earth".to_string())]));
+    
+    test!(r#"
+        "Pat the Cat likes to sit on a Mat." is "{_}Cat{_}"
+    "#, VmValue::Bool(true));
+
+    test!(r#"
+        if "[1, 2, 3]" is let "[{num1}, {num2}, {num3}]" => "{num1^}{num2^}{num3^}"
+        else panic("")
+    "#, VmValue::Str("123".to_string()));
+}
+
+#[test]
 fn match_exprs() {
     test!(r#"
         match (69, "yay!")
-        is (69, "") => "nope"
-        is (0, "yay!") => "nope"
-        is (0, "") => "nope" 
+        is (69, "") => "nope1"
+        is (0, "yay!") => "nope2"
+        is (0, "") => "nope3" 
         is (69, let x) => x^
-        is _ => "nope"
+        is _ => "nope4"
     "#, VmValue::Str("yay!".to_string()));
 
     test!("match false is true => 0, is _ => -3", VmValue::Num(-3.0));

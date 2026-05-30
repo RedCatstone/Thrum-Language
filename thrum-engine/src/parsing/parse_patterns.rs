@@ -1,4 +1,4 @@
-use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::{ParserExprContext, Precedence}}};
+use crate::{ErrType, lexing::{self, tokens::{Span, TokenKind}}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::{ParserExprContext, Precedence}}};
 
 
 impl Parser<'_> {
@@ -84,11 +84,51 @@ impl Parser<'_> {
                 self.add_pattern(start, Pattern::Binding { name, mutable: true })
             }
 
+            TokenKind::StringStart => {
+                self.next();
+
+                let before = if self.optional_token(TokenKind::StringFrag) {
+                    let source_frag = self.get_from_source(self.prev_token_span);
+                    lexing::lex_string_from(source_frag)
+                } else {
+                    String::new()
+                };
+
+                let mut hole_parts = Vec::new();
+                
+                while !self.optional_token(TokenKind::StringEnd) {
+                    // "...{...}..."
+                    let pattern = if self.optional_token(TokenKind::LeftBrace) {
+                        let pattern = self.parse_pattern(binding_mode, ctx);
+                        self.expect_token(TokenKind::RightBrace, "to close string pattern interpolation");
+                        pattern
+                    } else {
+                        unreachable!("lexer makes sure that there has to be a LeftBrace here")
+                    };
+
+                    let after = if self.optional_token(TokenKind::StringFrag) {
+                        let source_frag = self.get_from_source(self.prev_token_span);
+                        lexing::lex_string_from(source_frag)
+                    } else {
+                        String::new()
+                    };
+
+                    hole_parts.push((pattern, after));
+                }
+
+                self.add_pattern(start, Pattern::String { before, hole_parts: hole_parts.into_boxed_slice() })
+            }
+
             _ if !binding_mode => {
                 // in non-binding mode any expressions are allowed
                 // `x is 5`
-                let expr = self.parse_expression(Precedence::And, ctx);
-                self.add_pattern(start, Pattern::CompareExpr(expr))
+                if self.peek_is_expression_start() {
+                    let expr = self.parse_expression(Precedence::And, ctx);
+                    self.add_pattern(start, Pattern::CompareExpr(expr))
+                } else {
+                    self.error(ErrType::ParserExpectedAPattern { found: self.peek().token });
+                    self.add_pattern(start, Pattern::Wildcard)
+                }
             }
 
             found => {

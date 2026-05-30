@@ -204,16 +204,6 @@ impl<'a> VM<'a> {
 
                 OpCode::BoolNegate => run_op!(self, VmValue::Bool(b) => VmValue::Bool(!b)),
 
-                OpCode::StrAdd => run_op!(self, VmValue::Str(l), VmValue::Str(r) => VmValue::Str(l + &r)),
-                OpCode::StrTemplate { length } => {
-                    let cut_off_index = self.value_stack.len() - length;
-                    let mut string = String::new();
-                    for val in self.value_stack.drain(cut_off_index..) {
-                        string += &Self::val_to_string(&val);
-                    }
-                    self.stack_push_val(VmValue::Str(string));
-                }
-
 
                 // Tuples!
                 OpCode::TupCreate { length } => {
@@ -263,6 +253,61 @@ impl<'a> VM<'a> {
                     assert_eq!(*length, tup.len());
 
                     self.stack_extend_from_slice(&tup);
+                }
+
+
+                // Strings
+                OpCode::StrAdd => run_op!(self, VmValue::Str(l), VmValue::Str(r) => VmValue::Str(l + &r)),
+                OpCode::StrTemplate { length } => {
+                    let cut_off_index = self.value_stack.len() - length;
+                    let mut string = String::new();
+                    for val in self.value_stack.drain(cut_off_index..) {
+                        string += &Self::val_to_string(&val);
+                    }
+                    self.stack_push_val(VmValue::Str(string));
+                }
+                OpCode::StrTrimPrefix { const_str } => {
+                    let VmValue::Str(prefix_str) = chunk.constants[*const_str].clone() else { unreachable!() };
+                    let VmValue::Str(target_str) = self.value_stack.pop().unwrap() else { unreachable!() };
+
+                    if target_str.starts_with(&prefix_str) {
+                        let remaining = target_str[prefix_str.len()..].to_string();
+                        self.value_stack.push(VmValue::Str(remaining));
+                        self.value_stack.push(VmValue::Bool(true));
+                    } else {
+                        self.value_stack.push(VmValue::Str(target_str));
+                        self.value_stack.push(VmValue::Bool(false));
+                    }
+                }
+                OpCode::StrTrimUntil { const_str } => {
+                    let VmValue::Str(delim_str) = chunk.constants[*const_str].clone() else { unreachable!() };
+                    let VmValue::Str(target_str) = self.value_stack.pop().unwrap() else { unreachable!() };
+
+                    if let Some(i) = target_str.find(&delim_str) {
+                        let hole = target_str[..i].to_string();
+                        let remaining = target_str[i + delim_str.len()..].to_string();
+                        
+                        self.value_stack.push(VmValue::Str(remaining));
+                        self.value_stack.push(VmValue::Str(hole));
+                        self.value_stack.push(VmValue::Bool(true));
+                    } else {
+                        self.value_stack.push(VmValue::Str(target_str.clone()));
+                        self.value_stack.push(VmValue::Str(target_str));
+                        self.value_stack.push(VmValue::Bool(false));
+                    }
+                }
+                OpCode::StrTrimSuffix { const_str } => {
+                    let VmValue::Str(suffix_str) = chunk.constants[*const_str].clone() else { unreachable!() };
+                    let VmValue::Str(target_str) = self.value_stack.pop().unwrap() else { unreachable!() };
+
+                    if target_str.ends_with(&suffix_str) {
+                        let hole = target_str[..target_str.len() - suffix_str.len()].to_string();
+                        self.value_stack.push(VmValue::Str(hole));
+                        self.value_stack.push(VmValue::Bool(true));
+                    } else {
+                        self.value_stack.push(VmValue::Str(target_str.clone()));
+                        self.value_stack.push(VmValue::Bool(false));
+                    }
                 }
 
 

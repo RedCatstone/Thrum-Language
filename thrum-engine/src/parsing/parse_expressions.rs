@@ -241,7 +241,7 @@ impl Parser<'_> {
 
             TokenKind::StringStart => {
                 let mut elems = Vec::new();
-                let mut had_expr = false;
+                let mut only_string_frags = true;
 
                 while !self.optional_token(TokenKind::StringEnd) {
                     if self.optional_token(TokenKind::StringFrag) {
@@ -251,14 +251,16 @@ impl Parser<'_> {
                         let s = lexing::lex_string_from(source_frag);
 
                         elems.push(self.add_expr(self.prev_token_span, Expr::Literal { val: AstValue::Str(s) }));
-                    } else {
+                    }
+                    if self.optional_token(TokenKind::LeftBrace) {
                         elems.push(self.parse_expression_default(ctx));
-                        had_expr = true;
+                        only_string_frags = false;
+                        self.expect_token(TokenKind::RightBrace, "to close string interpolation");
                     }
                 }
 
                 match elems[..] {
-                    [first] if !had_expr => first,
+                    [first] if only_string_frags => first,
                     [] => self.add_expr(start, Expr::Literal { val: AstValue::Str(String::new()) }),
                     _ => self.add_expr(start, Expr::TemplateString { elems }),
                 }

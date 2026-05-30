@@ -114,6 +114,7 @@ pub enum Pattern {
 
     Or(Vec<PatternId>),  // ... | ...
     Tuple(Vec<AstTuplePattern>),  // (...)
+    String { before: String, hole_parts: Box<[(PatternId, String)]> },  // "hello {name}!"
     
     Binding { name: Box<str>, mutable: bool },  // x: num
     TypeDestructor { typ: ExprId, data: PatternId /* tuple */ },  // Point{ x: 1, y: 2 }
