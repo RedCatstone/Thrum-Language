@@ -1,11 +1,11 @@
-use crate::{ErrType, lexing::{self, tokens::{Span, TokenKind}}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::{ParserExprContext, Precedence}}};
+use crate::{ErrType, lexing::tokens::{Span, TokenKind}, parsing::{Parser, ast::{AstTupleElement, AstTuplePattern, Expr, ExprId, Pattern, PatternId}, parse_expressions::{ParserCtx, Precedence}}};
 
 
 impl Parser<'_> {
     /// it enters binding mode when it sees a `let`
     /// `x is let y` => Binding y
     /// `x is y` => CompareExpr(IdentifierRef y)
-    fn parse_one_pattern(&mut self, binding_mode: bool, ctx: ParserExprContext) -> PatternId {
+    fn parse_one_pattern(&mut self, binding_mode: bool, ctx: ParserCtx) -> PatternId {
         let token = self.peek();
         let start = token.span;
 
@@ -31,7 +31,7 @@ impl Parser<'_> {
                     self.next(); // consume '{'
                     let typ = self.add_expr(start, Expr::IdentifierRef { name: name.to_string(), mutable: false });
                     let data = self.parse_tuple_pattern(self.prev_token_span, binding_mode, TokenKind::RightBrace, false);
-                    
+
                     self.add_pattern(start, Pattern::TypeDestructor { typ, data })
                 }
                 else if binding_mode {
@@ -76,7 +76,7 @@ impl Parser<'_> {
                 let expr = self.parse_prefix(ctx);
                 self.add_pattern(start, Pattern::CompareExpr(expr))
             }
-            
+
             TokenKind::Mut if binding_mode => {
                 // let mut x = ...
                 self.next();
@@ -87,15 +87,9 @@ impl Parser<'_> {
             TokenKind::StringStart => {
                 self.next();
 
-                let before = if self.optional_token(TokenKind::StringFrag) {
-                    let source_frag = self.get_from_source(self.prev_token_span);
-                    lexing::lex_string_from(source_frag)
-                } else {
-                    String::new()
-                };
-
+                let before = self.optional_string_frag();
                 let mut hole_parts = Vec::new();
-                
+
                 while !self.optional_token(TokenKind::StringEnd) {
                     // "...{...}..."
                     let pattern = if self.optional_token(TokenKind::LeftBrace) {
@@ -106,13 +100,7 @@ impl Parser<'_> {
                         unreachable!("lexer makes sure that there has to be a LeftBrace here")
                     };
 
-                    let after = if self.optional_token(TokenKind::StringFrag) {
-                        let source_frag = self.get_from_source(self.prev_token_span);
-                        lexing::lex_string_from(source_frag)
-                    } else {
-                        String::new()
-                    };
-
+                    let after = self.optional_string_frag();
                     hole_parts.push((pattern, after));
                 }
 
@@ -140,7 +128,7 @@ impl Parser<'_> {
     }
 
 
-    pub(super) fn parse_pattern(&mut self, binding_mode: bool, ctx: ParserExprContext) -> PatternId {
+    pub(super) fn parse_pattern(&mut self, binding_mode: bool, ctx: ParserCtx) -> PatternId {
         let mut pattern = self.parse_one_pattern(binding_mode, ctx);
         let start = self.ast.get_pattern_span(pattern);
 
@@ -177,7 +165,7 @@ impl Parser<'_> {
     fn parse_one_tuple_pattern(&mut self, binding_mode: bool, default_label: String) -> AstTuplePattern {
         let (label, pattern) = self.parse_tuple_item(
             default_label,
-            |p| p.parse_pattern(binding_mode, ParserExprContext { allow_new_line_is: true }),
+            |p| p.parse_pattern(binding_mode, ParserCtx { stop_on_newline_is: false }),
             |p, name| p.add_pattern(p.prev_token_span, Pattern::Binding { name: name.into_boxed_str(), mutable: false })
         );
         AstTuplePattern { label, pattern }

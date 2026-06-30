@@ -3,18 +3,18 @@ use crate::typing::{EnumDefinition, EnumId};
 
 /// `PatternSpace` is the exhaustive-checker of this compiler.\
 /// The math in here did fry my brain when i was writing this, but im happy that it actually works.
-/// 
+///
 /// If we are still missing all cases, that is represented as missing the set: `PatternSpace::All` (the Universe)\
 /// Now lets say we want to check for exhaustiveness on a simple bool, we will only cover the true case.\
 /// It adds a covered case: `Bool(true)`. Done.\
 /// now to convert the `covered_cases` to `missing_cases` it computes `All - covered_cases`, in this case that is just `Bool(false)`.
-/// 
+///
 /// A wildcard pattern covers `All`.
 /// Converting that to missing would be: `All - All` which is {/} an empty set, meaning that there are no `missing_cases` left.
-/// 
+///
 /// To cover an Or-pattern/match-expr, it simply puts all `covered_cases` into one set.
 /// So its `All - (pat1 ∪ pat2 ∪ pat3)` to get the missing cases.
-/// 
+///
 /// Tuple cases are a bit more complicated, but the logic is written below (where its handled) ;p
 
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ impl PatternSpace {
 
     /// computes `self - now_covered` (set difference).
     /// this is the core logic!!1
-    /// 
+    ///
     /// Returns a list of `PatternSpace`s that are covered by `self`, but NOT by `now_covered`.
     /// It's a list, because subtracting can "scatter" patterns.
     /// e.g. subtracting `(All, All) - (true, true)` results in `(false, All)` and `(true, false)`

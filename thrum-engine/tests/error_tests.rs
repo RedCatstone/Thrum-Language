@@ -53,7 +53,7 @@ fn type_mismatch_patterns() {
     test_err!("1 is \"hello\"", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is (1, \"two\")", ErrType::TyperMismatch { .. });
     test_err!("(1, 2) is 1 | 2", ErrType::TyperMismatch { .. });
-    
+
     test_err!("let mut x = 5; x += true", ErrType::TyperMismatch { .. });
 }
 #[test]
@@ -116,7 +116,7 @@ fn pattern_binding() {
 
     test_err!("if (1, 2) is let (x, y) | (x, _) {}", ErrType::TyperOrPatternDoesntBindVars { .. });
     test_err!("if (1, 2) is let (x, _) | (x, y) {}", ErrType::TyperOrPatternBindsVarsTooMuch { .. });
-    
+
     test_err!("if (1, 2) is let (x, 0) | (0, y) { }", ErrType::TyperOrPatternDoesntBindVars { .. });
     test_err!("let (x, 0) = (1, 2)", ErrType::TyperFailableAssignPattern { .. });
 }
@@ -174,7 +174,7 @@ fn typecheck_functions() {
     test_err!("fn square(x: num) {}; square(2, 3)", ErrType::TyperWrongNumberOfArguments { .. });
     test_err!("fn square(x: num) {}; square()", ErrType::TyperWrongNumberOfArguments { .. });
     test_err!("fn square(x) {}", ErrType::TyperRequiresTypeAnnotation);
-    
+
     test_err!("fn foo() -> num { return \"string\" }", ErrType::TyperMismatch { .. });
     test_err!("fn foo() -> num { }", ErrType::TyperMismatch { .. });
 }

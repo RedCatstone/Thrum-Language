@@ -15,7 +15,7 @@ impl TypeChecker<'_> {
     pub(super) fn coerce_to_expected_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
         // 1. deref pointers so the amounts there match.
         self.auto_deref_to_expected_type(expr, expected_id);
-        
+
         // 2. coercion.
         let coerced = self.coerce_type(expr, expected_id);
         self.typed_ast.expr_types[expr.0 as usize] = coerced;
@@ -55,7 +55,7 @@ impl TypeChecker<'_> {
     /// e.g. expr.typ: &&Vec, expected: &Vec -> works, inserts 1 copy
     fn auto_deref_to_expected_type(&mut self, expr: ExprId, expected_id: TypeId) -> TypeId {
         let expr_type = self.typed_ast.get_expr_type(expr);
-        
+
         if let Some((expr_p_count, is_auto_clone_after)) = self.count_initial_pointers(expr_type)
         && let Some((expected_p_count, _)) = self.count_initial_pointers(expected_id) {
 
@@ -137,7 +137,7 @@ impl TypeChecker<'_> {
                     self.move_variable(x, span);
                 }
                 else {
-                    self.error(ErrType::TyperCantDerefUnknownPointerType, span); 
+                    self.error(ErrType::TyperCantDerefUnknownPointerType, span);
                 }
             }
             auto_clone

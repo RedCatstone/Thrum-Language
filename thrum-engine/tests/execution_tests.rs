@@ -68,7 +68,7 @@ fn scoping() {
             1
         }
     ", VmValue::Num(50.0));
-    
+
     test!("{ #label }", VmValue::Void);
     test!("{}", VmValue::Void);
 }
@@ -120,7 +120,7 @@ fn loop_shenanigance() {
             break -1
         }
     ", VmValue::Num(69.0));
-    
+
     test!("loop { break #loop }", VmValue::Void);
 }
 
@@ -275,15 +275,18 @@ fn string_patterns() {
         if "hello cat from Earth!" is let "hello {name} from {location}!" => (name, location)
         else panic("")
     "#, VmValue::Tup(vec![VmValue::Str("cat".to_string()), VmValue::Str("Earth".to_string())]));
-    
-    test!(r#"
-        "Pat the Cat likes to sit on a Mat." is "{_}Cat{_}"
-    "#, VmValue::Bool(true));
+
+    test!(r#" "Pat the Cat likes to sit on a Mat." is "{_}Cat{_}" "#, VmValue::Bool(true));
 
     test!(r#"
         if "[1, 2, 3]" is let "[{num1}, {num2}, {num3}]" => "{num1^}{num2^}{num3^}"
         else panic("")
     "#, VmValue::Str("123".to_string()));
+
+    test!(r#" "" is "" "#, VmValue::Bool(true));
+    test!(r#" "a" is "" "#, VmValue::Bool(false));
+    test!(r#" "" is "{_}" "#, VmValue::Bool(true));
+    test!(r#" "" is "{""}" "#, VmValue::Bool(true));
 }
 
 #[test]
@@ -292,7 +295,7 @@ fn match_exprs() {
         match (69, "yay!")
         is (69, "") => "nope1"
         is (0, "yay!") => "nope2"
-        is (0, "") => "nope3" 
+        is (0, "") => "nope3"
         is (69, let x) => x^
         is _ => "nope4"
     "#, VmValue::Str("yay!".to_string()));
@@ -303,9 +306,9 @@ fn match_exprs() {
 fn enum_match_expr() {
     test!("
         const Opt = enum { None, Some{ num } }
-        
+
         let val: Opt = :Some{ 42 }
-        
+
         match val^
         is :None => -1
         is :Some{ 0 | 1 | 2 } => 0
@@ -389,7 +392,7 @@ fn impls() {
                 (self * (self + N{ 1 })) / N{ 2 }
             }
         }
-        
+
         N{ 2 }.triangle().square().triangle().square()
     ", VmValue::Num(2025.0));
 }

@@ -5,9 +5,9 @@ use thrum_engine::run_code;
 
 fn main() -> Result<(), ()> {
     // unsafe { std::env::set_var("RUST_BACKTRACE", "1") }
-    
+
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 {
         eprintln!("Usage: thrum <file>");
         return Err(());

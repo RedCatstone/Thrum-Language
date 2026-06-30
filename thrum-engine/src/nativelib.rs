@@ -35,7 +35,7 @@ pub fn get_native_lib(_type_arena: &mut TypeArena) -> ThrumModule {
     std_module.values.insert("num".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::NUM), is_prelude: true });
     std_module.values.insert("bool".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::BOOL), is_prelude: true });
     std_module.values.insert("str".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::STR), is_prelude: true });
-    
+
 
     // let range_tup_type = type_arena.add_type(Type::Tup(vec![
     //     TypeTuple { label: "start".to_string(), typ: TypeId::NUM, },

@@ -173,7 +173,7 @@ impl<'a> VM<'a> {
                     let VmValue::ValuePointer(p) = self.value_stack.pop().unwrap()
                     else { unreachable!("Value was not a pointer") };
                     let value = self.value_stack.pop().unwrap();
-                    
+
                     unsafe { *p = value; }
                 }
 
@@ -194,7 +194,7 @@ impl<'a> VM<'a> {
                     let left = self.value_stack.pop().unwrap();
                     self.stack_push_val(VmValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Greater)));
                 }
-                
+
                 OpCode::NumAdd => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l + r)),
                 OpCode::NumSubtract => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l - r)),
                 OpCode::NumMultiply => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l * r)),
@@ -217,10 +217,10 @@ impl<'a> VM<'a> {
                     self.stack_push_val(VmValue::Tup(elems));
                 }
 
-                OpCode::TupPointerGet { index } => {                    
+                OpCode::TupPointerGet { index } => {
                     let VmValue::ValuePointer(tup_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
                     let VmValue::Tup(tup) = (unsafe { &mut *tup_pointer }) else { unreachable!() };
-                    
+
                     let pointer = &raw mut tup[*index];
                     self.stack_push_val(VmValue::ValuePointer(pointer));
                 }
@@ -231,7 +231,7 @@ impl<'a> VM<'a> {
                 }
                 OpCode::TupPointerIndex => {
                     let VmValue::Num(i) = self.value_stack.pop().unwrap() else { unreachable!() };
-                    
+
                     let VmValue::ValuePointer(arr_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
                     let VmValue::Tup(tup) = (unsafe { &mut *arr_pointer }) else { unreachable!() };
 
@@ -286,7 +286,7 @@ impl<'a> VM<'a> {
                     if let Some(i) = target_str.find(&delim_str) {
                         let hole = target_str[..i].to_string();
                         let remaining = target_str[i + delim_str.len()..].to_string();
-                        
+
                         self.value_stack.push(VmValue::Str(remaining));
                         self.value_stack.push(VmValue::Str(hole));
                         self.value_stack.push(VmValue::Bool(true));

@@ -8,7 +8,7 @@ use crate::{
 
 
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 pub struct CheckExprCtx {
     expected_type: Option<TypeId>,
 
@@ -29,34 +29,22 @@ pub struct CheckExprCtx {
     is_const: bool,
 }
 impl CheckExprCtx {
-    pub fn expect(&self, typ: TypeId) -> Self {
-        Self { expected_type: Some(typ), ..self.clone() }
-    }
-    pub fn maybe_expect(&self, typ: Option<TypeId>) -> Self {
-        Self { expected_type: typ, ..self.clone() }
-    }
-    pub fn allow_conditional_bindings(&self) -> Self {
-        Self { allow_is_expr_bindings: true, ..self.clone() }
-    }
-    pub fn auto_borrow_mut(&self) -> Self {
-        Self { auto_borrow_mut: true, ..self.clone() }
-    }
-    pub fn auto_deref(&self, mode: AutoDerefMode) -> Self {
-        Self { deref_mode: mode, ..self.clone() }
-    }
-    pub fn is_const(&self) -> Self {
-        Self { is_const: true, ..self.clone() }
-    }
+    pub fn expect(self, typ: TypeId) -> Self {               Self { expected_type: Some(typ),      ..self } }
+    pub fn maybe_expect(self, typ: Option<TypeId>) -> Self { Self { expected_type: typ,            ..self } }
+    pub fn allow_is_bindings(self, maybe: bool) -> Self {    Self { allow_is_expr_bindings: maybe, ..self } }
+    pub fn auto_borrow_mut(self, maybe: bool) -> Self {      Self { auto_borrow_mut: maybe,        ..self } }
+    pub fn auto_deref(self, mode: AutoDerefMode) -> Self {   Self { deref_mode: mode,              ..self } }
+    pub fn is_const(self) -> Self {                          Self { is_const: true,                ..self } }
 }
 
 
 
 impl TypeChecker<'_> {
-    pub(super) fn check_expression(&mut self, check_expr: ExprId, is_never: &mut bool, old_ctx: &CheckExprCtx) -> TypeId {
-        let mut ctx = CheckExprCtx::default();
-        if old_ctx.is_const {
-            ctx.is_const = true;
-        }
+    pub(super) fn check_expression(&mut self, check_expr: ExprId, is_never: &mut bool, old_ctx: CheckExprCtx) -> TypeId {
+        let ctx = CheckExprCtx {
+            is_const: old_ctx.is_const,
+            ..Default::default()
+        };
 
         let span = self.ast.get_expr_span(check_expr);
         let expr_expr = self.ast.get_expr(check_expr);
@@ -71,7 +59,7 @@ impl TypeChecker<'_> {
 
             Expr::TemplateString { elems } => {
                 for &elem in elems {
-                    self.check_expression(elem, is_never, &ctx);
+                    self.check_expression(elem, is_never, ctx);
                 }
                 TypeId::STR
             }
@@ -85,26 +73,26 @@ impl TypeChecker<'_> {
                             Some(tup_type @ (Type::Tup(_) | Type::TupArr(_, _))) => {
                                 Self::extract_tup_label_type(tup_type, label).map(|(_, typ)| typ)
                             }
-                            
+
                             // if the whole tuple is expected to be a metatype thats valid.
-                            // all members need to be metatype aswell then and it will coerce later. 
+                            // all members need to be metatype aswell then and it will coerce later.
                             Some(Type::MetaType) => Some(TypeId::TYPE),
                             _ => None
                         };
 
                         let elem_ctx = ctx.maybe_expect(elem_expected_type).auto_deref(AutoDerefMode::Once);
-                        let typ = self.check_expression(*expr, is_never, &elem_ctx);
+                        let typ = self.check_expression(*expr, is_never, elem_ctx);
 
                         TypeTuple { label: label.clone(), typ }
                     })
                     .collect();
-                    
+
                 self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
             Expr::TupleArr { elem, length } => {
-                let elem_type = self.check_expression(*elem, is_never, &ctx.auto_deref(AutoDerefMode::Once));
-                self.check_expression(*length, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM).is_const());
+                let elem_type = self.check_expression(*elem, is_never, ctx.auto_deref(AutoDerefMode::Once));
+                self.check_expression(*length, is_never, ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM).is_const());
 
                 match self.evaluate_expr(*length) {
                     Some(VmValue::Num(num)) => {
@@ -118,8 +106,8 @@ impl TypeChecker<'_> {
             }
 
             Expr::Index { left, index } => {
-                let arr_ctx = if old_ctx.auto_borrow_mut { &ctx.auto_borrow_mut() } else { &ctx };
-                let left_pointer_type = self.check_expression(*left, is_never, &arr_ctx.auto_deref(AutoDerefMode::LeaveOnePointer));
+                let arr_ctx = if old_ctx.auto_borrow_mut { ctx.auto_borrow_mut(true) } else { ctx };
+                let left_pointer_type = self.check_expression(*left, is_never, arr_ctx.auto_deref(AutoDerefMode::LeaveOnePointer));
 
                 let left_span = self.ast.get_expr_span(*left);
                 if let Type::Borrow { inner, mutable, borrows_var } = self.prune_type_once_infer_err(left_pointer_type, left_span) {
@@ -142,9 +130,9 @@ impl TypeChecker<'_> {
                         Type::Error => TypeId::ERROR,
                         _ => self.error(ErrType::TyperCantIndexNonArrType { typ: self.fmt_type(inner) }, span)
                     };
-    
-                    self.check_expression(*index, is_never, &ctx.expect(TypeId::NUM));
-    
+
+                    self.check_expression(*index, is_never, ctx.expect(TypeId::NUM));
+
                     self.type_arena.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
                 }
                 else {
@@ -169,11 +157,11 @@ impl TypeChecker<'_> {
 
                     // actual expression compiling
                     for &expr in other_exprs {
-                        self.check_expression(expr, is_never, &ctx);
+                        self.check_expression(expr, is_never, ctx);
                     }
 
-                    let last_type_ctx = ctx.maybe_expect(old_ctx.expected_type).allow_conditional_bindings();
-                    let last_type = self.check_expression(last_expr, is_never, &last_type_ctx);
+                    let last_type_ctx = ctx.maybe_expect(old_ctx.expected_type).allow_is_bindings(true);
+                    let last_type = self.check_expression(last_expr, is_never, last_type_ctx);
 
                     // label logic again
                     if let Some(label) = label {
@@ -184,7 +172,7 @@ impl TypeChecker<'_> {
                         label_info.break_snapshots.push(self.snapshot_branch_vars_state(*is_never));
                         self.merge_vars_states(snap_before_block.unwrap(), &label_info.break_snapshots);
 
-                        
+
                         if label_info.break_snapshots.is_empty() {
                             last_type
                         } else {
@@ -205,39 +193,40 @@ impl TypeChecker<'_> {
 
             Expr::Prefix { op, right } => {
                 match op {
-                    TokenKind::Exclamation =>         self.check_expression(*right, is_never, &ctx.expect(TypeId::BOOL)),
-                    TokenKind::Op(AssignOp::Minus) => self.check_expression(*right, is_never, &ctx.expect(TypeId::NUM)),
+                    TokenKind::Exclamation =>         self.check_expression(*right, is_never, ctx.expect(TypeId::BOOL)),
+                    TokenKind::Op(AssignOp::Minus) => self.check_expression(*right, is_never, ctx.expect(TypeId::NUM)),
                     _ => unreachable!("Unsupported prefix op: {op} (Parser Issue)")
                 }
             }
 
             Expr::Infix { op, op_span, left, right } => {
-                if let TokenKind::And = op && old_ctx.allow_is_expr_bindings {
-                    ctx = ctx.allow_conditional_bindings();
-                }
-                let left_type = self.check_expression(*left, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                let infix_ctx = ctx
+                    .allow_is_bindings(*op == TokenKind::And && old_ctx.allow_is_expr_bindings)
+                    .auto_deref(AutoDerefMode::Fully);
+
+                let left_type = self.check_expression(*left, is_never, infix_ctx);
 
                 // because of short-circuiting right is not always evaluated, meaning that a Never-expr might not trigger
                 let right_is_never = &mut false;
-                let right_type = self.check_expression(*right, right_is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                let right_type = self.check_expression(*right, right_is_never, infix_ctx);
                 if *right_is_never && !matches!(op, TokenKind::And | TokenKind::Or) { *is_never = true; }
 
                 self.check_infix(*op, *op_span, left_type, right_type)
             }
 
             Expr::If { condition, then, alt } => {
-                self.check_expression(*condition, is_never, &ctx.expect(TypeId::BOOL).allow_conditional_bindings());
+                self.check_expression(*condition, is_never, ctx.expect(TypeId::BOOL).allow_is_bindings(true));
 
                 let snap = self.snapshot_vars_state();
                 let branch_ctx = ctx.maybe_expect(old_ctx.expected_type);
 
                 let mut then_is_never = false;
-                let then_typ = self.check_expression(*then, &mut then_is_never, &branch_ctx);
+                let then_typ = self.check_expression(*then, &mut then_is_never, branch_ctx);
                 let then_snap = self.snapshot_branch_vars_state(then_is_never);
                 self.restore_vars_state(&snap);
-                
+
                 let mut alt_is_never = false;
-                let alt_typ = self.check_expression(*alt, &mut alt_is_never, &branch_ctx);
+                let alt_typ = self.check_expression(*alt, &mut alt_is_never, branch_ctx);
                 let alt_snap = self.snapshot_branch_vars_state(alt_is_never);
                 self.merge_vars_states(snap, &[then_snap, alt_snap]);
 
@@ -246,11 +235,11 @@ impl TypeChecker<'_> {
             },
 
             Expr::Ensure { condition, alt, then } => {
-                self.check_expression(*condition, is_never, &ctx.expect(TypeId::BOOL).allow_conditional_bindings());
+                self.check_expression(*condition, is_never, ctx.expect(TypeId::BOOL).allow_is_bindings(true));
 
                 let snap = self.snapshot_vars_state();
 
-                let alt_type = self.check_expression(*alt, &mut false, &ctx);
+                let alt_type = self.check_expression(*alt, &mut false, ctx);
                 if alt_type != TypeId::NEVER {
                     self.type_mismatch(TypeId::NEVER, alt_type, self.ast.get_expr_span(*alt));
                 }
@@ -258,11 +247,11 @@ impl TypeChecker<'_> {
                 // since the alt is always Type::Never, only the then branch snapshot matters
                 self.restore_vars_state(&snap);
 
-                self.check_expression(*then, is_never, &ctx)
+                self.check_expression(*then, is_never, ctx)
             }
 
             Expr::Match { match_value, arms } => {
-                let match_val_type = self.check_expression(*match_value, is_never, &ctx);
+                let match_val_type = self.check_expression(*match_value, is_never, ctx);
 
                 let original_snap = self.snapshot_vars_state();
                 let mut arm_snapshots = Vec::new();
@@ -279,12 +268,12 @@ impl TypeChecker<'_> {
                         arm.pattern, Some(match_val_type), false, true, None, &mut CheckPatternVars::Collect(&mut Vec::new())
                     );
                     covered_cases.extend(arm_covered);
-                    
+
                     let mut arm_never = false;
-                    arm_expr_types.push(self.check_expression(arm.body, &mut arm_never, &ctx.maybe_expect(old_ctx.expected_type)));
+                    arm_expr_types.push(self.check_expression(arm.body, &mut arm_never, ctx.maybe_expect(old_ctx.expected_type)));
                     if !arm_never { all_arms_never = false }
                     self.exit_scope();
-                    
+
                     arm_snapshots.push(self.snapshot_branch_vars_state(arm_never));
 
                     self.restore_vars_state(&original_snap);
@@ -308,12 +297,12 @@ impl TypeChecker<'_> {
                 let snap_before_loop = self.before_check_label_logic(check_expr, label, loop_break_type);
 
                 // check expression
-                self.check_expression(*body, &mut false, &ctx.expect(TypeId::VOID));
+                self.check_expression(*body, &mut false, ctx.expect(TypeId::VOID));
 
                 // label logic again
                 let label_info = self.curr_label_infos.pop().unwrap();
                 assert_eq!(label_info.label, *label);
-                
+
                 self.merge_vars_states(snap_before_loop, &label_info.break_snapshots);
 
                 if label_info.break_snapshots.is_empty() {
@@ -350,7 +339,7 @@ impl TypeChecker<'_> {
             },
 
             Expr::Move { expr } => {
-                let expr_type = self.check_expression(*expr, is_never, &ctx);
+                let expr_type = self.check_expression(*expr, is_never, ctx);
 
                 match self.prune_type_once_infer_err(expr_type, span) {
                     Type::Borrow { inner, mutable: _, borrows_var } => {
@@ -367,13 +356,13 @@ impl TypeChecker<'_> {
             },
 
             Expr::Borrow { expr, mutable: _ } => {
-                self.check_expression(*expr, is_never, &ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::TYPE).is_const())
+                self.check_expression(*expr, is_never, ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::TYPE).is_const())
             }
-            
+
             Expr::Closure { closure, requires_type_annotation } => {
                 let id = self.compiled_functions.reserve_slot(check_expr);
                 self.typed_ast.resolved_closure_fn_id.insert(check_expr, id);
-                
+
                 self.get_fn_type(closure, *requires_type_annotation)
             }
 
@@ -381,18 +370,16 @@ impl TypeChecker<'_> {
                 let curr_return_type = self.curr_function_return_type
                     .unwrap_or_else(|| self.error(ErrType::TyperReturnOutsideFunction, span));
 
-                self.check_expression(*expr, &mut false, &ctx.expect(curr_return_type));
+                self.check_expression(*expr, &mut false, ctx.expect(curr_return_type));
 
                 TypeId::NEVER
             },
 
             Expr::Break { expr, label } => {
                 // this is None if it couldn't find where to break to (already errored)
-                if let Some(info) = self.find_loop_label(label.as_deref(), span) {
-                    ctx = ctx.expect(info.typ);
-                }
+                let break_ctx = ctx.maybe_expect(self.find_loop_label(label.as_deref(), span).map(|info| info.typ));
                 let mut expr_is_never = false;
-                self.check_expression(*expr, &mut expr_is_never, &ctx);
+                self.check_expression(*expr, &mut expr_is_never, break_ctx);
 
                 // the current init var states need to be pushed here to correctly handle stuff like this:
                 // let x
@@ -427,14 +414,14 @@ impl TypeChecker<'_> {
             }
 
             Expr::Call { callee, arguments } => {
-                let callee_type = self.check_expression(*callee, is_never, &ctx.auto_deref(AutoDerefMode::Fully));
+                let callee_type = self.check_expression(*callee, is_never, ctx.auto_deref(AutoDerefMode::Fully));
                 let callee_span = self.ast.get_expr_span(*callee);
 
                 match self.prune_type_once_infer_err(callee_type, callee_span) {
                     Type::Fn { param_types, return_type } => {
-                        
+
                         // `4.square()` is sugar for `u32.square(4)`, this handles that:
-                        let extra_arg = 
+                        let extra_arg =
                         if let Some(ResolvedMemberAccess::MemberWithSelfSugar { self_sugar_expr, .. }) = self.typed_ast.resolved_member_access.get(callee) {
                             let first_arg_type = self.typed_ast.get_expr_type(*self_sugar_expr);
                             if let Some(first_param) = param_types.first() {
@@ -448,7 +435,7 @@ impl TypeChecker<'_> {
 
                         if param_types.len() == arguments.len() + extra_arg {
                             for (param_type, arg) in param_types[extra_arg..].iter().zip(arguments) {
-                                self.check_expression(*arg, is_never, &ctx.expect(*param_type));
+                                self.check_expression(*arg, is_never, ctx.expect(*param_type));
                             }
                         } else {
                             self.error(ErrType::TyperWrongNumberOfArguments { expected: param_types.len(), found: arguments.len() + extra_arg }, span);
@@ -463,9 +450,9 @@ impl TypeChecker<'_> {
 
 
             Expr::MemberAccess { left, member: _ } => {
-                if old_ctx.auto_borrow_mut { ctx.auto_borrow_mut = true }
+                let member_ctx = ctx.auto_borrow_mut(old_ctx.auto_borrow_mut);
 
-                let left_type = self.check_expression(*left, is_never, &ctx);
+                let left_type = self.check_expression(*left, is_never, member_ctx);
                 self.check_member_access(left_type, check_expr, None, false, old_ctx.expected_type)
             }
 
@@ -477,7 +464,7 @@ impl TypeChecker<'_> {
                 ) = self.check_enum_variant(variant_name, old_ctx.expected_type, Some(span)) {
 
                     if let Some(tup) = attached_tuple {
-                        self.check_expression(*tup, is_never, &ctx.expect(attached_type));
+                        self.check_expression(*tup, is_never, ctx.expect(attached_type));
                     } else {
                         // if the variant had no data, then the defined variant shouldn't have data either!
                         self.unify_types(TypeId::VOID, attached_type, span, UnifyMode::Subtype);
@@ -498,7 +485,7 @@ impl TypeChecker<'_> {
 
                     let enum_id = self.get_wrapped_enum_id(inner).unwrap();
                     let attached_type = self.typed_ast.enum_defs[enum_id.0 as usize].variants[variant].1;
-                    self.check_instantiation_payload(attached_type, check_expr, *data, is_never, &ctx);
+                    self.check_instantiation_payload(attached_type, check_expr, *data, is_never, ctx);
                     self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::EnumVariant(variant));
 
                     meta_id
@@ -506,9 +493,9 @@ impl TypeChecker<'_> {
                 else {
                     match self.prune_type_once_infer_err(meta_id, span) {
                         Type::CustomType(custom_id, inner_new_type) => {
-    
-                            let inner = self.check_instantiation_payload(inner_new_type, check_expr, *data, is_never, &ctx);
-    
+
+                            let inner = self.check_instantiation_payload(inner_new_type, check_expr, *data, is_never, ctx);
+
                             // `N{ 2 }` returns the type `N`
                             self.type_arena.add_type(Type::CustomType(custom_id, inner))
                         }
@@ -520,7 +507,7 @@ impl TypeChecker<'_> {
 
             Expr::ImplBlock { typ, const_exprs } => {
                 let meta_type = self.check_annotation_meta_type_id(*typ, true);
-                
+
                 if let Type::CustomType(custom_id, _) = self.prune_type_once_infer_err(meta_type, span) {
                     let self_before = self.curr_impl_self.replace(meta_type);
 
@@ -562,12 +549,12 @@ impl TypeChecker<'_> {
             // --- CONST STUFF ---
             // already handled in the hoisting phase
             | Expr::Const { .. } | Expr::CustomType { .. } => TypeId::VOID,
-            
+
             Expr::EnumDefinition { variants } => {
                 // the actual enum-type is defined in the hoisting_pass
                 for variant in variants {
                     if let Some(tup) = variant.attached_tuple {
-                        self.check_expression(tup, is_never, &ctx.expect(TypeId::TYPE).is_const());
+                        self.check_expression(tup, is_never, ctx.expect(TypeId::TYPE).is_const());
                     }
                 }
                 TypeId::TYPE
@@ -576,7 +563,7 @@ impl TypeChecker<'_> {
             // should be desugared stuff
             Expr::While { .. } | Expr::For { .. } | Expr::FnDefinition { .. } => unreachable!("should be desugared already... {expr_expr:?}"),
         };
-        
+
         if inferred_type == TypeId::NEVER { *is_never = true; }
         if *is_never { inferred_type = TypeId::NEVER; }
 
@@ -625,7 +612,7 @@ impl TypeChecker<'_> {
             }
         }
 
-        match op {            
+        match op {
             TokenKind::EqualEqual | TokenKind::Greater | TokenKind::Less /*| TokenType::GreaterEqual | TokenType::LessEqual */
             | TokenKind::And | TokenKind::Or => {
                 TypeId::BOOL
@@ -694,7 +681,7 @@ impl TypeChecker<'_> {
                 ctx.deref_mode = AutoDerefMode::Fully;
             }
 
-            let check_typ = self.check_expression(val, is_never, &ctx);
+            let check_typ = self.check_expression(val, is_never, ctx);
             // only adopt the values type IF the user didn't add a type annotation
             // (not 100% sure that this is 100% correct)
             if pattern_type.is_none() {
@@ -773,8 +760,8 @@ impl TypeChecker<'_> {
         // set the return context to this functions return type
         let backup = self.curr_function_return_type;
         self.curr_function_return_type = Some(return_type);
-        
-        self.check_expression(closure.body, &mut false,  &CheckExprCtx::default().expect(return_type));
+
+        self.check_expression(closure.body, &mut false,  CheckExprCtx::default().expect(return_type));
         self.exit_scope();
 
         // reset return context
@@ -910,7 +897,7 @@ impl TypeChecker<'_> {
                 if came_from_ref.is_some() {
                     assert!(self.deref_if_pointer(*left));
                 }
-                
+
                 // now continue checking the member_access using the inner borrow type.
                 // also keep track of the borrows_var
                 // e.g. `tup.y` tup is a ref, so the final thing will also be a ref.
@@ -933,7 +920,7 @@ impl TypeChecker<'_> {
         if let Type::CustomType(custom_id, _) = typ
         && let Some(&member) = self.custom_types[custom_id.0 as usize].impls.scope.get(member) {
             // found a member!
-            
+
             match &self.typed_ast.get_var(member).const_val {
                 TypeVarConstVal::Evaluated(constant) => Some((constant.clone(), self.make_var_id_ref(member, false))),
                 other => unreachable!("should be an evaluated const... {other:?}")
@@ -956,7 +943,7 @@ impl TypeChecker<'_> {
         if self.are_types_equivalent(custom_inner, resolved_type) {
             self.type_arena.add_type(Type::CustomType(custom_id, resolved_type))
         }
-        
+
         // member access yielded a function
         // e.g. `fn(bool) -> bool` becomes `fn(CustomBool) -> CustomBool`
         else if let Type::Fn { param_types, return_type } = self.prune_type_once(resolved_type) {
@@ -976,7 +963,7 @@ impl TypeChecker<'_> {
 
             self.type_arena.add_type(Type::Fn { param_types: new_params, return_type: new_return })
         }
-        
+
         // member access yielded a MetaType
         // e.g. `const X: type = Opt2.Some`
         // adjust the typed_ast note
@@ -1016,14 +1003,14 @@ impl TypeChecker<'_> {
                 // try to find the correct .Variant
                 let Some(variant) = enum_def.variants.iter().position(|(name, _)| **name == *variant_name) else {
                     if let Some(span) = err_span {
-                        self.error(ErrType::TyperEnumDoesntHaveVariant { 
-                            enum_: self.fmt_type(expected), 
+                        self.error(ErrType::TyperEnumDoesntHaveVariant {
+                            enum_: self.fmt_type(expected),
                             variant: variant_name.into()
                         }, span);
                     }
                     return None;
                 };
-    
+
                 let attached_type = enum_def.variants[variant].1;
 
                 // refine/specialize it and wrap it back in the custom types
@@ -1056,7 +1043,7 @@ impl TypeChecker<'_> {
 
 
 
-    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: &CheckExprCtx) -> TypeId {
+    fn check_instantiation_payload(&mut self, instance_type: TypeId, check_expr: ExprId, data: ExprId, is_never: &mut bool, ctx: CheckExprCtx) -> TypeId {
         let span = self.ast.get_expr_span(check_expr);
 
         match self.prune_type_once_infer_err(instance_type, span) {
@@ -1065,7 +1052,7 @@ impl TypeChecker<'_> {
                 // if it expects a tuple, e.g. `type Point = { num, num }; Point{ 1, 2 }`
                 // then just typecheck normally. (`data` is already a tuple expr)
                 self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::Tuple);
-                self.check_expression(data, is_never, &ctx.expect(instance_type))
+                self.check_expression(data, is_never, ctx.expect(instance_type))
             }
             _ => {
                 // if it doesn't expect a tuple, it needs to extract the first element.
@@ -1074,7 +1061,7 @@ impl TypeChecker<'_> {
                 && let [first] = elems.as_slice()
                 && first.label == "0" {
                     self.typed_ast.resolved_type_instantian.insert(check_expr, ResolvedTypeInstantiation::NewType);
-                    self.check_expression(first.expr, is_never, &ctx.expect(instance_type))
+                    self.check_expression(first.expr, is_never, ctx.expect(instance_type))
                 } else {
                     self.error(ErrType::TyperNewTypesExpectOneUnlabeledExpr, span)
                 }

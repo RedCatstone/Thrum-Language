@@ -24,7 +24,7 @@ pub fn format_program_error<T: Display>(err: &ProgramError<T>, source_data: &Pro
         if line_index > source_data.line_lookup.len() {
             break
         }
-        
+
         let line_start = source_data.line_lookup[line_index - 1];
         let line_end = if line_index < source_data.line_lookup.len() {
             source_data.line_lookup[line_index]
@@ -84,9 +84,9 @@ impl AstArena {
 
     fn format_expr_recursive(&self, id: ExprId, s: &mut String, ind: usize, prefix: &str, is_last: bool) -> fmt::Result {
         let expr = self.get_expr(id);
-        
+
         // Strum gives us the variant name as a static string!
-        let variant_name: &str = expr.into(); 
+        let variant_name: &str = expr.into();
 
         write!(s, "{}{} {}{}",
             "  ".repeat(ind),
@@ -236,7 +236,7 @@ impl AstArena {
             Expr::EnumDefinition { variants } => {
                 writeln!(s)?;
                 for (i, v) in variants.iter().enumerate() {
-                    writeln!(s, "{}  {} {}::{}", 
+                    writeln!(s, "{}  {} {}::{}",
                         "  ".repeat(ind),
                         if i == variants.len() - 1 { "└─" } else { "├─" },
                         if prefix.is_empty() { "" } else { prefix },
@@ -313,7 +313,7 @@ impl AstArena {
             }
 
             Pattern::Binding { name, mutable } => writeln!(s, " - {}\"{name}\"", if *mutable {"mut "} else {""}),
-            
+
             Pattern::Or(patterns) => {
                 writeln!(s)?;
                 for (i, &p) in patterns.iter().enumerate() {

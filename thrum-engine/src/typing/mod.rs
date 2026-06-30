@@ -90,7 +90,7 @@ pub struct TypeChecker<'a> {
     error_data: &'a mut ProgramErrorData,
     ast: &'a AstArena,  // needs to be mut for auto-deref
     typed_ast: TypedAst,
-    
+
     // maps variable names to their Id
     var_scopes: Vec<TypeVarScope<'a>>,
 
@@ -103,14 +103,14 @@ pub struct TypeChecker<'a> {
     // implemented stuff on types
     // e.g. `impl Number { ... }`
     custom_types: Vec<CustomType<'a>>,  // indexed with CustomTypeId
-    
+
     // for return
     curr_function_return_type: Option<TypeId>,
     // for break/continue
     curr_label_infos: Vec<LabelInfo<'a>>,
     // for impl so they can use Self and self
     curr_impl_self: Option<TypeId>,
-    
+
     // meta compiling stuff, if a function gets compiled during the typechecking phase,
     // it gets kept and doesn't need to be compiled again in the VmCompiler stage
     compiled_functions: FunctionRegistry,
@@ -118,7 +118,7 @@ pub struct TypeChecker<'a> {
 
 #[derive(Debug, Default)]
 /// this struct gets build in the typechecker phase, and is read-only afterwards.
-/// 
+///
 /// it has a bunch of notes telling the `VmCompiler` everything it needs to compile.
 /// it needs to know to compile the ast-nodes (which are read-only after parsing already)
 pub struct TypedAst {
@@ -133,7 +133,7 @@ pub struct TypedAst {
     pub resolved_impl_self_type: HashMap<ExprId, TypeId>,
     pub resolved_type_instantian: HashMap<ExprId, ResolvedTypeInstantiation>,
     pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
-    
+
     pub resolved_tuple_arr_length: HashMap<ExprId, usize>,
     pub resolved_tuple_type_coerce: HashMap<ExprId, Box<[String]>>,
     pub resolved_enum_variant: HashMap<ExprId, (EnumId, usize)>,
@@ -225,13 +225,13 @@ pub enum ResolvedTypeInstantiation {
 
 #[derive(Clone, Copy)]
 pub enum UnifyMode {
-    /// Used for Assignments / Function Args. 
+    /// Used for Assignments / Function Args.
     /// e.g. `Option - Option.Some` works
     /// e.g. `Option.Some - Option` doesnt work
-    Subtype, 
-    
+    Subtype,
+
     /// e.g. `Option.Some - Option` -> `Option`
-    FindParentType, 
+    FindParentType,
 }
 
 impl TypeChecker<'_> {
@@ -250,9 +250,9 @@ impl TypeChecker<'_> {
         };
         let native_lib = get_native_lib(&mut tc.type_arena);
         tc.load_prelude_from_lib(&native_lib);
-        
+
         // check the main expression
-        tc.check_expression(ExprId(0), &mut false, &CheckExprCtx::default());
+        tc.check_expression(ExprId(0), &mut false, CheckExprCtx::default());
 
         tc.finalize_types();
 
@@ -282,7 +282,7 @@ impl TypeChecker<'_> {
         self.inference_types.push(None);  // unresolved initially
         self.type_arena.add_type(Type::Infer(id))
     }
-    
+
     #[must_use]
     pub fn prune_id_once(&self, mut id: TypeId) -> TypeId {
         while let Type::Infer(infer_id) = self.type_arena.types[id.0 as usize]
@@ -317,7 +317,7 @@ impl TypeChecker<'_> {
         }
         result
     }
-    
+
     #[track_caller]
     fn internal_unify_types(&mut self, expected: TypeId, other: TypeId, span: Span, mode: UnifyMode, mismatch: &mut bool) -> TypeId {
         let id_a = self.prune_id_once(expected);
@@ -337,7 +337,7 @@ impl TypeChecker<'_> {
         let result: TypeId = match (a, b) {
             (Type::Never, _) => id_b,
             (_, Type::Never) => id_a,
-            
+
             // if one is an inference variable, bind it to the other type.
             (Type::Infer(id), _) => { self.inference_types[id.0 as usize] = Some(id_b); id_b }
             (_, Type::Infer(id)) => { self.inference_types[id.0 as usize] = Some(id_a); id_a }
@@ -371,7 +371,7 @@ impl TypeChecker<'_> {
                         typ: self.unify_types(elem_a.typ, inner_a, span, mode)
                     })
                     .collect();
-                
+
                 self.type_arena.add_type(Type::Tup(new_elems))
             }
             (Type::Tup(elems_a), Type::TupArr(inner_b, len_b)) if elems_a.len() == len_b => {
@@ -398,7 +398,7 @@ impl TypeChecker<'_> {
             (Type::Enum(enum_id_a), Type::Enum(enum_id_b)) if enum_id_a == enum_id_b => {
                 id_a
             }
-            
+
             (Type::EnumVariant { inner: inner_a, variant: variant_a },
             Type::EnumVariant { inner: inner_b, variant: variant_b }) => {
                 let merged_inner = self.unify_types(inner_a, inner_b, span, mode);
@@ -409,10 +409,10 @@ impl TypeChecker<'_> {
                     match mode {
                         UnifyMode::FindParentType => merged_inner,
                         UnifyMode::Subtype => new_mismatch()
-                    }   
+                    }
                 }
             }
-            
+
             // this direction is always allowed regardless of mode
             (_, Type::EnumVariant { inner, .. }) => self.unify_types(id_a, inner, span, mode),
             (Type::EnumVariant { inner, .. }, _) => {
@@ -421,7 +421,7 @@ impl TypeChecker<'_> {
                     UnifyMode::FindParentType => self.unify_types(inner, id_b, span, mode),
                     UnifyMode::Subtype => new_mismatch()
                 }
-                
+
             }
 
 
@@ -451,7 +451,7 @@ impl TypeChecker<'_> {
             // any other case is a mismatch
             _ => new_mismatch()
         };
-        
+
         result
     }
 
@@ -506,7 +506,7 @@ impl TypeChecker<'_> {
 
             Type::EnumVariant { inner, variant: variant_index } => {
                 self.write_type(inner, s)?;
-                
+
                 let enum_id = self.get_wrapped_enum_id(inner).unwrap();
                 let variants = &self.typed_ast.enum_defs[enum_id.0 as usize].variants;
 
@@ -517,7 +517,7 @@ impl TypeChecker<'_> {
                 write!(s, "tup<")?;
                 for (i, elem) in elems.into_iter().enumerate() {
                     if i > 0 { write!(s, ", ")?; }
-                    
+
                     // Only print the label if it isn't an auto-generated number label
                     if !elem.label.as_bytes()[0].is_ascii_digit() {
                         write!(s, "{}: ", elem.label)?;

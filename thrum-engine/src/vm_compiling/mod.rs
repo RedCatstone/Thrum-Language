@@ -14,10 +14,10 @@ pub enum VmValue {
     Str(String),
     #[display("{_0}")]
     Bool(bool),
-    
+
     #[display("({})", slice_to_string(_0, ", "))]
     Tup(Vec<Self>),
-    
+
     // raw unsafe pointer for the vm
     // this SHOULD be fully safe, since the borrow checker checked all the lifetimes.
     #[display("*<{_0:?}>")]
@@ -26,7 +26,7 @@ pub enum VmValue {
     NativeFn(fn(&[Self]) -> Result<Self, ErrType>),
     #[display("fn<{slot}>")]
     Fn { slot: usize },
-    
+
     // for functions that return nothing
     #[display("<void>")]
     Void,
@@ -34,7 +34,7 @@ pub enum VmValue {
     // for the typechecker
     #[display("<{_0:?}>")]
     Type(TypeId),
-    
+
     // for empty local slots in the vm
     // i could also use <void> here, but i want to be more clear
     #[display("<empty>")]
@@ -58,7 +58,7 @@ pub enum OpCode {
     ConstGet { const_index: usize },
     ConstGetRef { const_index: usize },
     PushVoid,
-    
+
     // Temps
     ValuePop,
     ValueDup,
@@ -66,7 +66,7 @@ pub enum OpCode {
     // Locals
     LocalSet { local_index: usize },
     LocalPointer { local_index: usize },
-    
+
     // Pointers
     PointerGetClone,
     PointerGetMove,
@@ -126,7 +126,7 @@ impl OpCode {
         match self {
             Self::ConstGet { .. } | Self::ConstGetRef { .. }
             | Self::PushVoid | Self::LocalPointer { .. } => OpCodeRuntimeTempDiff { requires: 0, diff: 1 },
-            
+
             Self::ValuePop | Self::LocalSet { .. } | Self::JumpIfFalse { .. } => OpCodeRuntimeTempDiff { requires: 1, diff: -1 },
 
             Self::ValueDup | Self::StrTrimPrefix { const_str: _ }
@@ -134,7 +134,7 @@ impl OpCode {
             Self::StrTrimUntil { const_str: _ } => OpCodeRuntimeTempDiff { requires: 1, diff: 2 },
 
             Self::PointerSet => OpCodeRuntimeTempDiff { requires: 2, diff: -2 },
-            
+
             Self::PointerGetClone | Self::PointerGetMove
             | Self::TupPointerGet { .. } | Self::TupGet { .. } | Self::TupArrCreate { length: _ }
             | Self::NumNegate | Self::BoolNegate
@@ -198,7 +198,7 @@ pub struct VmCompiler<'a> {
     // -> 0 temps, because 4 got moved into a var slot (+1 var)
     // -> 1 temp, because the let-expr pushed void
     cur_temp_amount: usize,
-    
+
     // break / continue
     loop_infos: HashMap<ExprId, LoopInfo>,
 }
@@ -265,7 +265,7 @@ impl VmCompiler<'_> {
         println!("\n{reg:?}");
         unsafe { vm_evaluating::VM::start(&mut reg, Some(type_arena)) }
     }
-    
+
     fn new<'a>(ast: &'a AstArena, typed_ast: &'a TypedAst, compiled_functions: &'a mut FunctionRegistry) -> VmCompiler<'a> {
         VmCompiler {
             ast, typed_ast,
@@ -377,14 +377,14 @@ impl VmCompiler<'_> {
                     }
                     self.compile_expression(last_expr);
 
-                    
+
                     // all break jumps that need to jump to the end of this block.
                     if label.is_some() {
                         let loop_info = self.loop_infos.remove(&compile_expr).unwrap();
 
                         for jump in loop_info.break_jumps {
                             self.patch_jump_op_to_here(jump);
-                        }                        
+                        }
                     }
                 }
                 else {
@@ -427,7 +427,7 @@ impl VmCompiler<'_> {
                 // no value, just define the variables
                 let var_id = self.typed_ast.resolved_pattern_var[pattern];
                 self.define_local(var_id, None);
-                
+
                 self.push_op(OpCode::PushVoid);
             }
 
@@ -452,7 +452,7 @@ impl VmCompiler<'_> {
                     // all failure jumps land here
                     self.compile_binding_pattern_failure_jumps(failure_jumps);
                     self.push_get_constant_op(VmValue::Bool(false));
-                    
+
                     self.patch_jump_op_to_here(jump_over_false_path);
                 }
             }
@@ -523,7 +523,7 @@ impl VmCompiler<'_> {
                 let break_to = self.typed_ast.resolved_labels[&compile_expr];
                 let loop_info = &self.loop_infos[&break_to];
                 let temp_pop_amount = self.cur_temp_amount - loop_info.temps_before;
-                
+
                 // pop required temp amount
                 // this preserves any temps before this loop
                 // e.g. horrendous code like this works: `1 + loop { 1 + break 1 }` -> 2
@@ -556,7 +556,7 @@ impl VmCompiler<'_> {
 
                 // find the correct loop to continue to
                 self.push_backwards_jump_op(start_for_continue);
-                
+
                 // pretend like this continue expression didn't happen, to compile expressions after this.
                 self.cur_temp_amount += temp_pop_amount + 1;
             }
@@ -708,7 +708,7 @@ impl VmCompiler<'_> {
 
 
 
-    
+
     #[track_caller]
     fn push_op(&mut self, op: OpCode) {
         let effect = op.runtime_temp_effect();
@@ -770,7 +770,7 @@ impl VmCompiler<'_> {
         // if the const value is a fn that is not compiled yet, compile it!
         if let VmValue::Fn { slot } = val
         && self.compiled_functions.compiled_functions[slot].not_compiled() {
-            
+
             let closure_expr = self.compiled_functions.closure_expr_id[slot];
             let Expr::Closure { closure, .. } = self.ast.get_expr(closure_expr) else {
                 unreachable!("woopsie?")
@@ -836,7 +836,7 @@ impl VmCompiler<'_> {
 
         match pattern {
             Pattern::Wildcard => self.push_op(OpCode::ValuePop),
-            
+
             Pattern::Binding { .. } => {
                 let var_id = self.typed_ast.resolved_pattern_var[&compile_pattern];
                 self.push_define_local(var_id);
@@ -878,7 +878,7 @@ impl VmCompiler<'_> {
                     for sj in others {
                         self.patch_jump_op_to_here(*sj);
                     }
-                    
+
                     // now that it matched, pop the original value
                     self.cur_temp_amount += 1;
                     self.push_op(OpCode::ValuePop);
@@ -1003,7 +1003,7 @@ impl VmCompiler<'_> {
                 self.compile_binding_pattern(*pattern, failure_jumps);
             }
         }
-        
+
         assert!(start_temps - 1 == self.cur_temp_amount,
             "wrong temp number ({}, should be {}) after processing {:?}", self.cur_temp_amount, start_temps - 1, pattern);
     }
@@ -1022,7 +1022,7 @@ impl VmCompiler<'_> {
 
         // sort biggest to smallest
         failure_jumps.sort_by_key(|b| std::cmp::Reverse(b.temps));
-        
+
         let mut jumps_iter = failure_jumps.iter().peekable();
 
         while let Some(current_jump) = jumps_iter.next() {

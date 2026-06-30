@@ -39,13 +39,13 @@ pub enum TokenKind {
     // BitXor,
     // LeftShift,
     // RightShift,
-    
+
     // Logical
     EqualEqual,
     Exclamation, NotEqual,
     Less, LessEqual,
     Greater, GreaterEqual,
-    
+
     // Advanced
     Pipe,
     MinusArrow, EqualArrow,
@@ -72,7 +72,7 @@ pub enum TokenKind {
     #[display("<stringEnd>")]
     StringEnd,
     Bool(bool),
-    
+
     // Keywords
     And, Or,
     If, Else, Ensure,

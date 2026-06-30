@@ -21,19 +21,14 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
     // this loops until its fully done `exprs.len()`
     // which means that newly added desugared exprs will also get desugared
     for i in 0.. {
-        if i == ast.exprs.len() {
-            break;
-        }
+        if i == ast.exprs.len() { break }
         let expr = ast.exprs[i].clone();
         let span = ast.expr_spans[i];
 
         match expr {
-            // ==========================================
-            // desugar `while COND { BODY }` 
+            // desugar `while COND { BODY }`
             // --> `loop { if COND { BODY } else break }`
-            // ==========================================
             Expr::While { condition, body, label } => {
-                // modify into
                 ast.exprs[i] = Expr::Loop {
                     label,
                     body: expr!(span, Expr::If {
@@ -44,12 +39,9 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
                 }
             }
 
-            // ==========================================
-            // desugar `for PATT in ITER_EXPR { BODY }` 
+            // desugar `for PATT in ITER_EXPR { BODY }`
             // --> `{ let mut i = ITER_EXPR; while i.next() is .Some(PATT) { BODY } }`
-            // ==========================================
             Expr::For { pattern, iter_expr, body, label } => {
-                // modify into
                 ast.exprs[i] = Expr::Block {
                     label: None,
                     exprs: vec![
@@ -86,47 +78,29 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
                 }
             }
 
-            // ==========================================
-            // desugar `fn x() { ... }` --> `const x = |-> ...`
-            // ==========================================
+            // desugar `fn x() { ... }`  -->  `const x = |-> ...`
             Expr::FnDefinition { name, closure } => {
                 ast.exprs[i] = Expr::Const {
                     pattern: pattern!(span, Pattern::Binding { name, mutable: false }),
                     value: expr!(span, Expr::Closure { closure, requires_type_annotation: true })
                 }
             }
-            
-            // ==========================================
-            // desugar `a != b`  -->  `!(a == b)`
-            // ==========================================
-            Expr::Infix { op: TokenKind::NotEqual, op_span, left, right } => {
-                ast.exprs[i] = Expr::Prefix { 
+
+
+            Expr::Infix { op, op_span, left, right }
+            if let Some(inverted_op) = match op {
+                TokenKind::NotEqual => Some(TokenKind::EqualEqual), // desugar `a != b`  -->  `!(a == b)`
+                TokenKind::LessEqual => Some(TokenKind::Greater),   // desugar `a <= b`  -->  `!(a > b)`
+                TokenKind::GreaterEqual => Some(TokenKind::Less),   // desugar `a >= b`  -->  `!(a < b)`
+                _ => None
+            } => {
+                ast.exprs[i] = Expr::Prefix {
                     op: TokenKind::Exclamation,
-                    right: expr!(span, Expr::Infix { op: TokenKind::EqualEqual, op_span, left, right }) 
+                    right: expr!(span, Expr::Infix { op: inverted_op, op_span, left, right })
                 };
             }
-            // ==========================================
-            // desugar `a <= b`  -->  `!(a > b)`
-            // ==========================================
-            Expr::Infix { op: TokenKind::LessEqual, op_span, left, right } => {
-                ast.exprs[i] = Expr::Prefix { 
-                    op: TokenKind::Exclamation,
-                    right: expr!(span, Expr::Infix { op: TokenKind::Greater, op_span, left, right }) 
-                };
-            }
-            // ==========================================
-            // desugar `a >= b`  -->  `!(a < b)`
-            // ==========================================
-            Expr::Infix { op: TokenKind::GreaterEqual, op_span, left, right } => {
-                ast.exprs[i] = Expr::Prefix { 
-                    op: TokenKind::Exclamation,
-                    right: expr!(span, Expr::Infix { op: TokenKind::Less, op_span, left, right }) 
-                };
-            }
-            
-            // ==========================================
+
             // modify `(b: ..., a: ...)`  -->  `(a: ..., b: ...)`
-            // ==========================================
             Expr::Tuple { mut elems } => {
                 elems.sort_by(|a, b| a.label.cmp(&b.label));
                 ast.exprs[i] = Expr::Tuple { elems };
@@ -142,9 +116,7 @@ pub fn desugar_after_parsing(ast: &mut AstArena) {
 
         #[allow(clippy::single_match)]
         match pattern {
-            // ==========================================
             // modify `(b: ..., a: ...)`  -->  `(a: ..., b: ...)`
-            // ==========================================
             Pattern::Tuple(mut elems) => {
                 elems.sort_by(|a, b| a.label.cmp(&b.label));
                 ast.patterns[i] = Pattern::Tuple(elems);

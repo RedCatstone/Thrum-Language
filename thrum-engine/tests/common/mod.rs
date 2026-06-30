@@ -17,7 +17,7 @@ macro_rules! test_err {
         match common::run_code($code) {
             Ok(val) => panic!("Code should have failed, but it successfully evaluated to: {val:?}"),
             Err(errs) => assert!(
-                errs.iter().any(|e| matches!(e, $err_pat)), 
+                errs.iter().any(|e| matches!(e, $err_pat)),
                 "Expected error matching {}, instead found errors:\n{:?}", stringify!($err_pat), errs
             )
         }

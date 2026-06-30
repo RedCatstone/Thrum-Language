@@ -41,7 +41,7 @@ impl Lexer<'_> {
             compiler_location: std::panic::Location::caller()
         });
     }
-    
+
 
     fn tokenize(&mut self, mut brace_level: Option<usize>) {
         loop {
@@ -58,8 +58,8 @@ impl Lexer<'_> {
             if remaining.starts_with("//") { self.skip_comment("\n"); continue }
             if remaining.starts_with("/*") { self.skip_comment("*/"); continue }
 
-            // check if the start of remaining matches any Punctuation token 
-            if let Some((s, kind)) = TokenKind::PUNCTUATION.into_iter().find(|(p, _)| remaining.starts_with(p)) {                
+            // check if the start of remaining matches any Punctuation token
+            if let Some((s, kind)) = TokenKind::PUNCTUATION.into_iter().find(|(p, _)| remaining.starts_with(p)) {
                 if let Some(bl) = &mut brace_level {
                     if kind == TokenKind::LeftBrace {
                         *bl += 1;
@@ -69,7 +69,7 @@ impl Lexer<'_> {
                         *bl -= 1;
                     }
                 }
-                
+
                 self.byte_pos += s.len();
                 self.add_token(kind);
                 continue;
@@ -153,7 +153,7 @@ impl Lexer<'_> {
 
     fn eat_identifier(&mut self) -> &str {
         let start_byte = self.byte_pos;
-        
+
         for c in self.source[self.byte_pos..].chars() {
             if c.is_alphanumeric() || c == '_' {
                 self.byte_pos += c.len_utf8();
@@ -231,7 +231,7 @@ impl Lexer<'_> {
             if let b'_' | b'0'..=b'9' = b {
                 self.byte_pos += 1;
             }
-            else if b == b'.' && !has_dot 
+            else if b == b'.' && !has_dot
                 // peek ahead to check if there is a digit after the '.'
                 && let Some(b'0'..=b'9') = bytes.get(self.byte_pos + 1) {
                     has_dot = true;

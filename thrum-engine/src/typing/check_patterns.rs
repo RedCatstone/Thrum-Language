@@ -43,7 +43,7 @@ impl<'ast> TypeChecker<'ast> {
                 match vars_defined {
                     // if an Or-pattern expects vars to be defined,
                     // then it needs to make sure that the exact same variables with the same VarIDs are defined.
-                    
+
                     CheckPatternVars::Expect { vars, bound_too_many } => {
                         // Expect means that it already checked the first pattern of the OR-chain and its now expecting vars
                         if let Some(var_id) = vars.remove(&**name) {
@@ -80,7 +80,7 @@ impl<'ast> TypeChecker<'ast> {
             Pattern::Tuple(elems) => {
                 let mut tuple_types = Vec::new();
                 let mut tuple_covered_cases = Vec::new();
-                
+
                 let pruned_expected = expected_type.map(|t| self.prune_type_once(t));
 
                 for AstTuplePattern { label, pattern: p } in elems {
@@ -99,7 +99,7 @@ impl<'ast> TypeChecker<'ast> {
                 }
 
                 covered_cases = PatternSpace::tuple_cartesian_product(&tuple_covered_cases);
-                
+
                 self.type_arena.add_type(Type::Tup(tuple_types))
             }
 
@@ -153,9 +153,9 @@ impl<'ast> TypeChecker<'ast> {
                     first_pattern, expected_type, is_explicit, has_value, const_update.clone(), &mut CheckPatternVars::Collect(&mut or_vars_defined)
                 );
                 covered_cases.extend(covered);
-                
+
                 let first_pattern_vars: HashMap<&str, TypeVarId> = or_vars_defined.into_iter().collect();
-                
+
                 for &p in other_patterns {
                     let mut expected_vars = first_pattern_vars.clone();
                     let mut bound_too_many = Vec::new();
@@ -182,7 +182,7 @@ impl<'ast> TypeChecker<'ast> {
 
             Pattern::Conditional { pattern: p, cond } => {
                 let (typ, _) = self.check_match_pattern(*p, expected_type, is_explicit, has_value, const_update, vars_defined);
-                self.check_expression(*cond, &mut false, &CheckExprCtx::default().expect(TypeId::BOOL));
+                self.check_expression(*cond, &mut false, CheckExprCtx::default().expect(TypeId::BOOL));
 
                 typ
                 // missing cases defaults to NotCovered here, which is correct
@@ -236,7 +236,7 @@ impl<'ast> TypeChecker<'ast> {
                 let mut expected_refined_enum = false;
 
                 // using `.Variant` syntax requires that the Typechecker knows the Enumtype.
-                let resolved_variant = 
+                let resolved_variant =
                     if let Some(expected) = expected_type
                     && let Type::EnumVariant { inner, variant } = self.prune_type_once(expected) {
                         // its a hard refined enum
@@ -281,8 +281,8 @@ impl<'ast> TypeChecker<'ast> {
                 }
             }
 
-            Pattern::CompareExpr(expr) => {                
-                let expr_type = self.check_expression(*expr, &mut false, &CheckExprCtx::default());
+            Pattern::CompareExpr(expr) => {
+                let expr_type = self.check_expression(*expr, &mut false, CheckExprCtx::default());
 
                 // if there the compare expr is a simple literal, or a const value
                 // then add that to covered_cases
@@ -351,7 +351,7 @@ impl<'ast> TypeChecker<'ast> {
 
     pub(super) fn check_annotation_meta_type_id(&mut self, expr: ExprId, needs_typechecking: bool) -> TypeId {
         if needs_typechecking {
-            self.check_expression(expr, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE).is_const());
+            self.check_expression(expr, &mut false, CheckExprCtx::default().expect(TypeId::TYPE).is_const());
         }
 
         self.evaluate_expr(expr).map_or(TypeId::ERROR, |val| {
@@ -369,7 +369,7 @@ impl<'ast> TypeChecker<'ast> {
                 self.check_annotation_meta_type_id(*typ, true)
             ),
             Pattern::PlacePointer(expr) => {
-                let expr_type = self.check_expression(*expr, &mut false, &CheckExprCtx::default().auto_borrow_mut());
+                let expr_type = self.check_expression(*expr, &mut false, CheckExprCtx::default().auto_borrow_mut(true));
                 let span = self.ast.get_expr_span(*expr);
 
                 Some(match self.prune_type_once_infer_err(expr_type, span) {
@@ -448,7 +448,7 @@ impl<'ast> TypeChecker<'ast> {
             | Pattern::Typed { pattern, typ: _ }
             | Pattern::TypeDestructor { typ: _, data: pattern }
             | Pattern::Not(pattern) => self.mark_vars_in_pattern_as_const(*pattern, const_val),
-            
+
             Pattern::Wildcard | Pattern::CompareExpr(_) | Pattern::PlacePointer(_) => { /* no vars */ },
         }
     }

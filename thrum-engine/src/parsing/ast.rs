@@ -65,7 +65,7 @@ pub enum Expr {
     Tuple { elems: Vec<AstTupleElement> },  // (1, 2)
     TupleArr { elem: ExprId, length: ExprId },  // (0; 4)
     Index { left: ExprId, index: ExprId },  // arr[1]
-    
+
     If { condition: ExprId, then: ExprId, alt: ExprId },  // if true { ... } else ... (alt is void if not present)
     Ensure { condition: ExprId, alt: ExprId, then: ExprId },  // ensure true else { ... }
     Is { value: ExprId, pattern: PatternId },  // queue.pop() is let .Some(x)
@@ -74,7 +74,7 @@ pub enum Expr {
     While { condition: ExprId, body: ExprId, label: String, },  // while true { ... }
     For { pattern: PatternId, iter_expr: ExprId, body: ExprId, label: String },  // for x in 0..5 { ... }
     Loop { body: ExprId, label: String },  // loop { ... }
-    
+
     FnDefinition { name: Box<str>, closure: AstClosure },  // fn square(x: num) { x**2 }
     Closure { closure: AstClosure, requires_type_annotation: bool },  // |x -> x**2
     Call { callee: ExprId, arguments: Vec<ExprId> },  // x(1, 2)
@@ -115,14 +115,14 @@ pub enum Pattern {
     Or(Vec<PatternId>),  // ... | ...
     Tuple(Vec<AstTuplePattern>),  // (...)
     String { before: String, hole_parts: Box<[(PatternId, String)]> },  // "hello {name}!"
-    
+
     Binding { name: Box<str>, mutable: bool },  // x: num
     TypeDestructor { typ: ExprId, data: PatternId /* tuple */ },  // Point{ x: 1, y: 2 }
     EnumVariant { name: String, attached_tuple: Option<PatternId> },  // .North{ 2 }
     Conditional { pattern: PatternId, cond: ExprId },
 
     Typed { pattern: PatternId, typ: ExprId },
-    
+
     CompareExpr(ExprId),  // x is 3
     PlacePointer(ExprId),  // x = ...
 }

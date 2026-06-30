@@ -54,7 +54,7 @@ pub enum PatternOrVarId {
 }
 
 /// This enum tracks if a `TypeVar` is initialized or not.
-/// 
+///
 /// Maybe happens when one if-branch initializes a var and the other branch doesnt.\
 /// (`NotInit` / `Moved`) and (`MaybeInit` / `MaybeMoved`) are effectively the same, just for different error messages
 #[derive(Clone, Copy, Debug)]
@@ -84,7 +84,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn define_variable(&mut self, name: &'ast str, typ: TypeId, is_explicit: bool, mutable: bool, is_init: bool, span: Span, const_val: TypeVarConstVal) -> TypeVarId {
         // a var cant be shadowed if its a const
         let cant_shadow = const_val != TypeVarConstVal::No;
-        
+
         // strip soft type info away
         // e.g. `let x = Option.Some{ 3 }`  so x has type Option and not Option.?Some
         // otherwise we would need a whole ControlFlowGraph for these soft specs because they can change across branches
@@ -101,7 +101,7 @@ impl<'ast> TypeChecker<'ast> {
             immut_borrows_count: 0,
             mut_borrows_count: 0,
         };
-        
+
         let var_id = TypeVarId(self.typed_ast.vars.len().try_into().unwrap());
         self.typed_ast.vars.push(new_var);
         let previous = self.var_scopes.last_mut().unwrap().scope.insert(name, var_id);
@@ -139,7 +139,7 @@ impl<'ast> TypeChecker<'ast> {
         }
         None
     }
-    
+
     fn add_enum_def(&mut self, def: EnumDefinition) -> EnumId {
         let id = EnumId(self.typed_ast.enum_defs.len().try_into().unwrap());
         self.typed_ast.enum_defs.push(def);
@@ -158,7 +158,7 @@ impl<'ast> TypeChecker<'ast> {
                 self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::CurrTypechecking;
             }
         }
-        
+
         // typecheck it:
         // remove these while typechecking consts so it literally can't break/return
         let prev_fn = self.curr_function_return_type.take();
@@ -172,7 +172,7 @@ impl<'ast> TypeChecker<'ast> {
                 );
             }
             PatternOrVarId::CustomTypeVarId(var_id) => {
-                self.check_expression(value, &mut false, &CheckExprCtx::default().expect(TypeId::TYPE));
+                self.check_expression(value, &mut false, CheckExprCtx::default().expect(TypeId::TYPE));
                 self.typed_ast.get_var_mut(*var_id).const_val = TypeVarConstVal::NotYetEvaluated { value, bind_to };
             }
         }
@@ -260,7 +260,7 @@ impl<'ast> TypeChecker<'ast> {
 
                 let enum_id = self.add_enum_def(EnumDefinition { variants });
                 let enum_type = self.type_arena.add_type(Type::Enum(enum_id));
-                
+
                 Some(VmValue::Type(enum_type))
             }
 
@@ -327,7 +327,7 @@ impl<'ast> TypeChecker<'ast> {
     pub(super) fn update_variable(&mut self, var_id: TypeVarId, span: Span) {
         let var = self.typed_ast.get_var_mut(var_id);
         let mut errors = Vec::new();
-        
+
         var.is_used = TypeVarIsUsed::Mut;
 
         if !var.is_declared_mut {
@@ -338,7 +338,7 @@ impl<'ast> TypeChecker<'ast> {
             }
         }
         var.is_init = TypeVarMemState::Init;  // if variable was moved, doing `a = ...` unmoves it again.
-        
+
         for e in errors { self.error(e, span); }
     }
 
@@ -398,14 +398,14 @@ impl<'ast> TypeChecker<'ast> {
             let mut any_branch_init = false;
             let mut all_branches_init = true;
             let mut was_moved = false;
-            
+
             // filter the None's out (the branches that had Never type)
             for branch_snap in branch_snaps.iter().filter_map(|x| x.as_ref()) {
                 let branch_state = branch_snap.get(&original_snap_var_id).unwrap();
 
                 if let TypeVarMemState::MaybeInit | TypeVarMemState::MaybeMoved | TypeVarMemState::Init = branch_state { any_branch_init = true; }
                 if let TypeVarMemState::MaybeInit | TypeVarMemState::MaybeMoved | TypeVarMemState::Moved | TypeVarMemState::NotInit = branch_state { all_branches_init = false; }
-                if let TypeVarMemState::MaybeMoved | TypeVarMemState::Moved = branch_state { was_moved = true; } 
+                if let TypeVarMemState::MaybeMoved | TypeVarMemState::Moved = branch_state { was_moved = true; }
             }
 
             self.typed_ast.get_var_mut(original_snap_var_id).is_init = match (all_branches_init, any_branch_init, was_moved) {

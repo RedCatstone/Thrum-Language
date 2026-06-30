@@ -1,4 +1,4 @@
-use crate::{ErrType, ProgramError, ProgramErrorData, WarnType, lexing::tokens::{AssignOp, Span, TokenKind, TokenSpan}, parsing::ast::{AstArena, Expr, ExprId, Pattern, PatternId}};
+use crate::{ErrType, ProgramError, ProgramErrorData, WarnType, lexing::{self, tokens::{AssignOp, Span, TokenKind, TokenSpan}}, parsing::ast::{AstArena, Expr, ExprId, Pattern, PatternId}};
 
 pub mod ast;
 pub mod desugar;
@@ -125,12 +125,9 @@ impl<'a> Parser<'a> {
     fn expect_identifier_relaxed(&mut self, err_msg: &str) -> String {
         // can be a normal identifier, keyword or number
         let peek = self.peek().clone();
-        if peek.token == TokenKind::Number {
+        if peek.token == TokenKind::Number || TokenKind::KEYWORDS.iter().any(|(_, k)| *k == peek.token) {
             self.next();
             self.get_from_source(peek.span).to_string()
-        } else if let Some((s, _)) = TokenKind::KEYWORDS.into_iter().find(|(_, kind)| peek.token == *kind) {
-            self.next();
-            s.to_string()
         } else {
             self.expect_identifier(err_msg)
         }
@@ -155,6 +152,15 @@ impl<'a> Parser<'a> {
             })
     }
 
+    fn optional_string_frag(&mut self) -> String {
+        if self.optional_token(TokenKind::StringFrag) {
+            let source_frag = self.get_from_source(self.prev_token_span);
+            lexing::lex_string_from(source_frag)
+        } else {
+            String::new()
+        }
+    }
+
     fn get_from_source(&self, span: Span) -> &str {
         &self.source[span.byte_offset..(span.byte_offset + span.length)]
     }
@@ -167,7 +173,7 @@ impl<'a> Parser<'a> {
     ) -> Vec<T>
     {
         let mut list = Vec::new();
-        
+
         // handles empty lists immediately
         for i in 0.. {
             if self.peek().token == end_token { break }
@@ -178,16 +184,15 @@ impl<'a> Parser<'a> {
         list
     }
 
-    fn parse_line_seperated<T>(
+    fn parse_line_seperated<Id>(
         &mut self,
         end_token: TokenKind,
-        parse_element: impl Fn(&mut Self) -> T,
-        on_semicolon: impl Fn(&mut Self) -> Option<T>,
-    ) -> Vec<T>
+        parse_element: impl Fn(&mut Self) -> Id,
+        on_semicolon: impl Fn(&mut Self) -> Option<Id>,
+    ) -> Vec<Id>
     {
         let mut list = Vec::new();
 
-        // handles empty lists immediately
         while self.peek().token != end_token && self.peek().token != TokenKind::EndOfFile {
             list.push(parse_element(self));
             if self.optional_token(TokenKind::Semicolon) {
@@ -195,12 +200,10 @@ impl<'a> Parser<'a> {
                     list.push(semicolon_elem);
                 }
             }
-            else {
-                // no semicolon -> next expression (if its actually an expression and not just '}')
-                // can't be on the same line.
-                if self.peek_is_on_same_line() && self.peek_is_expression_start() {
-                    self.error(ErrType::ParserUnexpectedExpression);
-                }
+            else if self.peek_is_on_same_line() && self.peek_is_expression_start() {
+                // no semicolon -> next expression can't be on the same line.
+                // (if its actually an expression and not just '}')
+                self.error(ErrType::ParserUnexpectedExpression);
             }
         }
         if end_token != TokenKind::EndOfFile {
@@ -217,7 +220,7 @@ impl<'a> Parser<'a> {
             | TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::StringStart | TokenKind::Let | TokenKind::Const | TokenKind::Type
             | TokenKind::If | TokenKind::Ensure | TokenKind::While | TokenKind::For | TokenKind::Loop | TokenKind::Match | TokenKind::Enum
             | TokenKind::Impl | TokenKind::ImplSelf | TokenKind::Colon | TokenKind::Fn | TokenKind::Pipe
-            | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Ampersand 
+            | TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Ampersand
         )
     }
 

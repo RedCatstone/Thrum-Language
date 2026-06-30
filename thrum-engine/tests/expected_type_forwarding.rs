@@ -71,7 +71,7 @@ fn expected_type_functions() {
         }
         get_none() is :None
     ", VmValue::Bool(true));
-    
+
     // test!("
     //     const Option = enum { None, Some(num) }
     //     let func: |num| -> Option = |n| => :Some(n^)
@@ -87,7 +87,7 @@ fn expected_type_breaks() {
         }
         x^ is :None
     ", VmValue::Bool(true));
-    
+
     test!("
         let x: Option = { #bloc
             break #bloc :None
