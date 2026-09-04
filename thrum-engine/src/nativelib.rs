@@ -32,17 +32,10 @@ pub fn get_native_lib(_type_arena: &mut TypeArena) -> ThrumModule {
     });
     std_module.sub_modules.insert("io".to_string(), io_module);
 
-    std_module.values.insert("num".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::NUM), is_prelude: true });
+    std_module.values.insert("int".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::INT), is_prelude: true });
+    std_module.values.insert("float".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::FLOAT), is_prelude: true });
     std_module.values.insert("bool".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::BOOL), is_prelude: true });
     std_module.values.insert("str".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(TypeId::STR), is_prelude: true });
-
-
-    // let range_tup_type = type_arena.add_type(Type::Tup(vec![
-    //     TypeTuple { label: "start".to_string(), typ: TypeId::NUM, },
-    //     TypeTuple { label: "end".to_string(), typ: TypeId::NUM, },
-    // ]));
-    // let range_tup_custom_type = type_arena.add_type(Type::CustomType(range_tup_type));
-    // std_module.values.insert("Range".to_string(), ThrumValue { typ: Type::MetaType, val: VmValue::Type(range_tup_custom_type), is_prelude: true });
 
     std_module
 }
@@ -65,5 +58,5 @@ pub fn native_panic(val: &[VmValue]) -> Result<VmValue, ErrType> {
 
 pub fn native_str_len(val: &[VmValue]) -> Result<VmValue, ErrType> {
     let VmValue::Str(str) = &val[0] else { panic!("function called with wrong argument...") };
-    Ok(VmValue::Num(str.len() as f64))
+    Ok(VmValue::Int(str.len().try_into().unwrap()))
 }

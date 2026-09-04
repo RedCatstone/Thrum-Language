@@ -60,9 +60,11 @@ pub enum TokenKind {
     EndOfFile,
 
     #[display("<ident>")]
-    Identifier,  // the name does not need to be stored here (its already stored in the source code)
-    #[display("<num>")]
-    Number,      // same here
+    Identifier,  // these names dont need to be stored here (its already stored in the source code)
+    #[display("<int>")]
+    NumInt,
+    #[display("<float>")]
+    NumFloat,
     #[display("<stringStart>")]
     StringStart,
     #[display("<stringFrag>")]

@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.96.0"
+rust-version = "1.98.0"
 license = "MIT"
 license-file = "LICENSE"
 version = "0.1.0"
@@ -27,4 +27,4 @@ missing_errors_doc = "allow"
 too_many_lines = "allow"  # i am like 4x over clippies limits OOOPSS lol
 derive_partial_eq_without_eq = "allow"  # don't care
 equatable_if_let = "allow"  # disagree, i think pattern matching is cleaner
-literal_string_with_formatting_args = "allow"  # this lint linted on thrum code...
+new_without_default = "allow"  # this lint is more meant for library code i think

@@ -13,3 +13,6 @@ strum_macros = "0.28.0"  # using EnumString for pretty_printing
 [lib]
 name = "thrum_engine"
 path = "src/lib.rs"
+
+[lints]
+workspace = true

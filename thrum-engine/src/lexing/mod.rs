@@ -1,4 +1,3 @@
-
 use crate::{ErrType, ProgramError, ProgramErrorData, lexing::tokens::{Span, TokenKind, TokenSpan}};
 
 pub mod tokens;
@@ -238,19 +237,19 @@ impl Lexer<'_> {
                     self.byte_pos += 2;
                 }
             else {
-                break;
+                break
             }
         }
         // let text_slice = &self.source[start..self.byte_pos];
 
-        self.add_token(TokenKind::Number);
+        self.add_token(if has_dot { TokenKind::NumFloat } else { TokenKind::NumInt });
     }
 }
 
 
 #[must_use]
 pub fn lex_string_from(source_frag: &str) -> String {
-    let mut s = String::new();
+    let mut s = String::with_capacity(source_frag.len());
     let mut is_backslashed = false;
     let mut skip_spaces = false;
 
@@ -276,5 +275,24 @@ pub fn lex_string_from(source_frag: &str) -> String {
         }
         s.push(c);
     }
+    s.shrink_to_fit();
     s
+}
+
+
+#[must_use]
+pub fn lex_num_int_from(source_frag: &str) -> i64 {
+    source_frag
+        .chars()
+        .filter(|&c| c != '_')
+        .map(|x| x.to_digit(10).unwrap_or_else(|| unreachable!("Other characters should not exist in ints... {source_frag:?} {x}")))
+        .fold(0, |acc, digit| acc * 10 + i64::from(digit))
+}
+
+
+#[must_use]
+pub fn lex_num_float_from(source_frag: &str) -> f64 {
+    source_frag
+        .parse()
+        .unwrap_or_else(|x| unreachable!("{source_frag:?} {x}"))
 }

@@ -72,7 +72,7 @@ impl Parser<'_> {
             // literals in binding mode:
             // `x is 5 + 2` would parse as `x is (5 + 2)`
             // `x is let 5 + 2` would parse as `(x is 5) + 2`
-            TokenKind::Number | TokenKind::Bool(_) if binding_mode => {
+            TokenKind::NumInt | TokenKind::NumFloat | TokenKind::Bool(_) if binding_mode => {
                 let expr = self.parse_prefix(ctx);
                 self.add_pattern(start, Pattern::CompareExpr(expr))
             }

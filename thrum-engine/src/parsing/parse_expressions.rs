@@ -229,7 +229,14 @@ impl Parser<'_> {
                 self.add_expr(start, Expr::IdentifierRef { name, mutable: true })
             }
 
-            TokenKind::Number => self.extract_number_expr_from_source(start),
+            TokenKind::NumInt => {
+                let num = lexing::lex_num_int_from(self.get_from_source(start));
+                self.add_expr(start, Expr::Literal { val: AstValue::NumInt(num) })
+            }
+            TokenKind::NumFloat => {
+                let num = lexing::lex_num_float_from(self.get_from_source(start));
+                self.add_expr(start, Expr::Literal { val: AstValue::NumFloat(num) })
+            }
 
             TokenKind::Bool(val) => self.add_expr(start, Expr::Literal { val: AstValue::Bool(val) }),
 
@@ -590,20 +597,6 @@ impl Parser<'_> {
             // 1-element tuple
             self.expect_token(end_token, "to close the tuple");
             self.add_expr(start, Expr::Tuple { elems: vec![first_elem] })
-        }
-    }
-
-
-    fn extract_number_expr_from_source(&mut self, span: Span) -> ExprId {
-        let num = self.get_from_source(span)
-            .to_string()
-            .replace('_', "")
-            .parse();
-        if let Ok(val) = num {
-            self.add_expr(span, Expr::Literal { val: AstValue::Num(val) })
-        } else {
-            self.error(ErrType::ParserNumberParseError);
-            self.add_expr(span, Expr::ParserError)
         }
     }
 

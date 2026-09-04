@@ -152,7 +152,8 @@ impl TypeChecker<'_> {
     /// None - infer error
     fn is_auto_clone(&self, typ: TypeId) -> Option<bool> {
         match self.prune_type_once(typ) {
-            Type::Num
+            Type::NumInt
+            | Type::NumFloat
             | Type::Bool
             | Type::Borrow { .. }
             | Type::Fn { .. }

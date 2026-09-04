@@ -98,7 +98,8 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum AstValue {
-    Num(f64),
+    NumInt(i64),
+    NumFloat(f64),
     Str(String),
     Bool(bool),
 }

@@ -2,8 +2,7 @@ use thrum_engine::vm_compiling::VmValue;
 mod common;
 
 
-#[test]
-fn expected_type_variables() {
+#[test] fn expected_type_variables() {
     test!("
         let mut x: Option = :None
         x = :Some{ 3 }
@@ -11,8 +10,7 @@ fn expected_type_variables() {
     ", VmValue::Bool(true));
 }
 
-#[test]
-fn expected_type_tuples() {
+#[test] fn expected_type_tuples() {
     test!("
         let tup: (Option, Option) = (:None, :Some{ 4 })
         tup.0^ is :None
@@ -24,14 +22,12 @@ fn expected_type_tuples() {
     ", VmValue::Bool(true));
 }
 
-#[test]
-fn expected_type_tuple_patterns() {
+#[test] fn expected_type_tuple_patterns() {
     test!("(Option.None, Option.Some{ 4 }) is (:None, :Some{ 4 })", VmValue::Bool(true));
     test!("(Option.None; 2) is (:None, :None)", VmValue::Bool(true));
 }
 
-#[test]
-fn expected_type_blocks() {
+#[test] fn expected_type_blocks() {
     test!("
         let x: Option = {
             let y = 5;  // TODO: fix this semicolon
@@ -42,6 +38,7 @@ fn expected_type_blocks() {
 }
 
 #[test]
+#[expect(clippy::literal_string_with_formatting_args, reason="kinda funny that this lints on thrum code ;p")]
 fn expected_type_control_flow() {
     test!("
         let x: Option = if false { :None } else { :Some{ 99 } }
@@ -56,8 +53,7 @@ fn expected_type_control_flow() {
     ", VmValue::Bool(true));
 }
 
-#[test]
-fn expected_type_functions() {
+#[test] fn expected_type_functions() {
     test!("
         fn test_opt(val: Option) -> bool {
             val^ is :None
@@ -73,14 +69,13 @@ fn expected_type_functions() {
     ", VmValue::Bool(true));
 
     // test!("
-    //     const Option = enum { None, Some(num) }
-    //     let func: |num| -> Option = |n| => :Some(n^)
+    //     const Option = enum { None, Some(int) }
+    //     let func: |int| -> Option = |n| => :Some(n^)
     //     func(7) is :Some(7)
     // ", VmValue::Bool(true));
 }
 
-#[test]
-fn expected_type_breaks() {
+#[test] fn expected_type_breaks() {
     test!("
         let x: Option = loop {
             break :None

@@ -1,31 +1,53 @@
-use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena, TypeTuple}, vm_compiling::{CompilingStatus, FunctionRegistry, OpCode, VmValue}};
+use crate::{ErrType, pretty_printing::slice_to_string, typing::{Type, TypeArena, TypeTuple}, vm_compiling::{CompilingStatus, FunctionRegistry, NumMode, OpCode, VmValue}};
 
 
 
-macro_rules! run_op {
-    // Infix (2 operands)
-    ($self:expr, $left_pattern:pat, $right_pattern:pat => $result_expr:expr) => {
-        {
-            let right = $self.value_stack.pop().unwrap();
-            let left = $self.value_stack.pop().unwrap();
-            match (left, right) {
-                // (Value::Num(l), Value::Num(r)) => self.stack_push_val(Value::Num(l + r))
-                ($left_pattern, $right_pattern) => $self.stack_push_val($result_expr),
-                (left, right) => unreachable!("Operands {left}, {right} cannot be {}-ed", stringify!($result_expr)),
-            }
+macro_rules! infix_op {
+    ($self:expr, $left_pattern:pat, $right_pattern:pat => $result_expr:expr) => {{
+        let right = $self.value_stack.pop().unwrap();
+        let left = $self.value_stack.pop().unwrap();
+        match (left, right) {
+            // (Value::Num(l), Value::Num(r)) => self.stack_push_val(Value::Num(l + r))
+            ($left_pattern, $right_pattern) => $self.stack_push_val($result_expr),
+            (left, right) => unreachable!("Operands {left}, {right} cannot be '{}'-ed", stringify!($result_expr)),
         }
-    };
-    // Prefix (1 operand)
-    ($self:expr, $operand_pattern:pat => $result_expr:expr) => {
-        {
-            let operand = $self.value_stack.pop().unwrap();
-            match operand {
-                // Value::Num(n) => self.stack_push_val(Value::Num(-n))
-                $operand_pattern => $self.stack_push_val($result_expr),
-                operand => unreachable!("Operand {operand} cannot be {}-ed", stringify!($result_expr)),
-            }
+    }};
+}
+macro_rules! prefix_op {
+    ($self:expr, $operand_pattern:pat => $result_expr:expr) => {{
+        let operand = $self.value_stack.pop().unwrap();
+        match operand {
+            // Value::Num(n) => self.stack_push_val(Value::Num(-n))
+            $operand_pattern => $self.stack_push_val($result_expr),
+            operand => unreachable!("Operand {operand} cannot be '{}'-ed", stringify!($result_expr)),
         }
-    };
+    }};
+}
+
+
+macro_rules! infix_num_op {
+    ($self:expr, $mode:expr, $op:tt) => {{
+        let right = $self.value_stack.pop().expect("Stack underflow");
+        let left = $self.value_stack.last_mut().expect("Stack underflow");
+
+        #[expect(clippy::assign_op_pattern, reason="idk why clippy lints on this...")]
+        match ($mode, left, right) {
+            (NumMode::Int, VmValue::Int(l), VmValue::Int(r)) => *l = *l $op r,
+            (NumMode::Float, VmValue::Float(l), VmValue::Float(r)) => *l = *l $op r,
+            (_, left, right) => unreachable!("Type mismatch: ({:?}) {left} {} {right}", $mode, stringify!($op)),
+        }
+    }};
+}
+macro_rules! prefix_num_op {
+    ($self:expr, $mode:expr, $op:tt) => {{
+        let right = $self.value_stack.last_mut().expect("Stack underflow");
+
+        match ($mode, right) {
+            (NumMode::Int, VmValue::Int(r)) => *r = $op *r,
+            (NumMode::Float, VmValue::Float(r)) => *r = $op *r,
+            (_, right) => unreachable!("Type mismatch: ({:?}) {} {right}", $mode, stringify!($op)),
+        }
+    }};
 }
 
 
@@ -195,14 +217,14 @@ impl<'a> VM<'a> {
                     self.stack_push_val(VmValue::Bool(left.partial_cmp(&right) == Some(std::cmp::Ordering::Greater)));
                 }
 
-                OpCode::NumAdd => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l + r)),
-                OpCode::NumSubtract => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l - r)),
-                OpCode::NumMultiply => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l * r)),
-                OpCode::NumDivide => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l / r)),
-                OpCode::NumModulo => run_op!(self, VmValue::Num(l), VmValue::Num(r) => VmValue::Num(l % r)),
-                OpCode::NumNegate => run_op!(self, VmValue::Num(n) => VmValue::Num(-n)),
+                OpCode::NumAdd { num_mode } => infix_num_op!(self, num_mode, +),
+                OpCode::NumSubtract { num_mode } => infix_num_op!(self, num_mode, -),
+                OpCode::NumMultiply { num_mode } => infix_num_op!(self, num_mode, *),
+                OpCode::NumDivide { num_mode } => infix_num_op!(self, num_mode, /),
+                OpCode::NumModulo { num_mode } => infix_num_op!(self, num_mode, %),
+                OpCode::NumNegate { num_mode } => prefix_num_op!(self, num_mode, -),
 
-                OpCode::BoolNegate => run_op!(self, VmValue::Bool(b) => VmValue::Bool(!b)),
+                OpCode::BoolNegate => prefix_op!(self, VmValue::Bool(b) => VmValue::Bool(!b)),
 
 
                 // Tuples!
@@ -230,16 +252,13 @@ impl<'a> VM<'a> {
                     self.stack_push_val(val);
                 }
                 OpCode::TupPointerIndex => {
-                    let VmValue::Num(i) = self.value_stack.pop().unwrap() else { unreachable!() };
+                    let VmValue::Int(i) = self.value_stack.pop().unwrap() else { unreachable!() };
 
                     let VmValue::ValuePointer(arr_pointer) = self.value_stack.pop().unwrap() else { unreachable!() };
                     let VmValue::Tup(tup) = (unsafe { &mut *arr_pointer }) else { unreachable!() };
 
-                    if i.fract() > 0.0 {
-                        return Err(ErrType::RuntimeError { msg: format!("Cannot index arr with a non-integer number: {i}") })
-                    }
                     let i_usize = i as usize;
-                    if i < 0.0 || i_usize >= tup.len() {
+                    if i < 0 || i_usize >= tup.len() {
                         return Err(ErrType::RuntimeError { msg: format!("Index {i_usize} is out of bounds for arr of length {}.", tup.len()) });
                     }
 
@@ -257,7 +276,7 @@ impl<'a> VM<'a> {
 
 
                 // Strings
-                OpCode::StrAdd => run_op!(self, VmValue::Str(l), VmValue::Str(r) => VmValue::Str(l + &r)),
+                OpCode::StrAdd => infix_op!(self, VmValue::Str(l), VmValue::Str(r) => VmValue::Str(l + &r)),
                 OpCode::StrTemplate { length } => {
                     let cut_off_index = self.value_stack.len() - length;
                     let mut string = String::new();
@@ -415,7 +434,8 @@ impl<'a> VM<'a> {
 
     fn val_to_string(val: &VmValue) -> String {
         match val {
-            VmValue::Num(num) => num.to_string(),
+            VmValue::Int(num) => num.to_string(),
+            VmValue::Float(num) => num.to_string(),
             VmValue::Str(str) => str.clone(),
             VmValue::Bool(bool) => bool.to_string(),
 

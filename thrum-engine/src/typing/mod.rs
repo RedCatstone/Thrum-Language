@@ -1,9 +1,7 @@
 use std::{collections::{HashMap, HashSet}, fmt::{self, Write}};
 
 use crate::{
-    ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib,
-    parsing::ast::{AstArena, AstIds, ExprId, PatternId},
-    typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, VmValue}
+    ErrType, ProgramError, ProgramErrorData, lexing::tokens::Span, nativelib::get_native_lib, parsing::ast::{AstArena, AstIds, ExprId, PatternId}, typing::{check_expressions::CheckExprCtx, type_vars::{SnapshotVarsState, TypeVar, TypeVarScope}}, vm_compiling::{FunctionRegistry, NumMode, VmValue}
 };
 
 pub mod type_vars;
@@ -15,7 +13,8 @@ mod coercion;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Type {
-    Num,
+    NumInt,
+    NumFloat,
     Str,
     Bool,
 
@@ -74,13 +73,14 @@ impl TypeId {
     pub const NEVER: Self = Self(1);
     pub const VOID:  Self = Self(2);
     pub const TYPE:  Self = Self(3);
-    pub const NUM:   Self = Self(4);
-    pub const BOOL:  Self = Self(5);
-    pub const STR:   Self = Self(6);
+    pub const INT:   Self = Self(4);
+    pub const FLOAT: Self = Self(5);
+    pub const BOOL:  Self = Self(6);
+    pub const STR:   Self = Self(7);
 
-    pub const MAP_CONSTS: [(Self, Type); 7] = [
+    pub const MAP_CONSTS: [(Self, Type); 8] = [
         (Self::ERROR, Type::Error), (Self::NEVER, Type::Never), (Self::VOID, Type::Void), (Self::TYPE, Type::MetaType),
-        (Self::NUM, Type::Num), (Self::BOOL, Type::Bool), (Self::STR, Type::Str)
+        (Self::INT, Type::NumInt), (Self::FLOAT, Type::NumFloat), (Self::BOOL, Type::Bool), (Self::STR, Type::Str)
     ];
 }
 
@@ -133,6 +133,7 @@ pub struct TypedAst {
     pub resolved_impl_self_type: HashMap<ExprId, TypeId>,
     pub resolved_type_instantian: HashMap<ExprId, ResolvedTypeInstantiation>,
     pub resolved_type_destruction_not_a_tuple: HashSet<PatternId>,
+    pub resolved_num_mode: HashMap<ExprId, NumMode>,
 
     pub resolved_tuple_arr_length: HashMap<ExprId, usize>,
     pub resolved_tuple_type_coerce: HashMap<ExprId, Box<[String]>>,
@@ -487,7 +488,8 @@ impl TypeChecker<'_> {
 
     fn write_type(&self, id: TypeId, s: &mut String) -> fmt::Result {
         match self.type_arena.get_type(self.prune_id_once(id)) {
-            Type::Num => write!(s, "num"),
+            Type::NumInt => write!(s, "int"),
+            Type::NumFloat => write!(s, "float"),
             Type::Str => write!(s, "str"),
             Type::Bool => write!(s, "bool"),
             Type::Void => write!(s, "void"),
@@ -654,7 +656,7 @@ impl TypeChecker<'_> {
                 self.type_arena.add_type(Type::Fn { param_types, return_type })
             }
 
-            Type::Num | Type::Str | Type::Bool | Type::Void | Type::Never
+            Type::NumInt | Type::NumFloat | Type::Str | Type::Bool | Type::Void | Type::Never
             | Type::MetaType | Type::Error | Type::Enum(_)
             | Type::Infer(_) => typ,
         }

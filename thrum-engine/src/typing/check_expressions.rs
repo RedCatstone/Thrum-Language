@@ -1,8 +1,5 @@
 use crate::{
-    ErrType, lexing::tokens::{AssignOp, Span, TokenKind},
-    parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId},
-    typing::{CustomTypeId, EnumId, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode, check_patterns::CheckPatternVars, coercion::AutoDerefMode, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}},
-    vm_compiling::VmValue
+    ErrType, lexing::tokens::{AssignOp, Span, TokenKind}, parsing::ast::{AstClosure, AstEnumExpression, AstTupleElement, AstValue, Expr, ExprId, PatternId}, typing::{CustomTypeId, EnumId, ResolvedMemberAccess, ResolvedTypeInstantiation, Type, TypeChecker, TypeId, TypeTuple, TypeVarId, UnifyMode, check_patterns::CheckPatternVars, coercion::AutoDerefMode, exhaustiveness::PatternSpace, type_vars::{PatternOrVarId, TypeVarConstVal}}, vm_compiling::{NumMode, VmValue}
 };
 
 
@@ -29,12 +26,12 @@ pub struct CheckExprCtx {
     is_const: bool,
 }
 impl CheckExprCtx {
-    pub fn expect(self, typ: TypeId) -> Self {               Self { expected_type: Some(typ),      ..self } }
-    pub fn maybe_expect(self, typ: Option<TypeId>) -> Self { Self { expected_type: typ,            ..self } }
-    pub fn allow_is_bindings(self, maybe: bool) -> Self {    Self { allow_is_expr_bindings: maybe, ..self } }
-    pub fn auto_borrow_mut(self, maybe: bool) -> Self {      Self { auto_borrow_mut: maybe,        ..self } }
-    pub fn auto_deref(self, mode: AutoDerefMode) -> Self {   Self { deref_mode: mode,              ..self } }
-    pub fn is_const(self) -> Self {                          Self { is_const: true,                ..self } }
+    pub const fn expect(self, typ: TypeId) -> Self {               Self { expected_type: Some(typ),      ..self } }
+    pub const fn maybe_expect(self, typ: Option<TypeId>) -> Self { Self { expected_type: typ,            ..self } }
+    pub const fn allow_is_bindings(self, maybe: bool) -> Self {    Self { allow_is_expr_bindings: maybe, ..self } }
+    pub const fn auto_borrow_mut(self, maybe: bool) -> Self {      Self { auto_borrow_mut: maybe,        ..self } }
+    pub const fn auto_deref(self, mode: AutoDerefMode) -> Self {   Self { deref_mode: mode,              ..self } }
+    pub const fn is_const(self) -> Self {                          Self { is_const: true,                ..self } }
 }
 
 
@@ -92,11 +89,11 @@ impl TypeChecker<'_> {
 
             Expr::TupleArr { elem, length } => {
                 let elem_type = self.check_expression(*elem, is_never, ctx.auto_deref(AutoDerefMode::Once));
-                self.check_expression(*length, is_never, ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::NUM).is_const());
+                self.check_expression(*length, is_never, ctx.auto_deref(AutoDerefMode::Fully).expect(TypeId::INT).is_const());
 
                 match self.evaluate_expr(*length) {
-                    Some(VmValue::Num(num)) => {
-                        let const_length = num as usize;
+                    Some(VmValue::Int(num)) => {
+                        let const_length = num.try_into().unwrap();
                         self.typed_ast.resolved_tuple_arr_length.insert(check_expr, const_length);
                         self.type_arena.add_type(Type::TupArr(elem_type, const_length))
                     }
@@ -131,7 +128,7 @@ impl TypeChecker<'_> {
                         _ => self.error(ErrType::TyperCantIndexNonArrType { typ: self.fmt_type(inner) }, span)
                     };
 
-                    self.check_expression(*index, is_never, ctx.expect(TypeId::NUM));
+                    self.check_expression(*index, is_never, ctx.expect(TypeId::INT));
 
                     self.type_arena.add_type(Type::Borrow { inner: arr_inner_type, mutable, borrows_var })
                 }
@@ -193,8 +190,11 @@ impl TypeChecker<'_> {
 
             Expr::Prefix { op, right } => {
                 match op {
-                    TokenKind::Exclamation =>         self.check_expression(*right, is_never, ctx.expect(TypeId::BOOL)),
-                    TokenKind::Op(AssignOp::Minus) => self.check_expression(*right, is_never, ctx.expect(TypeId::NUM)),
+                    TokenKind::Exclamation => self.check_expression(*right, is_never, ctx.expect(TypeId::BOOL)),
+                    TokenKind::Op(AssignOp::Minus) => {
+                        let right_type = self.check_expression(*right, is_never, ctx.auto_deref(AutoDerefMode::Fully));
+                        self.check_prefix_minus(right_type, span, check_expr)
+                    }
                     _ => unreachable!("Unsupported prefix op: {op} (Parser Issue)")
                 }
             }
@@ -211,7 +211,7 @@ impl TypeChecker<'_> {
                 let right_type = self.check_expression(*right, right_is_never, infix_ctx);
                 if *right_is_never && !matches!(op, TokenKind::And | TokenKind::Or) { *is_never = true; }
 
-                self.check_infix(*op, *op_span, left_type, right_type)
+                self.check_infix(*op, *op_span, left_type, right_type, check_expr)
             }
 
             Expr::If { condition, then, alt } => {
@@ -319,7 +319,7 @@ impl TypeChecker<'_> {
                 );
 
                 if let Some(extra_op) = extra_op {
-                    let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, value_type, value_type);
+                    let infixed_typ = self.check_infix(TokenKind::Op(*extra_op), *op_span, value_type, value_type, check_expr);
                     self.unify_types(value_type, infixed_typ, *op_span, UnifyMode::Subtype);
                 }
                 TypeId::VOID
@@ -585,14 +585,15 @@ impl TypeChecker<'_> {
 
     fn check_literal(&mut self, val: &AstValue) -> TypeId {
         match val {
-            AstValue::Num(_) => self.type_arena.add_type(Type::Num),
+            AstValue::NumInt(_) => self.type_arena.add_type(Type::NumInt),
+            AstValue::NumFloat(_) => self.type_arena.add_type(Type::NumFloat),
             AstValue::Str(_) => self.type_arena.add_type(Type::Str),
             AstValue::Bool(_) => self.type_arena.add_type(Type::Bool),
         }
     }
 
 
-    fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId) -> TypeId {
+    fn check_infix(&mut self, op: TokenKind, op_span: Span, left: TypeId, right: TypeId, expr_id: ExprId) -> TypeId {
         // for now left and right have to be the same type, so just unify them.
         self.unify_types(left, right, op_span, UnifyMode::Subtype);
 
@@ -601,7 +602,7 @@ impl TypeChecker<'_> {
         if let Type::CustomType(_, id) = left_type {
             // if its a customType, try to unify the inner types for now
             // TODO: make better
-            let infixed_type = self.check_infix(op, op_span, id, id);
+            let infixed_type = self.check_infix(op, op_span, id, id, expr_id);
 
             // if its the same type as id, it returns the custom type again
             // e.g. `N{ 2 } * N{ 2 } == N{ 4 }`
@@ -619,9 +620,41 @@ impl TypeChecker<'_> {
             }
 
             TokenKind::Op(AssignOp::Plus | AssignOp::Minus | AssignOp::Star | AssignOp::Slash | AssignOp::Percent) => {
-                TypeId::NUM
+                let mode = match left_type {
+                    Type::NumFloat => NumMode::Float,
+                    Type::NumInt => NumMode::Int,
+                    Type::Error => return TypeId::ERROR,
+                    _ => return self.type_mismatch(TypeId::INT, left, op_span)
+                };
+                self.typed_ast.resolved_num_mode.insert(expr_id, mode);
+                left
             }
             _ => unreachable!("Unsupported infix operator: {:?}", op)
+        }
+    }
+
+
+    fn check_prefix_minus(&mut self, typ: TypeId, span: Span, expr_id: ExprId) -> TypeId {
+        let pruned = self.prune_type_once_infer_err(typ, span);
+        if let Type::CustomType(_, inner) = pruned {
+            let inner_res = self.check_prefix_minus(inner, span, expr_id);
+            return if self.are_types_equivalent(inner_res, inner) {
+                typ
+            } else {
+                inner_res
+            };
+        }
+        match pruned {
+            Type::NumFloat => {
+                self.typed_ast.resolved_num_mode.insert(expr_id, NumMode::Float);
+                typ
+            }
+            Type::NumInt => {
+                self.typed_ast.resolved_num_mode.insert(expr_id, NumMode::Int);
+                typ
+            }
+            Type::Error => TypeId::ERROR,
+            _ => self.type_mismatch(TypeId::INT, typ, span),
         }
     }
 

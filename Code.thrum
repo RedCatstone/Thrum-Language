@@ -1,5 +1,4 @@
 // run me by doing `cargo run Code.thrum`
 
-match 123
-is 12 => "a" is "a"
-is _ => false
+
+2.0 + 3.0

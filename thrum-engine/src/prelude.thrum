@@ -1,7 +1,7 @@
-type Option = enum { None, Some{ num } }
+type Option = enum { None, Some{ int } }
 
-type Range = (start: num, end: num);
-type RangeIter = (curr: num, end: num);
+type Range = (start: int, end: int);
+type RangeIter = (curr: int, end: int);
 
 impl Range {
     fn iter(self: Self) -> RangeIter {

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use derive_more::Display;
-use strum_macros::FromRepr;
 
 use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstArena, AstValue, Expr, ExprId, Pattern, PatternId}, pretty_printing::slice_to_string, typing::{ResolvedMemberAccess, ResolvedTypeInstantiation, TypeArena, TypeId, TypeVarId, TypedAst, type_vars::TypeVarConstVal}, vm_evaluating};
 
@@ -9,7 +8,9 @@ use crate::{ErrType, lexing::tokens::{AssignOp, TokenKind}, parsing::ast::{AstAr
 #[derive(Debug, Display, Clone, PartialEq, PartialOrd)]
 pub enum VmValue {
     #[display("{_0}")]
-    Num(f64),
+    Int(i64),
+    #[display("{_0:.1}")]
+    Float(f64),
     #[display("\"{_0}\"")]
     Str(String),
     #[display("{_0}")]
@@ -44,7 +45,8 @@ pub enum VmValue {
 impl From<AstValue> for VmValue {
     fn from(value: AstValue) -> Self {
         match value {
-            AstValue::Num(v) => Self::Num(v),
+            AstValue::NumInt(v) => Self::Int(v),
+            AstValue::NumFloat(v) => Self::Float(v),
             AstValue::Str(v) => Self::Str(v),
             AstValue::Bool(v) => Self::Bool(v),
         }
@@ -52,7 +54,7 @@ impl From<AstValue> for VmValue {
 }
 
 
-#[derive(Debug, FromRepr)]
+#[derive(Debug)]
 pub enum OpCode {
     // Data Access
     ConstGet { const_index: usize },
@@ -74,7 +76,9 @@ pub enum OpCode {
 
     // Math & Logic
     CmpEqual, CmpLess, CmpGreater,
-    NumAdd, NumSubtract, NumMultiply, NumDivide, NumModulo, NumNegate,
+    NumAdd { num_mode: NumMode }, NumSubtract { num_mode: NumMode },
+    NumMultiply { num_mode: NumMode }, NumDivide { num_mode: NumMode },
+    NumModulo { num_mode: NumMode }, NumNegate { num_mode: NumMode },
     BoolNegate,
 
     // Tuples
@@ -89,12 +93,12 @@ pub enum OpCode {
     StrAdd,
     StrTemplate { length: usize },
 
-    /// these pop: [TargetStr]
-    /// and push back: [RemainingStr, true] or [TargetStr, false]
+    /// these pop: [`TargetStr`]
+    /// and push back: [`RemainingStr`, true] or [`TargetStr`, false]
     StrTrimPrefix { const_str: usize },
     StrTrimSuffix { const_str: usize },
 
-    /// and push back: [RemainingStr, ExtractedHoleStr, true] or [TargetStr, TargetStr, false]
+    /// and push back: [`RemainingStr`, `ExtractedHoleStr`, true] or [`TargetStr`, `TargetStr`, false]
     StrTrimUntil { const_str: usize },
 
     // Control Flow
@@ -113,6 +117,11 @@ pub enum OpCode {
 
     // no-op
     NoOp
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumMode {
+    Int, Float
 }
 
 /// ### There are 2 Purposes for counting temps while generating `ByteCode`:
@@ -137,14 +146,15 @@ impl OpCode {
 
             Self::PointerGetClone | Self::PointerGetMove
             | Self::TupPointerGet { .. } | Self::TupGet { .. } | Self::TupArrCreate { length: _ }
-            | Self::NumNegate | Self::BoolNegate
+            | Self::NumNegate { num_mode: _ } | Self::BoolNegate
             | Self::MakeTypeRef { .. }
             | Self::Return | Self::Panic
             | Self::TypeTupToTupType { labels: _ } => OpCodeRuntimeTempDiff { requires: 1, diff: 0 },
 
             Self::CmpEqual | Self::CmpLess | Self::CmpGreater
             | Self::TupPointerIndex
-            | Self::NumAdd | Self::NumSubtract | Self::NumMultiply | Self::NumDivide | Self::NumModulo
+            | Self::NumAdd { num_mode: _ } | Self::NumSubtract { num_mode: _ }
+            | Self::NumMultiply { num_mode: _ } | Self::NumDivide { num_mode: _ } | Self::NumModulo { num_mode: _ }
             | Self::StrAdd => OpCodeRuntimeTempDiff { requires: 2, diff: -1 },
 
             Self::StrTemplate { length }
@@ -349,11 +359,10 @@ impl VmCompiler<'_> {
 
             Expr::Infix { op, op_span: _, left, right } => {
                 self.compile_expression(*left);
-                self.compile_infix(*op, *right);
+                self.compile_infix(*op, *right, compile_expr);
             }
             Expr::Prefix { op, right } => {
-                self.compile_expression(*right);
-                self.compile_prefix(*op);
+                self.compile_prefix(*op, *right, compile_expr);
             }
 
             Expr::Block { exprs, label } => {
@@ -410,7 +419,7 @@ impl VmCompiler<'_> {
                         }
                         _ => unreachable!("Infix assignments are only allowed for place patterns.")
                     }
-                    self.compile_infix(TokenKind::Op(*extra_op), *value);
+                    self.compile_infix(TokenKind::Op(*extra_op), *value, compile_expr);
                 } else {
                     // push value to the stack
                     self.compile_expression(*value);
@@ -933,7 +942,7 @@ impl VmCompiler<'_> {
                 self.push_op(OpCode::TupUnpack { length: 2 });
 
                 // compare the enum tags
-                self.push_get_constant_op(VmValue::Num(i as f64));
+                self.push_get_constant_op(VmValue::Int(i.try_into().unwrap()));
                 self.push_op(OpCode::CmpEqual);
                 failure_jumps.push(FailureJump {
                     jump_loc: self.push_jump_if_false_op_for_patching(),
@@ -1047,7 +1056,7 @@ impl VmCompiler<'_> {
 
 
 
-    fn compile_infix(&mut self, operator: TokenKind, right: ExprId) {
+    fn compile_infix(&mut self, operator: TokenKind, right: ExprId, expr_id: ExprId) {
         if TokenKind::EqualEqual == operator {
             // this works regardless of any type
             self.compile_expression(right);
@@ -1092,12 +1101,15 @@ impl VmCompiler<'_> {
 
         // for normal operators just compile right
         self.compile_expression(right);
+
+        let num_mode = *self.typed_ast.resolved_num_mode.get(&expr_id).unwrap_or(&NumMode::Int);
+
         match operator {
-            TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd),
-            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract),
-            TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply),
-            TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide),
-            TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo),
+            TokenKind::Op(AssignOp::Plus) => self.push_op(OpCode::NumAdd { num_mode }),
+            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumSubtract { num_mode }),
+            TokenKind::Op(AssignOp::Star) => self.push_op(OpCode::NumMultiply { num_mode }),
+            TokenKind::Op(AssignOp::Slash) => self.push_op(OpCode::NumDivide { num_mode }),
+            TokenKind::Op(AssignOp::Percent) => self.push_op(OpCode::NumModulo { num_mode }),
             TokenKind::Less => self.push_op(OpCode::CmpLess),
             TokenKind::Greater => self.push_op(OpCode::CmpGreater),
 
@@ -1105,10 +1117,15 @@ impl VmCompiler<'_> {
         }
     }
 
-    fn compile_prefix(&mut self, operator: TokenKind) {
+    fn compile_prefix(&mut self, operator: TokenKind, right: ExprId, expr_id: ExprId) {
+        self.compile_expression(right);
+
         match operator {
             TokenKind::Exclamation => self.push_op(OpCode::BoolNegate),
-            TokenKind::Op(AssignOp::Minus) => self.push_op(OpCode::NumNegate),
+            TokenKind::Op(AssignOp::Minus) => {
+                let num_mode = *self.typed_ast.resolved_num_mode.get(&expr_id).unwrap_or(&NumMode::Int);
+                self.push_op(OpCode::NumNegate { num_mode });
+            }
             _ => unreachable!("unsupported prefix operator...")
         }
     }
@@ -1120,7 +1137,7 @@ impl VmCompiler<'_> {
         } else {
             self.push_op(OpCode::PushVoid);
         }
-        self.push_get_constant_op(VmValue::Num(i as f64));
+        self.push_get_constant_op(VmValue::Int(i.try_into().unwrap()));
         self.push_op(OpCode::TupCreate { length: 2 });
     }
 }

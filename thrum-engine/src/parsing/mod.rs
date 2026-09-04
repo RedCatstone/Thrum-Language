@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
     fn expect_identifier_relaxed(&mut self, err_msg: &str) -> String {
         // can be a normal identifier, keyword or number
         let peek = self.peek().clone();
-        if peek.token == TokenKind::Number || TokenKind::KEYWORDS.iter().any(|(_, k)| *k == peek.token) {
+        if peek.token == TokenKind::NumInt || TokenKind::KEYWORDS.iter().any(|(_, k)| *k == peek.token) {
             self.next();
             self.get_from_source(peek.span).to_string()
         } else {
@@ -216,7 +216,7 @@ impl<'a> Parser<'a> {
         // should match self.parse_prefix()
         matches!(self.peek().token,
             TokenKind::Exclamation | TokenKind::Op(AssignOp::Minus | AssignOp::Star) | TokenKind::Identifier
-            | TokenKind::Mut | TokenKind::Number | TokenKind::Bool(_)
+            | TokenKind::Mut | TokenKind::NumInt | TokenKind::NumFloat | TokenKind::Bool(_)
             | TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::StringStart | TokenKind::Let | TokenKind::Const | TokenKind::Type
             | TokenKind::If | TokenKind::Ensure | TokenKind::While | TokenKind::For | TokenKind::Loop | TokenKind::Match | TokenKind::Enum
             | TokenKind::Impl | TokenKind::ImplSelf | TokenKind::Colon | TokenKind::Fn | TokenKind::Pipe

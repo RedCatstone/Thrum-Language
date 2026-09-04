@@ -3,17 +3,37 @@ mod common;
 
 
 
-#[test]
-fn math() {
-    test!("1+2 * 3", VmValue::Num(7.0));
-    test!("(1 + 2)*3", VmValue::Num(9.0));
-    test!("1 + 2 * 3 +9/ 3", VmValue::Num(10.0));
-    test!("6--21 * 3", VmValue::Num(69.0));
-    test!("3 % 2", VmValue::Num(1.0));
+#[test] fn math() {
+    test!("1+2 * 3", VmValue::Int(7));
+    test!("(1 + 2)*3", VmValue::Int(9));
+    test!("1 + 2 * 3 +9/ 3", VmValue::Int(10));
+    test!("6--21 * 3", VmValue::Int(69));
+    test!("5 % 2", VmValue::Int(1));
 }
 
-#[test]
-fn assignments() {
+#[test] fn float_math() {
+    test!("1.5 + 2.5 * 2.0", VmValue::Float(6.5));
+    test!("(10.0 - 2.5) / 2.5", VmValue::Float(3.0));
+    test!("5.5 % 2.0", VmValue::Float(1.5));
+    test!("-3.5 + 1.0", VmValue::Float(-2.5));
+    test!("------4.5", VmValue::Float(4.5));
+}
+
+#[test] fn int_comparisons() {
+    test!("1 < 2", VmValue::Bool(true));
+    test!("6 != 9", VmValue::Bool(true));
+}
+#[test] fn string_comparisons() {
+    test!("\"a\" < \"b\"", VmValue::Bool(true));
+}
+#[test] fn float_comparisons() {
+    test!("1.5 < 2.5", VmValue::Bool(true));
+    test!("3.5 > 5.5", VmValue::Bool(false));
+    test!("2.25 == 2.25", VmValue::Bool(true));
+    test!("2.25 != 2.5", VmValue::Bool(true));
+}
+
+#[test] fn assignments() {
     test!("
         let mut x = 10
         x += 5   // 15
@@ -22,32 +42,31 @@ fn assignments() {
         x /= 3   // 8
         x %= 5   // 3
         x^
-    ", VmValue::Num(3.0));
+    ", VmValue::Int(3));
 
     test!("
         let mut a = 1
         let mut b = 2
         (a, b) = (b, a)
         a * 10 + b
-    ", VmValue::Num(21.0));
+    ", VmValue::Int(21));
 
     test!("
         let mut a = 1
         (_, a) = (a, 5*a)
         a^
-    ", VmValue::Num(5.0));
+    ", VmValue::Int(5));
 }
 
 
-#[test]
-fn scoping() {
-    test!("let x = 50; x^", VmValue::Num(50.0));
+#[test] fn scoping() {
+    test!("let x = 50; x^", VmValue::Int(50));
 
     test!("
         let x = 12
         let res = { let x = 33; x + 5 }
         res + x
-    ", VmValue::Num(50.0));
+    ", VmValue::Int(50));
 
     test!("
         let x = 1
@@ -60,21 +79,20 @@ fn scoping() {
             + x * 100
         }
         res + x
-    ", VmValue::Num(231.0)); // 200 + 30 + 1
+    ", VmValue::Int(231)); // 200 + 30 + 1
 
     test!("
         { #bloc
             break #bloc 50
             1
         }
-    ", VmValue::Num(50.0));
+    ", VmValue::Int(50));
 
     test!("{ #label }", VmValue::Void);
     test!("{}", VmValue::Void);
 }
 
-#[test]
-fn comments() {
+#[test] fn comments() {
     test!("
         15 /* this is a comment
         + 4
@@ -82,18 +100,17 @@ fn comments() {
         + /* weee * / */ 2
         // + 16
         + 3
-    ", VmValue::Num(20.0));
+    ", VmValue::Int(20));
 }
 
-#[test]
-fn loop_shenanigance() {
+#[test] fn loop_shenanigance() {
     test!("
         let mut i = 0
         while i < 5 {
             i += 1
         }
         i^
-    ", VmValue::Num(5.0));
+    ", VmValue::Int(5));
 
     test!("
         let mut sum = 0
@@ -105,7 +122,7 @@ fn loop_shenanigance() {
             sum += i
         }
         sum^  // 1 + 2 + 4 + 5 = 12
-    ", VmValue::Num(12.0));
+    ", VmValue::Int(12));
 
     test!("
         let mut res = 1
@@ -119,14 +136,13 @@ fn loop_shenanigance() {
             }
             break -1
         }
-    ", VmValue::Num(69.0));
+    ", VmValue::Int(69));
 
     test!("loop { break #loop }", VmValue::Void);
 }
 
-#[test]
-fn diabolical_loops() {
-    test!("1 + loop { 1 + break 1 }", VmValue::Num(2.0));
+#[test] fn diabolical_loops() {
+    test!("1 + loop { 1 + break 1 }", VmValue::Int(2));
 
     test!("
         let mut i = 1
@@ -138,28 +154,26 @@ fn diabolical_loops() {
             }
             (1, 1, 1, break 1)
         }
-    ", VmValue::Num(2.0));
+    ", VmValue::Int(2));
 }
 
-#[test]
-fn for_loop() {
+#[test] fn for_loop() {
     test!("
         let mut sum = 0;
         for x in 0..10 {
             sum += x
         }
         sum^
-    ", VmValue::Num(45.0));
+    ", VmValue::Int(45));
 }
 
 
-#[test]
-fn tup_destructuring() {
+#[test] fn tup_destructuring() {
     test!("
         let tup = ((1, 2), 2, (3, 4, 5))
         let (_, _, (_, x, _)) = tup^
         x^
-    ", VmValue::Num(4.0));
+    ", VmValue::Int(4));
 
     test!(r#"
         let status = "ok"
@@ -169,39 +183,37 @@ fn tup_destructuring() {
             id^
         }
         else { -1 }
-    "#, VmValue::Num(42.0));
+    "#, VmValue::Int(42));
 
     test!("
         let (x, true | false) = (3, true);
         x^
-    ", VmValue::Num(3.0));
+    ", VmValue::Int(3));
 }
 
-#[test]
-fn tup_arrays() {
+#[test] fn tup_arrays() {
     test!("
         let x = (1, 2, 3)
         x.0 + x.1 * x[2]
-    ", VmValue::Num(7.0));
+    ", VmValue::Int(7));
 
     test!("
         let mut x = (9; 30)
         x.2 %= 5
         x[2] %= 3
         x[2]^
-    ", VmValue::Num(1.0));
+    ", VmValue::Int(1));
 
-    test!("const LENGTH = 10; (0; LENGTH)", VmValue::Tup(vec![VmValue::Num(0.0); 10]));
+    test!("const LENGTH = 10; (0; LENGTH)", VmValue::Tup(vec![VmValue::Int(0); 10]));
 
     test!("
         let mut grid = ((1, 2), (3, 4))
         grid[1][0] = 99
         grid[0][1] + grid[1][0]
-    ", VmValue::Num(101.0)); // 2 + 99
+    ", VmValue::Int(101)); // 2 + 99
 }
 
-#[test]
-fn some_strings() {
+#[test] fn some_strings() {
     test!(r#"
         let s = "klaus"
         let arr = (s, "x")
@@ -214,8 +226,14 @@ fn some_strings() {
     "#, VmValue::Str("hello world!".to_string()));
 }
 
-#[test]
-fn delayed_let() {
+#[test] fn string_templates() {
+    test!(
+        "\"hello {3-2}, {!true} and {69.08 / 22.0}, even works {\"nested\"}!\"",
+        VmValue::Str("hello 1, false and 3.14, even works nested!".to_string())
+    );
+}
+
+#[test] fn delayed_let() {
     test!("
         { #bloc
             let x
@@ -223,16 +241,15 @@ fn delayed_let() {
             else break #bloc -1
             x^
         }
-    ", VmValue::Num(5.0));
+    ", VmValue::Int(5));
 
-    test!("let a;         (a, let b) = (1, 2); a + b", VmValue::Num(3.0));
-    test!("let mut a = 5; (a, let b) = (1, 2); a + b", VmValue::Num(3.0));
+    test!("let a;         (a, let b) = (1, 2); a + b", VmValue::Int(3));
+    test!("let mut a = 5; (a, let b) = (1, 2); a + b", VmValue::Int(3));
 }
 
 
 
-#[test]
-fn short_circuiting() {
+#[test] fn short_circuiting() {
     test!(r#"
         true or panic("OR short-circuit failed...")
     "#, VmValue::Bool(true));
@@ -252,8 +269,7 @@ fn short_circuiting() {
 }
 
 
-#[test]
-fn pattern_matching() {
+#[test] fn pattern_matching() {
     test!("7 is 7", VmValue::Bool(true));
     test!("7 is 0", VmValue::Bool(false));
     test!("7 is !0", VmValue::Bool(true));
@@ -269,8 +285,7 @@ fn pattern_matching() {
     test!(r#"5 is !(4 | 6) or panic("pattern should've failed...")"#, VmValue::Bool(true));
 }
 
-#[test]
-fn string_patterns() {
+#[test] fn string_patterns() {
     test!(r#"
         if "hello cat from Earth!" is let "hello {name} from {location}!" => (name, location)
         else panic("")
@@ -289,8 +304,7 @@ fn string_patterns() {
     test!(r#" "" is "{""}" "#, VmValue::Bool(true));
 }
 
-#[test]
-fn match_exprs() {
+#[test] fn match_exprs() {
     test!(r#"
         match (69, "yay!")
         is (69, "") => "nope1"
@@ -300,12 +314,11 @@ fn match_exprs() {
         is _ => "nope4"
     "#, VmValue::Str("yay!".to_string()));
 
-    test!("match false is true => 0, is _ => -3", VmValue::Num(-3.0));
+    test!("match false is true => 0, is _ => -3", VmValue::Int(-3));
 }
-#[test]
-fn enum_match_expr() {
+#[test] fn enum_match_expr() {
     test!("
-        const Opt = enum { None, Some{ num } }
+        const Opt = enum { None, Some{ int } }
 
         let val: Opt = :Some{ 42 }
 
@@ -314,7 +327,7 @@ fn enum_match_expr() {
         is :Some{ 0 | 1 | 2 } => 0
         is :Some{ !42 } => 1
         is :Some{ let x } => x^
-    ", VmValue::Num(42.0));
+    ", VmValue::Int(42));
 }
 
 // #[test]
@@ -325,36 +338,34 @@ fn enum_match_expr() {
 
 
 
-#[test]
-fn recursion() {
+#[test] fn recursion() {
     test!("
-        fn fib(n: num) -> num {
+        fn fib(n: int) -> int {
             if n < 2 { return n }
             return fib(n-1) + fib(n-2)
         }
         fib(8)
-    ", VmValue::Num(21.0));
+    ", VmValue::Int(21));
 }
 
 
 
-#[test]
-fn functions() {
+#[test] fn functions() {
     test!("
-        fn fun() -> num => 4
+        fn fun() -> int => 4
         fun()
-    ", VmValue::Num(4.0));
+    ", VmValue::Int(4));
 
     test!("
-        fn fun(x: num, y: num) -> num {
+        fn fun(x: int, y: int) -> int {
             x * y + x
         }
         fun(2, 4)
-    ", VmValue::Num(10.0));
+    ", VmValue::Int(10));
 
 
     test!(r#"
-        fn test(tup: (num, num), expected_bool: bool) {
+        fn test(tup: (int, int), expected_bool: bool) {
             let maybe = { tup^ is let (x, 0) and x > 10 }
             if maybe^ is !expected_bool^ {
                 panic("nope.")
@@ -368,22 +379,21 @@ fn functions() {
 }
 
 
-#[test]
-fn impls() {
-    test!("type Number = num; Number{ 320 }", VmValue::Num(320.0));
+#[test] fn impls() {
+    test!("type Number = int; Number{ 320 }", VmValue::Int(320));
 
     test!("
-        type N = num
+        type N = int
         impl N {
             fn get() -> N => N{ 5 }
         }
         fn get() -> N => N{ 3 }
 
         (N.get(), get())
-    ", VmValue::Tup(vec![VmValue::Num(5.0), VmValue::Num(3.0)]));
+    ", VmValue::Tup(vec![VmValue::Int(5), VmValue::Int(3)]));
 
     test!("
-        type N = num
+        type N = int
         impl N {
             fn square(self: Self) -> Self {
                 self * self
@@ -394,28 +404,26 @@ fn impls() {
         }
 
         N{ 2 }.triangle().square().triangle().square()
-    ", VmValue::Num(2025.0));
+    ", VmValue::Int(2025));
 }
 
-#[test]
-fn single_tuple_type_instantiation() {
-    test!("type X = num;         X{ 2 }", VmValue::Num(2.0));
-    test!("type X = (num,);      X{ 2 }", VmValue::Tup(vec![VmValue::Num(2.0)]));
-    test!("type X = (num, bool); X{ 2, true }", VmValue::Tup(vec![VmValue::Num(2.0), VmValue::Bool(true)]));
+#[test] fn single_tuple_type_instantiation() {
+    test!("type X = int;         -X{ 2 }", VmValue::Int(-2));
+    test!("type X = float;       -X{ 2.0 }", VmValue::Float(-2.0));
+    test!("type X = (int,);      X{ 2 }", VmValue::Tup(vec![VmValue::Int(2)]));
+    test!("type X = (int, bool); X{ 2, true }", VmValue::Tup(vec![VmValue::Int(2), VmValue::Bool(true)]));
     test!("type X = ();          X{ }", VmValue::Tup(vec![]));
 }
 
-#[test]
-fn single_tuple_type_destruction() {
-    test!("type X = num;              let X{ a } = X{ 2 };                 a^",     VmValue::Num(2.0));
-    test!("type X = (num,);           let X{ a } = X{ 2 };                 a^",     VmValue::Num(2.0));
-    test!("type X = (num, num);       let X{ a, b } = X{ 3, 4 };           a * b", VmValue::Num(12.0));
-    test!("type X = (x: num, y: num); let X{ x: a, y: } = X{ x: 3, y: 4 }; a * y", VmValue::Num(12.0));
+#[test] fn single_tuple_type_destruction() {
+    test!("type X = int;              let X{ a } = X{ 2 };                 a^",     VmValue::Int(2));
+    test!("type X = (int,);           let X{ a } = X{ 2 };                 a^",     VmValue::Int(2));
+    test!("type X = (int, int);       let X{ a, b } = X{ 3, 4 };           a * b", VmValue::Int(12));
+    test!("type X = (x: int, y: int); let X{ x: a, y: } = X{ x: 3, y: 4 }; a * y", VmValue::Int(12));
     test!("type X = ();               let X{ } = X{ }",                            VmValue::Void);
 }
 
-#[test]
-fn tuple_type_coercion() {
+#[test] fn tuple_type_coercion() {
     test!("const typ = (bool, bool);  let x: typ = (true, false);  x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(false)]));
     test!("const typ = (bool; 2);     let x: typ = (true, false);  x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(false)]));
     test!("const typ = (bool, bool);  let x: typ = (true; 2);      x^", VmValue::Tup(vec![VmValue::Bool(true), VmValue::Bool(true)]));
@@ -424,14 +432,12 @@ fn tuple_type_coercion() {
     test!("type X = (bool; 5);  X{ true; 5 }.3", VmValue::Bool(true));
 }
 
-#[test]
-fn consts() {
-    test!("const (x, _) = (5, 3); x^", VmValue::Num(5.0));
-    test!("const X = 2 * Y; const Z = 20; const Y = 3 * Z; X^", VmValue::Num(120.0));
+#[test] fn consts() {
+    test!("const (x, _) = (5, 3); x^", VmValue::Int(5));
+    test!("const X = 2 * Y; const Z = 20; const Y = 3 * Z; X^", VmValue::Int(120));
 }
 
-#[test]
-fn enums() {
+#[test] fn enums() {
     test!("
         const Dir = enum { Up, Down{ bool, bool } }
 
@@ -447,38 +453,36 @@ fn enums() {
     ", VmValue::Bool(true));
 
     test!("
-        const Res = enum { Err, Ok{ (num, bool) } }
+        const Res = enum { Err, Ok{ (int, bool) } }
         let r: Res = :Ok{ (100, true) }
 
         r^ is :Ok{ (100, !false) }
     ", VmValue::Bool(true));
 }
 
-#[test]
-fn enum_refinement() {
+#[test] fn enum_refinement() {
     test!("
-        fn handle_some(some: Option.Some) -> num {
+        fn handle_some(some: Option.Some) -> int {
             let :Some{ inner } = some^
             inner
         }
 
         let x: Option.Some = :Some{ 1 }
         handle_some(x^) + handle_some(:Some{ 2 })
-    ", VmValue::Num(3.0));
+    ", VmValue::Int(3));
 
     test!("
         let :Some{ inner } = Option.Some{ 3 }
         inner^
-    ", VmValue::Num(3.0));
+    ", VmValue::Int(3));
 }
 
 
-#[test]
-fn point_impl_test() {
+#[test] fn point_impl_test() {
     test!("
-        type Point = (x: num, y: num)
+        type Point = (x: int, y: int)
         impl Point {
-            fn squared_distance(self: &Self) -> num {
+            fn squared_distance(self: &Self) -> int {
                 self.x * self.x + self.y * self.y
             }
         }
@@ -486,11 +490,10 @@ fn point_impl_test() {
         let mut p = Point{ x: 3, y: 2 }
         p.y = 4
         p.squared_distance()
-    ", VmValue::Num(25.0));
+    ", VmValue::Int(25));
 }
 
-#[test]
-fn enum_impl_test() {
+#[test] fn enum_impl_test() {
     test!("
         impl Option {
             fn is_some(self: Self) -> bool {
@@ -511,10 +514,9 @@ fn enum_impl_test() {
 }
 
 
-#[test]
-fn random_examples() {
+#[test] fn random_examples() {
     test!("
-        fn sum_to(max: num) -> num {
+        fn sum_to(max: int) -> int {
             let mut sum = 0
             let mut i = 0
             while i < max {
@@ -524,12 +526,11 @@ fn random_examples() {
             sum
         }
         sum_to(100)
-    ", VmValue::Num(5050.0));
+    ", VmValue::Int(5050));
 }
 
 
-#[test]
-fn new_line_iss() {
+#[test] fn new_line_iss() {
     test!("3 \n is 3", VmValue::Bool(true));
     test!("if 3 \n is 3 => true else false", VmValue::Bool(true));
 
